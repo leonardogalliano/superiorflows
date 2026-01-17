@@ -90,33 +90,15 @@ class Flow(eqx.Module):
 
         y0, ctx = eqx.partition(x0, self.dynamic_mask)
 
-        def _dynamics(t, y, args):
-            x = eqx.combine(y, ctx)
-            v = self.velocity_field(t, x, args)
-            dy, _ = eqx.partition(v, self.dynamic_mask)
-            return dy
+        user_args = solver_args.get("args")
+        if user_args is not None:
+            solver_args["args"] = (ctx, user_args)
+        else:
+            solver_args["args"] = ctx
 
-        term = dfx.ODETerm(_dynamics)
+        term = dfx.ODETerm(self.velocity_field)
         sol = dfx.diffeqsolve(term, y0=y0, **solver_args)
         return eqx.tree_at(lambda s: s.ys, sol, self._merge_solution(sol.ys, ctx))
-
-    # @eqx.filter_jit
-    # def integrate(self, x0, **kwargs):
-    #     solver_args = dict(
-    #         solver=self.solver,
-    #         t0=self.t0,
-    #         t1=self.t1,
-    #         dt0=self.dt0,
-    #         stepsize_controller=self.stepsize_controller,
-    #         **self.extra_args,
-    #     )
-    #     solver_args.update(kwargs)
-    #     if solver_args["dt0"] is not None:
-    #         solver_args["dt0"] = jnp.sign(solver_args["t1"] - solver_args["t0"]) * abs(solver_args["dt0"])
-
-    #     term = dfx.ODETerm(self.velocity_field)
-    #     sol = dfx.diffeqsolve(term, y0=x0, **solver_args)
-    #     return sol
 
     @eqx.filter_jit
     def apply_map(self, x0, **kwargs):
@@ -152,42 +134,17 @@ class Flow(eqx.Module):
         y0, ctx = eqx.partition(x0, self.dynamic_mask)
         u0 = {"x": y0, "logq": logq0}
 
-        def vector_field_wrapper(t, y_dynamic, args):
-            full_system = eqx.combine(y_dynamic, ctx)
-            full_velocity = self.velocity_field(t, full_system, args)
-            dy, _ = eqx.partition(full_velocity, self.dynamic_mask)
-            return dy
+        user_args = solver_args.get("args")
+        if user_args is not None:
+            solver_args["args"] = (ctx, user_args)
+        else:
+            solver_args["args"] = ctx
 
-        term_func = jax.tree_util.Partial(_augmented_dynamics, velocity_field=vector_field_wrapper)
+        term_func = jax.tree_util.Partial(_augmented_dynamics, velocity_field=self.velocity_field)
 
         term = dfx.ODETerm(term_func)
         sol = dfx.diffeqsolve(term, y0=u0, **solver_args)
         return eqx.tree_at(lambda s: s.ys["x"], sol, self._merge_solution(sol.ys["x"], ctx))
-
-    # @eqx.filter_jit
-    # def integrate_augmented_ode(self, x0, logq0=None, **kwargs):
-    #     solver_args = dict(
-    #         solver=self.augmented_solver,
-    #         t0=self.t0,
-    #         t1=self.t1,
-    #         dt0=self.dt0,
-    #         stepsize_controller=self.augmented_stepsize_controller,
-    #         **self.augmented_extra_args,
-    #     )
-    #     solver_args.update(kwargs)
-    #     if solver_args["dt0"] is not None:
-    #         solver_args["dt0"] = jnp.sign(solver_args["t1"] - solver_args["t0"]) * abs(solver_args["dt0"])
-
-    #     if logq0 is None:
-    #         logq0 = self.base_distribution.log_prob(x0)
-
-    #     y0 = {"x": x0, "logq": logq0}
-
-    #     term_func = jax.tree_util.Partial(_augmented_dynamics, velocity_field=self.velocity_field)
-    #     term = dfx.ODETerm(term_func)
-
-    #     sol = dfx.diffeqsolve(term, y0=y0, **solver_args)
-    #     return sol
 
     @eqx.filter_jit
     def apply_map_and_log_prob(self, x0, **kwargs):

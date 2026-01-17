@@ -27,14 +27,15 @@ class System(eqx.Module):
 class ParticlesVelocityField(eqx.Module):
     params: jax.Array
 
-    def __call__(self, t, system: System, args=None):
-        vr = -t * system.positions @ self.params.T
-        vs = jnp.zeros_like(system.species)
+    def __call__(self, t, state: System, args):
+        # ctx = args
+        vr = -t * state.positions @ self.params.T
+        vs = jnp.zeros_like(state.species)
         return System(
             positions=vr,
             species=vs,
-            box=jnp.zeros_like(system.box),
-            temperature=system.temperature,
+            box=None,
+            temperature=state.temperature,
         )
 
 
@@ -136,17 +137,24 @@ def test_particles_velocity_field(uniform_box_distribution_setup, particles_velo
     key = jax.random.PRNGKey(0)
     key, subkey = jax.random.split(key)
     x = uniform_box_distribution_setup.sample(seed=subkey)
-    v = velocity_field(t, x, None)
+
+    dynamic_mask = eqx.tree_at(lambda x: (x.positions, x.species, x.box), x, replace=(True, True, False))
+    y, ctx = eqx.partition(x, dynamic_mask)
+
+    v = velocity_field(t, y, ctx)
     assert v.positions.shape == x.positions.shape
     assert v.species.shape == x.species.shape
-    assert v.box.shape == x.box.shape
+    assert v.box is None
     M = 10
     key, subkey = jax.random.split(key)
     X = uniform_box_distribution_setup.sample(seed=subkey, sample_shape=(M,))
-    V = jax.vmap(velocity_field, in_axes=(None, 0, None))(t, X, None)
+
+    Y, Ctx = eqx.partition(X, eqx.tree_at(lambda x: (x.positions, x.species, x.box), X, replace=(True, True, False)))
+
+    V = jax.vmap(velocity_field, in_axes=(None, 0, 0))(t, Y, Ctx)
     assert V.positions.shape == X.positions.shape
     assert V.species.shape == X.species.shape
-    assert V.box.shape == X.box.shape
+    assert V.box is None
 
 
 @pytest.fixture
@@ -155,14 +163,14 @@ def particles_flow_setup(uniform_box_distribution_setup, particles_velocity_fiel
     velocity_field = particles_velocity_field_setup
     key = jax.random.PRNGKey(0)
     key, subkey = jax.random.split(key)
-    filter = eqx.tree_at(
+    dynamic_mask = eqx.tree_at(
         lambda x: (x.positions, x.species, x.box), dist.sample(seed=subkey), replace=(True, True, False)
     )
     flow = Flow(
         velocity_field=velocity_field,
         base_distribution=dist,
         stepsize_controller=dfx.PIDController(rtol=1e-7, atol=1e-7),
-        dynamic_mask=filter,
+        dynamic_mask=dynamic_mask,
     )
     return flow
 
