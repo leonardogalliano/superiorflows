@@ -47,21 +47,35 @@ def main():
 
     plt.figure(figsize=(12, 8))
 
+    all_dates = set()
+    for values in data.values():
+        all_dates.update(values["dates"])
+
+    sorted_unique_dates = sorted(list(all_dates))
+    date_to_index = {d: i for i, d in enumerate(sorted_unique_dates)}
+
     for name, values in data.items():
         sorted_pairs = sorted(zip(values["dates"], values["means"], values["stddevs"]))
-        dates = [p[0] for p in sorted_pairs]
+
+        x_indices = [date_to_index[p[0]] for p in sorted_pairs]
         means = [p[1] for p in sorted_pairs]
         stddevs = [p[2] for p in sorted_pairs]
 
-        plt.errorbar(dates, means, yerr=stddevs, marker="o", label=name, capsize=3)
+        plt.errorbar(x_indices, means, yerr=stddevs, marker="o", label=name, capsize=3)
 
     plt.title("Benchmark Performance Over Time")
-    plt.xlabel("Date")
+    plt.xlabel("Benchmark Run Index")
     plt.ylabel("Execution Time (s)")
     plt.yscale("log")
     plt.legend()
     plt.grid(True, which="both", ls="-")
-    plt.xticks(rotation=45)
+
+    plt.xticks(
+        range(len(sorted_unique_dates)),
+        [d.strftime("%Y-%m-%d %H:%M") for d in sorted_unique_dates],
+        rotation=45,
+        ha="right",
+    )
     plt.tight_layout()
 
     output_file = os.path.join(benchmarks_dir, "benchmark_plot.png")
