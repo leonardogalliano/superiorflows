@@ -1,0 +1,253 @@
+{
+    "machine_info": {
+        "node": "Vision",
+        "processor": "arm",
+        "machine": "arm64",
+        "python_compiler": "Clang 20.1.4 ",
+        "python_implementation": "CPython",
+        "python_implementation_version": "3.12.12",
+        "python_version": "3.12.12",
+        "python_build": [
+            "main",
+            "Oct 28 2025 11:52:25"
+        ],
+        "release": "25.2.0",
+        "system": "Darwin",
+        "cpu": {
+            "python_version": "3.12.12.final.0 (64 bit)",
+            "cpuinfo_version": [
+                9,
+                0,
+                0
+            ],
+            "cpuinfo_version_string": "9.0.0",
+            "arch": "ARM_8",
+            "bits": 64,
+            "count": 12,
+            "arch_string_raw": "arm64",
+            "brand_raw": "Apple M2 Max"
+        }
+    },
+    "commit_info": {
+        "id": "860fdad5de44e76476eb5444546ab537eb973227",
+        "time": "2026-01-17T17:32:05+01:00",
+        "author_time": "2026-01-17T17:32:05+01:00",
+        "dirty": true,
+        "project": "superiorflows",
+        "branch": "main"
+    },
+    "benchmarks": [
+        {
+            "group": null,
+            "name": "test_flow_performance",
+            "fullname": "tests/test_flow.py::test_flow_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 8.845800766721368e-05,
+                "max": 0.00017258303705602884,
+                "mean": 9.192331989448684e-05,
+                "stddev": 3.85939279018627e-06,
+                "rounds": 1675,
+                "median": 9.08750225789845e-05,
+                "iqr": 1.7394631868228316e-06,
+                "q1": 9.020826837513596e-05,
+                "q3": 9.194773156195879e-05,
+                "iqr_outliers": 181,
+                "stddev_outliers": 137,
+                "outliers": "137;181",
+                "ld15iqr": 8.845800766721368e-05,
+                "hd15iqr": 9.45829669944942e-05,
+                "ops": 10878.632333425716,
+                "total": 0.15397156082326546,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_batched_performance",
+            "fullname": "tests/test_flow.py::test_batched_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.0016138749779202044,
+                "max": 0.002000666980165988,
+                "mean": 0.0017255247919820249,
+                "stddev": 0.0001595170184576797,
+                "rounds": 5,
+                "median": 0.0016835409915074706,
+                "iqr": 0.00016760379367042333,
+                "q1": 0.0016165937267942354,
+                "q3": 0.0017841975204646587,
+                "iqr_outliers": 0,
+                "stddev_outliers": 1,
+                "outliers": "1;0",
+                "ld15iqr": 0.0016138749779202044,
+                "hd15iqr": 0.002000666980165988,
+                "ops": 579.533834950786,
+                "total": 0.008627623959910125,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_ad_performance",
+            "fullname": "tests/test_flow.py::test_ad_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.005012166977394372,
+                "max": 0.0057414170005358756,
+                "mean": 0.005215883383061737,
+                "stddev": 0.0003017074634457219,
+                "rounds": 5,
+                "median": 0.005111375008709729,
+                "iqr": 0.00029796849412377924,
+                "q1": 0.005025635473430157,
+                "q3": 0.005323603967553936,
+                "iqr_outliers": 0,
+                "stddev_outliers": 1,
+                "outliers": "1;0",
+                "ld15iqr": 0.005012166977394372,
+                "hd15iqr": 0.0057414170005358756,
+                "ops": 191.72207784542098,
+                "total": 0.026079416915308684,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_particle_flow_performance",
+            "fullname": "tests/test_particles.py::test_particle_flow_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.00014449999434873462,
+                "max": 0.0003245829720981419,
+                "mean": 0.00015221423806105648,
+                "stddev": 6.460473361750061e-06,
+                "rounds": 3412,
+                "median": 0.00015075004193931818,
+                "iqr": 3.4589902497828007e-06,
+                "q1": 0.0001492910087108612,
+                "q3": 0.000152749998960644,
+                "iqr_outliers": 306,
+                "stddev_outliers": 264,
+                "outliers": "264;306",
+                "ld15iqr": 0.00014449999434873462,
+                "hd15iqr": 0.00015795795479789376,
+                "ops": 6569.6876503686735,
+                "total": 0.5193549802643247,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_particle_flow_batched_performance",
+            "fullname": "tests/test_particles.py::test_particle_flow_batched_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.0022951249848119915,
+                "max": 0.0028010410023853183,
+                "mean": 0.0024579747812822463,
+                "stddev": 0.00019908384273919924,
+                "rounds": 5,
+                "median": 0.002406374958809465,
+                "iqr": 0.0001882287469925359,
+                "q1": 0.0023381562350550666,
+                "q3": 0.0025263849820476025,
+                "iqr_outliers": 0,
+                "stddev_outliers": 1,
+                "outliers": "1;0",
+                "ld15iqr": 0.0022951249848119915,
+                "hd15iqr": 0.0028010410023853183,
+                "ops": 406.8389991691991,
+                "total": 0.01228987390641123,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_ad_performance",
+            "fullname": "tests/test_particles.py::test_ad_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.007410749967675656,
+                "max": 0.008041249995585531,
+                "mean": 0.00766623318195343,
+                "stddev": 0.00025215035217687325,
+                "rounds": 5,
+                "median": 0.007550665992312133,
+                "iqr": 0.00035618749097920954,
+                "q1": 0.00750159373274073,
+                "q3": 0.00785778122371994,
+                "iqr_outliers": 0,
+                "stddev_outliers": 2,
+                "outliers": "2;0",
+                "ld15iqr": 0.007410749967675656,
+                "hd15iqr": 0.008041249995585531,
+                "ops": 130.44215800192896,
+                "total": 0.03833116590976715,
+                "iterations": 1
+            }
+        }
+    ],
+    "datetime": "2026-01-17T16:41:20.914646+00:00",
+    "version": "5.2.3"
+}

@@ -164,3 +164,64 @@ def test_ad_performance(benchmark, flow_setup):
         jax.grad(foo_loss)(flow, X).velocity_field.params.block_until_ready()
 
     benchmark(run_ad)
+
+
+def test_flow_distrax_interface(flow_setup):
+    flow = flow_setup
+    assert isinstance(flow, dsx.Distribution)
+    assert flow.event_shape == flow.base_distribution.event_shape
+
+
+def test_flow_sample_n(flow_setup):
+    flow = flow_setup
+    key = jax.random.PRNGKey(0)
+    samples = flow.sample(seed=key, sample_shape=(10,))
+    assert samples.shape == (10,) + flow.event_shape
+
+    samples_and_log_prob, log_prob = flow.sample_and_log_prob(seed=key, sample_shape=(10,))
+    assert samples_and_log_prob.shape == (10,) + flow.event_shape
+    assert log_prob.shape == (10,)
+    assert jnp.allclose(samples, samples_and_log_prob, atol=1e-4)
+
+
+def test_flow_log_prob_batched(flow_setup):
+    flow = flow_setup
+    key = jax.random.PRNGKey(0)
+    samples = flow.sample(seed=key, sample_shape=(10,))
+
+    # Test batch log_prob
+    log_probs = flow.log_prob(samples)
+    assert log_probs.shape == (10,)
+
+    # Verify against vmapped single log_prob (simulating old behavior or verifying correctness)
+    # We can't access "old" log_prob easily, but we can manually loop or use vmap on single items
+    def single_log_prob(x):
+        return flow.log_prob(x)
+
+    log_probs_vmap = jax.vmap(single_log_prob)(samples)
+    assert jnp.allclose(log_probs, log_probs_vmap, atol=1e-5)
+
+
+def test_sample_n_performance(benchmark, flow_setup):
+    flow = flow_setup
+    key = jax.random.PRNGKey(0)
+
+    def run_sample_n():
+        samples = flow.sample(seed=key, sample_shape=(128,))
+        samples.block_until_ready()
+        return samples
+
+    benchmark(run_sample_n)
+
+
+def test_sample_n_and_log_prob_performance(benchmark, flow_setup):
+    flow = flow_setup
+    key = jax.random.PRNGKey(0)
+
+    def run_sample_n_and_log_prob():
+        samples, log_prob = flow.sample_and_log_prob(seed=key, sample_shape=(128,))
+        samples.block_until_ready()
+        log_prob.block_until_ready()
+        return samples, log_prob
+
+    benchmark(run_sample_n_and_log_prob)

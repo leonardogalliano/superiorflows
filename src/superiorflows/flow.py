@@ -1,6 +1,7 @@
 from typing import Any, Callable, Dict, Optional
 
 import diffrax as dfx
+import distrax as dsx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -30,9 +31,9 @@ def _augmented_dynamics(t, y, args, velocity_field):
     return {"x": v, "logq": -div_v}
 
 
-class Flow(eqx.Module):
+class Flow(eqx.Module, dsx.Distribution):
     velocity_field: Callable
-    base_distribution: Callable
+    base_distribution: dsx.Distribution
     dynamic_mask: Callable = eqx.field(
         default=lambda x: jax.tree.map(eqx.is_inexact_array, x),
         static=True,
@@ -58,6 +59,20 @@ class Flow(eqx.Module):
     )
     extra_args: Dict[str, Any] = eqx.field(default_factory=dict, static=True)
     augmented_extra_args: Dict[str, Any] = eqx.field(default_factory=dict, static=True)
+
+    @property
+    def event_shape(self):
+        return self.base_distribution.event_shape
+
+    def _sample_n(self, key, n):
+        x0 = self.base_distribution.sample(seed=key, sample_shape=(n,))
+        x1 = jax.vmap(self.apply_map)(x0)
+        return x1
+
+    def _sample_n_and_log_prob(self, key, n):
+        x0 = self.base_distribution.sample(seed=key, sample_shape=(n,))
+        x1, logq1 = jax.vmap(self.apply_map_and_log_prob)(x0)
+        return x1, logq1
 
     def _merge_solution(self, ys, ctx):
         if ys is None:
@@ -156,12 +171,31 @@ class Flow(eqx.Module):
 
     @eqx.filter_jit
     def log_prob(self, x1, **kwargs):
-        f = jnp.zeros_like(self.base_distribution.log_prob(x1))
-        t0 = kwargs.pop("t0", self.t0)
-        t1 = kwargs.pop("t1", self.t1)
-        saveat = kwargs.pop("saveat", dfx.SaveAt(t1=True))
-        sol = self.integrate_augmented_ode(x1, t0=t1, t1=t0, logq0=f, saveat=saveat, **kwargs)
-        x0 = jax.tree.map(lambda y: y[-1], sol.ys["x"])
-        f0 = sol.ys["logq"][-1]
-        logq0 = self.base_distribution.log_prob(x0)
-        return logq0 - f0
+        event_shape = self.event_shape
+
+        def _log_prob(x):
+            f = jnp.zeros(())
+            t0 = kwargs.pop("t0", self.t0)
+            t1 = kwargs.pop("t1", self.t1)
+            saveat = kwargs.pop("saveat", dfx.SaveAt(t1=True))
+            sol = self.integrate_augmented_ode(x, t0=t1, t1=t0, logq0=f, saveat=saveat, **kwargs)
+            x0 = jax.tree.map(lambda y: y[-1], sol.ys["x"])
+            f0 = sol.ys["logq"][-1]
+            logq0 = self.base_distribution.log_prob(x0)
+            return logq0 - f0
+
+        def is_shape_tuple(x):
+            return isinstance(x, tuple) and all(isinstance(i, int) for i in x)
+
+        leaves_x1 = jax.tree.leaves(x1)
+        leaves_shape = jax.tree.leaves(event_shape, is_leaf=is_shape_tuple)
+
+        has_batch_dim = False
+        if len(leaves_x1) > 0 and len(leaves_x1) == len(leaves_shape):
+            arr, shape = leaves_x1[0], leaves_shape[0]
+            if isinstance(shape, tuple) and arr.ndim == len(shape) + 1:
+                has_batch_dim = True
+
+        if has_batch_dim:
+            return jax.vmap(_log_prob)(x1)
+        return _log_prob(x1)

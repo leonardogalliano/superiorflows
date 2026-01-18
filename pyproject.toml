@@ -12,6 +12,7 @@ dependencies = [
     "diffrax>=0.7.0",
     "equinox>=0.13.2",
     "jax>=0.8.2",
+    "distrax>=0.1.7",
 ]
 
 [tool.hatch.build]
@@ -19,7 +20,6 @@ sources = ["src"]
 
 [dependency-groups]
 dev = [
-    "distrax>=0.1.7",
     "ipykernel>=7.1.0",
     "matplotlib>=3.10.8",
     "notebook>=7.5.1",

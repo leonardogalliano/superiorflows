@@ -2186,13 +2186,13 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "diffrax" },
+    { name = "distrax" },
     { name = "equinox" },
     { name = "jax" },
 ]
 
 [package.dev-dependencies]
 dev = [
-    { name = "distrax" },
     { name = "ipykernel" },
     { name = "matplotlib" },
     { name = "notebook" },
@@ -2205,13 +2205,13 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "diffrax", specifier = ">=0.7.0" },
+    { name = "distrax", specifier = ">=0.1.7" },
     { name = "equinox", specifier = ">=0.13.2" },
     { name = "jax", specifier = ">=0.8.2" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "distrax", specifier = ">=0.1.7" },
     { name = "ipykernel", specifier = ">=7.1.0" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "notebook", specifier = ">=7.5.1" },
