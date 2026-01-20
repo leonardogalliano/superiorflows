@@ -1,0 +1,947 @@
+{
+    "machine_info": {
+        "node": "Vision",
+        "processor": "arm",
+        "machine": "arm64",
+        "python_compiler": "Clang 20.1.4 ",
+        "python_implementation": "CPython",
+        "python_implementation_version": "3.12.12",
+        "python_version": "3.12.12",
+        "python_build": [
+            "main",
+            "Oct 28 2025 11:52:25"
+        ],
+        "release": "25.2.0",
+        "system": "Darwin",
+        "cpu": {
+            "python_version": "3.12.12.final.0 (64 bit)",
+            "cpuinfo_version": [
+                9,
+                0,
+                0
+            ],
+            "cpuinfo_version_string": "9.0.0",
+            "arch": "ARM_8",
+            "bits": 64,
+            "count": 12,
+            "arch_string_raw": "arm64",
+            "brand_raw": "Apple M2 Max"
+        }
+    },
+    "commit_info": {
+        "id": "bd80e40a8b7ab6fafe5cd5bb2893af40234da061",
+        "time": "2026-01-20T17:34:10+01:00",
+        "author_time": "2026-01-20T17:34:10+01:00",
+        "dirty": true,
+        "project": "superiorflows",
+        "branch": "main"
+    },
+    "benchmarks": [
+        {
+            "group": null,
+            "name": "test_solver_benchmark[Tsit5-solver0]",
+            "fullname": "tests/test_diffrax_features.py::test_solver_benchmark[Tsit5-solver0]",
+            "params": {
+                "solver_name": "Tsit5",
+                "solver": "UNSERIALIZABLE[Tsit5()]"
+            },
+            "param": "Tsit5-solver0",
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 5.733297439292073e-05,
+                "max": 0.00016324996249750257,
+                "mean": 8.313070117895092e-05,
+                "stddev": 3.6578710413166046e-05,
+                "rounds": 7,
+                "median": 7.183296838775277e-05,
+                "iqr": 2.0854276954196393e-05,
+                "q1": 6.248924182727933e-05,
+                "q3": 8.334351878147572e-05,
+                "iqr_outliers": 1,
+                "stddev_outliers": 1,
+                "outliers": "1;1",
+                "ld15iqr": 5.733297439292073e-05,
+                "hd15iqr": 0.00016324996249750257,
+                "ops": 12029.250154492918,
+                "total": 0.0005819149082526565,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_solver_benchmark[Dopri5-solver1]",
+            "fullname": "tests/test_diffrax_features.py::test_solver_benchmark[Dopri5-solver1]",
+            "params": {
+                "solver_name": "Dopri5",
+                "solver": "UNSERIALIZABLE[Dopri5()]"
+            },
+            "param": "Dopri5-solver1",
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 5.862500984221697e-05,
+                "max": 0.00020508398301899433,
+                "mean": 7.838263726708564e-05,
+                "stddev": 4.2924549914759824e-05,
+                "rounds": 11,
+                "median": 6.241700612008572e-05,
+                "iqr": 1.2051270459778607e-05,
+                "q1": 5.947949830442667e-05,
+                "q3": 7.153076876420528e-05,
+                "iqr_outliers": 1,
+                "stddev_outliers": 1,
+                "outliers": "1;1",
+                "ld15iqr": 5.862500984221697e-05,
+                "hd15iqr": 0.00020508398301899433,
+                "ops": 12757.92745519063,
+                "total": 0.000862209009937942,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_solver_benchmark[Dopri8-solver2]",
+            "fullname": "tests/test_diffrax_features.py::test_solver_benchmark[Dopri8-solver2]",
+            "params": {
+                "solver_name": "Dopri8",
+                "solver": "UNSERIALIZABLE[Dopri8()]"
+            },
+            "param": "Dopri8-solver2",
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 6.312498589977622e-05,
+                "max": 0.000218625005800277,
+                "mean": 9.068750077858567e-05,
+                "stddev": 4.96386960387577e-05,
+                "rounds": 10,
+                "median": 7.166698924265802e-05,
+                "iqr": 7.2079128585755825e-06,
+                "q1": 6.691704038530588e-05,
+                "q3": 7.412495324388146e-05,
+                "iqr_outliers": 2,
+                "stddev_outliers": 1,
+                "outliers": "1;2",
+                "ld15iqr": 6.312498589977622e-05,
+                "hd15iqr": 0.00013504200614988804,
+                "ops": 11026.87792049214,
+                "total": 0.0009068750077858567,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_dimension_scaling_benchmark",
+            "fullname": "tests/test_diffrax_features.py::test_dimension_scaling_benchmark",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 7.583299884572625e-05,
+                "max": 0.00018445897148922086,
+                "mean": 0.00010494178859516978,
+                "stddev": 4.528925293071591e-05,
+                "rounds": 5,
+                "median": 8.55830148793757e-05,
+                "iqr": 4.12820081692189e-05,
+                "q1": 7.895822636783123e-05,
+                "q3": 0.00012024023453705013,
+                "iqr_outliers": 1,
+                "stddev_outliers": 1,
+                "outliers": "1;1",
+                "ld15iqr": 7.583299884572625e-05,
+                "hd15iqr": 0.00018445897148922086,
+                "ops": 9529.09239862172,
+                "total": 0.0005247089429758489,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_batch_size_scaling[1]",
+            "fullname": "tests/test_diffrax_features.py::test_batch_size_scaling[1]",
+            "params": {
+                "batch_size": 1
+            },
+            "param": "1",
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.0007924999808892608,
+                "max": 0.0011389169958420098,
+                "mean": 0.0008726041705813259,
+                "stddev": 0.0001323486637028265,
+                "rounds": 6,
+                "median": 0.0008183125173673034,
+                "iqr": 5.083298310637474e-05,
+                "q1": 0.0008083750144578516,
+                "q3": 0.0008592079975642264,
+                "iqr_outliers": 1,
+                "stddev_outliers": 1,
+                "outliers": "1;1",
+                "ld15iqr": 0.0007924999808892608,
+                "hd15iqr": 0.0011389169958420098,
+                "ops": 1145.9949811307954,
+                "total": 0.005235625023487955,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_batch_size_scaling[10]",
+            "fullname": "tests/test_diffrax_features.py::test_batch_size_scaling[10]",
+            "params": {
+                "batch_size": 10
+            },
+            "param": "10",
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.00084695901023224,
+                "max": 0.0013385420315898955,
+                "mean": 0.0010049308572585385,
+                "stddev": 0.00017678268351325248,
+                "rounds": 6,
+                "median": 0.0009728545264806598,
+                "iqr": 0.00015287502901628613,
+                "q1": 0.0008727500098757446,
+                "q3": 0.0010256250388920307,
+                "iqr_outliers": 1,
+                "stddev_outliers": 1,
+                "outliers": "1;1",
+                "ld15iqr": 0.00084695901023224,
+                "hd15iqr": 0.0013385420315898955,
+                "ops": 995.0933367973297,
+                "total": 0.00602958514355123,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_batch_size_scaling[100]",
+            "fullname": "tests/test_diffrax_features.py::test_batch_size_scaling[100]",
+            "params": {
+                "batch_size": 100
+            },
+            "param": "100",
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.0009908750071190298,
+                "max": 0.0015422090073116124,
+                "mean": 0.0012513001915067435,
+                "stddev": 0.0002042088510398076,
+                "rounds": 5,
+                "median": 0.0012844579759985209,
+                "iqr": 0.0002502397110220045,
+                "q1": 0.0011061252589570358,
+                "q3": 0.0013563649699790403,
+                "iqr_outliers": 0,
+                "stddev_outliers": 2,
+                "outliers": "2;0",
+                "ld15iqr": 0.0009908750071190298,
+                "hd15iqr": 0.0015422090073116124,
+                "ops": 799.1687420712833,
+                "total": 0.006256500957533717,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_hutchinson_dimension_scaling_benchmark",
+            "fullname": "tests/test_diffrax_features.py::test_hutchinson_dimension_scaling_benchmark",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.00013154203770682216,
+                "max": 0.0002496660454198718,
+                "mean": 0.0001719250110909343,
+                "stddev": 4.7387811965572204e-05,
+                "rounds": 5,
+                "median": 0.00015887495828792453,
+                "iqr": 6.0312493587844074e-05,
+                "q1": 0.00013732301886193454,
+                "q3": 0.00019763551244977862,
+                "iqr_outliers": 0,
+                "stddev_outliers": 1,
+                "outliers": "1;0",
+                "ld15iqr": 0.00013154203770682216,
+                "hd15iqr": 0.0002496660454198718,
+                "ops": 5816.489373213311,
+                "total": 0.0008596250554546714,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_hutchinson_batch_size_scaling[1]",
+            "fullname": "tests/test_diffrax_features.py::test_hutchinson_batch_size_scaling[1]",
+            "params": {
+                "batch_size": 1
+            },
+            "param": "1",
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.00021541700698435307,
+                "max": 0.00048470799811184406,
+                "mean": 0.00028676640940830114,
+                "stddev": 0.00011248661513461334,
+                "rounds": 5,
+                "median": 0.00023612502263858914,
+                "iqr": 9.901027078740299e-05,
+                "q1": 0.00022460374748334289,
+                "q3": 0.0003236140182707459,
+                "iqr_outliers": 1,
+                "stddev_outliers": 1,
+                "outliers": "1;1",
+                "ld15iqr": 0.00021541700698435307,
+                "hd15iqr": 0.00048470799811184406,
+                "ops": 3487.158771710215,
+                "total": 0.0014338320470415056,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_hutchinson_batch_size_scaling[10]",
+            "fullname": "tests/test_diffrax_features.py::test_hutchinson_batch_size_scaling[10]",
+            "params": {
+                "batch_size": 10
+            },
+            "param": "10",
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.0003412080113776028,
+                "max": 0.0006221660296432674,
+                "mean": 0.0004386496031656861,
+                "stddev": 0.00010890974350723161,
+                "rounds": 5,
+                "median": 0.0004077079938724637,
+                "iqr": 0.0001151765463873744,
+                "q1": 0.00037114572478458285,
+                "q3": 0.00048632227117195725,
+                "iqr_outliers": 0,
+                "stddev_outliers": 1,
+                "outliers": "1;0",
+                "ld15iqr": 0.0003412080113776028,
+                "hd15iqr": 0.0006221660296432674,
+                "ops": 2279.723936333487,
+                "total": 0.0021932480158284307,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_hutchinson_batch_size_scaling[100]",
+            "fullname": "tests/test_diffrax_features.py::test_hutchinson_batch_size_scaling[100]",
+            "params": {
+                "batch_size": 100
+            },
+            "param": "100",
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.00045200000749900937,
+                "max": 0.0009433330269530416,
+                "mean": 0.000641958205960691,
+                "stddev": 0.00018795647962577275,
+                "rounds": 5,
+                "median": 0.0005747500108554959,
+                "iqr": 0.00022292675566859543,
+                "q1": 0.0005278437456581742,
+                "q3": 0.0007507705013267696,
+                "iqr_outliers": 0,
+                "stddev_outliers": 2,
+                "outliers": "2;0",
+                "ld15iqr": 0.00045200000749900937,
+                "hd15iqr": 0.0009433330269530416,
+                "ops": 1557.7338068348222,
+                "total": 0.003209791029803455,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_hutchinson_samples_scaling[1]",
+            "fullname": "tests/test_diffrax_features.py::test_hutchinson_samples_scaling[1]",
+            "params": {
+                "hutchinson_samples": 1
+            },
+            "param": "1",
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 6.579200271517038e-05,
+                "max": 0.00018900004215538502,
+                "mean": 0.0001031750114634633,
+                "stddev": 5.041226752526459e-05,
+                "rounds": 5,
+                "median": 8.845800766721368e-05,
+                "iqr": 5.714576400350779e-05,
+                "q1": 6.801050039939582e-05,
+                "q3": 0.00012515626440290362,
+                "iqr_outliers": 0,
+                "stddev_outliers": 1,
+                "outliers": "1;0",
+                "ld15iqr": 6.579200271517038e-05,
+                "hd15iqr": 0.00018900004215538502,
+                "ops": 9692.269337465725,
+                "total": 0.0005158750573173165,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_hutchinson_samples_scaling[5]",
+            "fullname": "tests/test_diffrax_features.py::test_hutchinson_samples_scaling[5]",
+            "params": {
+                "hutchinson_samples": 5
+            },
+            "param": "5",
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 5.783402593806386e-05,
+                "max": 0.00018754205666482449,
+                "mean": 8.061463449848816e-05,
+                "stddev": 4.3994417246710604e-05,
+                "rounds": 8,
+                "median": 6.414600647985935e-05,
+                "iqr": 1.6416481230407953e-05,
+                "q1": 5.960400449112058e-05,
+                "q3": 7.602048572152853e-05,
+                "iqr_outliers": 1,
+                "stddev_outliers": 1,
+                "outliers": "1;1",
+                "ld15iqr": 5.783402593806386e-05,
+                "hd15iqr": 0.00018754205666482449,
+                "ops": 12404.695576939617,
+                "total": 0.0006449170759879053,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_hutchinson_samples_scaling[10]",
+            "fullname": "tests/test_diffrax_features.py::test_hutchinson_samples_scaling[10]",
+            "params": {
+                "hutchinson_samples": 10
+            },
+            "param": "10",
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 6.937497528269887e-05,
+                "max": 0.0001954999752342701,
+                "mean": 0.00010156658245250583,
+                "stddev": 5.334252749899307e-05,
+                "rounds": 5,
+                "median": 7.591699250042439e-05,
+                "iqr": 4.699996497947723e-05,
+                "q1": 7.224974979180843e-05,
+                "q3": 0.00011924971477128565,
+                "iqr_outliers": 1,
+                "stddev_outliers": 1,
+                "outliers": "1;1",
+                "ld15iqr": 6.937497528269887e-05,
+                "hd15iqr": 0.0001954999752342701,
+                "ops": 9845.758081577827,
+                "total": 0.0005078329122625291,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_hutchinson_samples_scaling[20]",
+            "fullname": "tests/test_diffrax_features.py::test_hutchinson_samples_scaling[20]",
+            "params": {
+                "hutchinson_samples": 20
+            },
+            "param": "20",
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 7.00420350767672e-05,
+                "max": 0.00019591598538681865,
+                "mean": 0.00010079981293529273,
+                "stddev": 5.383669985393108e-05,
+                "rounds": 5,
+                "median": 7.587502477690578e-05,
+                "iqr": 4.653150972444564e-05,
+                "q1": 7.07912549842149e-05,
+                "q3": 0.00011732276470866054,
+                "iqr_outliers": 1,
+                "stddev_outliers": 1,
+                "outliers": "1;1",
+                "ld15iqr": 7.00420350767672e-05,
+                "hd15iqr": 0.00019591598538681865,
+                "ops": 9920.653331389994,
+                "total": 0.0005039990646764636,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_flow_performance",
+            "fullname": "tests/test_flow.py::test_flow_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 8.633302059024572e-05,
+                "max": 0.00026708398945629597,
+                "mean": 9.434205618681716e-05,
+                "stddev": 9.826164278112974e-06,
+                "rounds": 5668,
+                "median": 9.158399188891053e-05,
+                "iqr": 4.333967808634043e-06,
+                "q1": 9.045802289620042e-05,
+                "q3": 9.479199070483446e-05,
+                "iqr_outliers": 561,
+                "stddev_outliers": 362,
+                "outliers": "362;561",
+                "ld15iqr": 8.633302059024572e-05,
+                "hd15iqr": 0.00010133296018466353,
+                "ops": 10599.726573902408,
+                "total": 0.5347307744668797,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_batched_performance",
+            "fullname": "tests/test_flow.py::test_batched_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.0016159579972736537,
+                "max": 0.0020016669877804816,
+                "mean": 0.001768591394647956,
+                "stddev": 0.00017308705991555686,
+                "rounds": 5,
+                "median": 0.0016807080246508121,
+                "iqr": 0.00029333378188312054,
+                "q1": 0.0016347702185157686,
+                "q3": 0.0019281040003988892,
+                "iqr_outliers": 0,
+                "stddev_outliers": 1,
+                "outliers": "1;0",
+                "ld15iqr": 0.0016159579972736537,
+                "hd15iqr": 0.0020016669877804816,
+                "ops": 565.4217265933568,
+                "total": 0.00884295697323978,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_ad_performance",
+            "fullname": "tests/test_flow.py::test_ad_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.0048567920457571745,
+                "max": 0.006097249977756292,
+                "mean": 0.005173316807486117,
+                "stddev": 0.0005216823042750588,
+                "rounds": 5,
+                "median": 0.005005375016480684,
+                "iqr": 0.0004161772085353732,
+                "q1": 0.004876354272710159,
+                "q3": 0.005292531481245533,
+                "iqr_outliers": 1,
+                "stddev_outliers": 1,
+                "outliers": "1;1",
+                "ld15iqr": 0.0048567920457571745,
+                "hd15iqr": 0.006097249977756292,
+                "ops": 193.29958655401438,
+                "total": 0.025866584037430584,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_sample_n_performance",
+            "fullname": "tests/test_flow.py::test_sample_n_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.0012713749893009663,
+                "max": 0.0019766250043176115,
+                "mean": 0.001381877798650583,
+                "stddev": 0.00012172652604427134,
+                "rounds": 550,
+                "median": 0.001336999994236976,
+                "iqr": 8.291599806398153e-05,
+                "q1": 0.0013114589964970946,
+                "q3": 0.0013943749945610762,
+                "iqr_outliers": 57,
+                "stddev_outliers": 66,
+                "outliers": "66;57",
+                "ld15iqr": 0.0012713749893009663,
+                "hd15iqr": 0.001518834033049643,
+                "ops": 723.652989415207,
+                "total": 0.7600327892578207,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_sample_n_and_log_prob_performance",
+            "fullname": "tests/test_flow.py::test_sample_n_and_log_prob_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.0016658750246278942,
+                "max": 0.002401875040959567,
+                "mean": 0.0018032476120002302,
+                "stddev": 0.00012530876077087978,
+                "rounds": 534,
+                "median": 0.0017658334982115775,
+                "iqr": 0.00014687603106722236,
+                "q1": 0.0017119160038419068,
+                "q3": 0.0018587920349091291,
+                "iqr_outliers": 19,
+                "stddev_outliers": 89,
+                "outliers": "89;19",
+                "ld15iqr": 0.0016658750246278942,
+                "hd15iqr": 0.002080624981317669,
+                "ops": 554.5550113834685,
+                "total": 0.962934224808123,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_hutchinson_performance",
+            "fullname": "tests/test_flow.py::test_hutchinson_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 9.170797420665622e-05,
+                "max": 0.0005600000149570405,
+                "mean": 9.715691419766477e-05,
+                "stddev": 1.0183882644235694e-05,
+                "rounds": 4709,
+                "median": 9.504100307822227e-05,
+                "iqr": 2.927263267338276e-06,
+                "q1": 9.420799324288964e-05,
+                "q3": 9.713525651022792e-05,
+                "iqr_outliers": 588,
+                "stddev_outliers": 218,
+                "outliers": "218;588",
+                "ld15iqr": 9.170797420665622e-05,
+                "hd15iqr": 0.0001015419838950038,
+                "ops": 10292.628252534967,
+                "total": 0.4575119089568034,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_particle_flow_performance",
+            "fullname": "tests/test_particles.py::test_particle_flow_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.00014233298134058714,
+                "max": 0.00021341699175536633,
+                "mean": 0.00015139151524597768,
+                "stddev": 5.125739964292223e-06,
+                "rounds": 3048,
+                "median": 0.0001495840260758996,
+                "iqr": 3.958994057029486e-06,
+                "q1": 0.00014845799887552857,
+                "q3": 0.00015241699293255806,
+                "iqr_outliers": 261,
+                "stddev_outliers": 374,
+                "outliers": "374;261",
+                "ld15iqr": 0.0001432499848306179,
+                "hd15iqr": 0.00015837501268833876,
+                "ops": 6605.389994117051,
+                "total": 0.46144133846974,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_particle_flow_batched_performance",
+            "fullname": "tests/test_particles.py::test_particle_flow_batched_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.0027101659798063338,
+                "max": 0.0032886250410228968,
+                "mean": 0.00292716680560261,
+                "stddev": 0.00023302672442402332,
+                "rounds": 5,
+                "median": 0.0028727090102620423,
+                "iqr": 0.00033567727950867265,
+                "q1": 0.002743635486694984,
+                "q3": 0.003079312766203657,
+                "iqr_outliers": 0,
+                "stddev_outliers": 1,
+                "outliers": "1;0",
+                "ld15iqr": 0.0027101659798063338,
+                "hd15iqr": 0.0032886250410228968,
+                "ops": 341.6272684173637,
+                "total": 0.01463583402801305,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_particle_ad_performance",
+            "fullname": "tests/test_particles.py::test_particle_ad_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.007611458015162498,
+                "max": 0.008271042024716735,
+                "mean": 0.007904733205214143,
+                "stddev": 0.0003037733389044461,
+                "rounds": 5,
+                "median": 0.007789082999806851,
+                "iqr": 0.00055408374464605,
+                "q1": 0.007652801752556115,
+                "q3": 0.008206885497202165,
+                "iqr_outliers": 0,
+                "stddev_outliers": 1,
+                "outliers": "1;0",
+                "ld15iqr": 0.007611458015162498,
+                "hd15iqr": 0.008271042024716735,
+                "ops": 126.5064833991332,
+                "total": 0.039523666026070714,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_hutchinson_particles_performance",
+            "fullname": "tests/test_particles.py::test_hutchinson_particles_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.00010595802450552583,
+                "max": 0.00039254099829122424,
+                "mean": 0.00011667452668343582,
+                "stddev": 1.749491034295872e-05,
+                "rounds": 4596,
+                "median": 0.00011137500405311584,
+                "iqr": 8.999020792543888e-06,
+                "q1": 0.00010916701285168529,
+                "q3": 0.00011816603364422917,
+                "iqr_outliers": 318,
+                "stddev_outliers": 272,
+                "outliers": "272;318",
+                "ld15iqr": 0.00010595802450552583,
+                "hd15iqr": 0.00013175001367926598,
+                "ops": 8570.85113971128,
+                "total": 0.536236124637071,
+                "iterations": 1
+            }
+        }
+    ],
+    "datetime": "2026-01-20T19:04:54.118236+00:00",
+    "version": "5.2.3"
+}
