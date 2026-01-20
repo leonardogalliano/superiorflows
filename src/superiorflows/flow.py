@@ -15,23 +15,8 @@ import jax.numpy as jnp
 __all__ = ["Flow"]
 
 
-def _compute_velocity_and_divergence(velocity_field, t, x, args):
-    """Compute velocity field and its divergence for arbitrary pytree inputs.
-
-    Uses jax.jacfwd to efficiently compute the Jacobian and extract its trace
-    (divergence). The pytree is flattened for Jacobian computation and then
-    unraveled back to the original structure.
-
-    Args:
-        velocity_field: Callable (t, x, args) -> velocity pytree with same structure as x
-        t: Current time (scalar)
-        x: State pytree (dynamic components only)
-        args: Additional arguments passed to velocity_field
-
-    Returns:
-        Tuple of (velocity, divergence) where velocity has same structure as x
-        and divergence is a scalar.
-    """
+def _divergence_exact(velocity_field, t, x, args):
+    """Compute exact divergence using full Jacobian (O(d²) complexity)."""
     x_flat, unravel = jax.flatten_util.ravel_pytree(x)
 
     def v_flat(x_flat_):
@@ -47,7 +32,70 @@ def _compute_velocity_and_divergence(velocity_field, t, x, args):
     return v, divergence
 
 
-def _augmented_dynamics(t, y, args, velocity_field):
+def _divergence_hutchinson(velocity_field, t, x, args, random_vectors):
+    """Compute stochastic divergence estimate using Hutchinson's trace estimator.
+
+    Uses the identity: trace(J) = E[v^T J v] where v has E[v v^T] = I.
+    Rademacher vectors (±1) are optimal for this estimator.
+
+    Complexity: O(d * n_samples) instead of O(d²) for exact.
+
+    Args:
+        velocity_field: The velocity field callable
+        t: Current time
+        x: State pytree
+        args: Additional arguments
+        random_vectors: Array of shape (n_samples, d) with Rademacher vectors
+
+    Returns:
+        Tuple of (velocity, divergence_estimate)
+    """
+    x_flat, unravel = jax.flatten_util.ravel_pytree(x)
+
+    def v_flat(x_flat_):
+        x_unravelled = unravel(x_flat_)
+        v = velocity_field(t, x_unravelled, args)
+        v_flattened, _ = jax.flatten_util.ravel_pytree(v)
+        return v_flattened
+
+    # Compute velocity and JVP function
+    y_flat, jvp_fn = jax.linearize(v_flat, x_flat)
+    v = unravel(y_flat)
+
+    # Estimate trace: trace(J) ≈ mean(v^T J v) = mean(v^T jvp(v))
+    def estimate_single(rand_vec):
+        jvp_result = jvp_fn(rand_vec)
+        return jnp.dot(rand_vec, jvp_result)
+
+    estimates = jax.vmap(estimate_single)(random_vectors)
+    divergence = jnp.mean(estimates)
+    return v, divergence
+
+
+def _compute_velocity_and_divergence(velocity_field, t, x, args, random_vectors=None):
+    """Compute velocity field and its divergence for arbitrary pytree inputs.
+
+    Uses jax.jacfwd for exact divergence (when random_vectors is None) or
+    Hutchinson's trace estimator for stochastic approximation.
+
+    Args:
+        velocity_field: Callable (t, x, args) -> velocity pytree with same structure as x
+        t: Current time (scalar)
+        x: State pytree (dynamic components only)
+        args: Additional arguments passed to velocity_field
+        random_vectors: Optional array of shape (n_samples, d) for Hutchinson estimator.
+            If None, uses exact divergence computation.
+
+    Returns:
+        Tuple of (velocity, divergence) where velocity has same structure as x
+        and divergence is a scalar.
+    """
+    if random_vectors is None:
+        return _divergence_exact(velocity_field, t, x, args)
+    return _divergence_hutchinson(velocity_field, t, x, args, random_vectors)
+
+
+def _augmented_dynamics(t, y, args, velocity_field, random_vectors=None):
     """Augmented ODE dynamics for computing the change of variables formula.
 
     Solves the coupled system:
@@ -59,13 +107,14 @@ def _augmented_dynamics(t, y, args, velocity_field):
     Args:
         t: Current time (scalar)
         y: Dictionary with keys "x" (state) and "logq" (log probability)
-        args: Additional arguments for velocity_field
+        args: Context pytree passed to velocity_field
         velocity_field: The velocity field callable
+        random_vectors: Optional Rademacher vectors for Hutchinson estimator
 
     Returns:
         Dictionary with derivatives {"x": v, "logq": -div_v}
     """
-    v, div_v = _compute_velocity_and_divergence(velocity_field, t, y["x"], args)
+    v, div_v = _compute_velocity_and_divergence(velocity_field, t, y["x"], args, random_vectors)
     return {"x": v, "logq": -div_v}
 
 
@@ -88,6 +137,9 @@ class Flow(eqx.Module, dsx.Distribution):
         base_distribution: A distrax.Distribution representing the base/prior.
         dynamic_mask: A pytree or callable that returns True for leaves to flow,
             False for static context. Defaults to flowing all inexact arrays.
+        hutchinson_samples: Number of random vectors for stochastic divergence
+            estimation. If None (default), uses exact O(d²) computation.
+            Set to a positive integer (e.g., 1-10) for O(d) stochastic estimation.
         solver: Diffrax solver for forward/inverse integration (default: Tsit5).
         augmented_solver: Solver for augmented ODE with log-prob (default: Tsit5).
         t0: Start time of the flow (default: 0.0).
@@ -106,6 +158,7 @@ class Flow(eqx.Module, dsx.Distribution):
         default=lambda x: jax.tree.map(eqx.is_inexact_array, x),
         static=True,
     )
+    hutchinson_samples: Optional[int] = eqx.field(default=None, static=True)
     solver: dfx.AbstractSolver = eqx.field(
         default_factory=lambda: dfx.Tsit5(),
         static=True,
@@ -138,8 +191,15 @@ class Flow(eqx.Module, dsx.Distribution):
         return x1
 
     def _sample_n_and_log_prob(self, key, n):
-        x0 = self.base_distribution.sample(seed=key, sample_shape=(n,))
-        x1, logq1 = jax.vmap(self.apply_map_and_log_prob)(x0)
+        if self.hutchinson_samples is not None:
+            # Need separate keys for sampling and for Hutchinson estimation
+            key1, key2 = jax.random.split(key)
+            x0 = self.base_distribution.sample(seed=key1, sample_shape=(n,))
+            keys = jax.random.split(key2, n)
+            x1, logq1 = jax.vmap(lambda x, k: self.apply_map_and_log_prob(x, key=k))(x0, keys)
+        else:
+            x0 = self.base_distribution.sample(seed=key, sample_shape=(n,))
+            x1, logq1 = jax.vmap(self.apply_map_and_log_prob)(x0)
         return x1, logq1
 
     def _merge_solution(self, ys, ctx):
@@ -235,7 +295,18 @@ class Flow(eqx.Module, dsx.Distribution):
         return jax.tree.map(lambda y: y[-1], sol.ys)
 
     @eqx.filter_jit
-    def integrate_augmented_ode(self, x0, logq0=None, **kwargs):
+    def integrate_augmented_ode(self, x0, logq0=None, *, key=None, **kwargs):
+        """Integrate the augmented ODE for log-probability computation.
+
+        Args:
+            x0: Initial state.
+            logq0: Optional initial log probability. If None, computed from base_distribution.
+            key: Optional PRNG key for Hutchinson estimator. Required if hutchinson_samples is set.
+            **kwargs: Override solver parameters.
+
+        Returns:
+            diffrax solution object with .ys containing {"x": trajectory, "logq": log_probs}.
+        """
         solver_args = dict(
             solver=self.augmented_solver,
             t0=self.t0,
@@ -254,20 +325,30 @@ class Flow(eqx.Module, dsx.Distribution):
         y0, ctx = eqx.partition(x0, self.dynamic_mask)
         u0 = {"x": y0, "logq": logq0}
 
+        random_vectors = None
+        if self.hutchinson_samples is not None:
+            if key is None:
+                raise ValueError("key is required when hutchinson_samples is set")
+            y0_flat, _ = jax.flatten_util.ravel_pytree(y0)
+            d = y0_flat.size
+            random_vectors = jax.random.rademacher(key, shape=(self.hutchinson_samples, d)).astype(y0_flat.dtype)
+
         user_args = solver_args.get("args")
         if user_args is not None:
             solver_args["args"] = (ctx, user_args)
         else:
             solver_args["args"] = ctx
 
-        term_func = jax.tree_util.Partial(_augmented_dynamics, velocity_field=self.velocity_field)
+        term_func = jax.tree_util.Partial(
+            _augmented_dynamics, velocity_field=self.velocity_field, random_vectors=random_vectors
+        )
 
         term = dfx.ODETerm(term_func)
         sol = dfx.diffeqsolve(term, y0=u0, **solver_args)
         return eqx.tree_at(lambda s: s.ys["x"], sol, self._merge_solution(sol.ys["x"], ctx))
 
     @eqx.filter_jit
-    def apply_map_and_log_prob(self, x0, **kwargs):
+    def apply_map_and_log_prob(self, x0, *, key=None, **kwargs):
         """Apply forward flow and compute log probability simultaneously.
 
         More efficient than calling apply_map and log_prob separately
@@ -275,6 +356,7 @@ class Flow(eqx.Module, dsx.Distribution):
 
         Args:
             x0: Initial state sampled from base_distribution.
+            key: PRNG key for Hutchinson estimator (required if hutchinson_samples is set).
             **kwargs: Override solver parameters.
 
         Returns:
@@ -282,13 +364,13 @@ class Flow(eqx.Module, dsx.Distribution):
             and log_prob is the log probability density at x1.
         """
         saveat = kwargs.pop("saveat", dfx.SaveAt(t1=True))
-        sol = self.integrate_augmented_ode(x0, saveat=saveat, **kwargs)
+        sol = self.integrate_augmented_ode(x0, saveat=saveat, key=key, **kwargs)
         x1 = jax.tree.map(lambda y: y[-1], sol.ys["x"])
         logq1 = sol.ys["logq"][-1]
         return x1, logq1
 
     @eqx.filter_jit
-    def log_prob(self, x1, **kwargs):
+    def log_prob(self, x1, *, key=None, **kwargs):
         """Compute log probability density of samples under the flow.
 
         Inverts the flow to map x1 back to the base distribution and
@@ -300,6 +382,7 @@ class Flow(eqx.Module, dsx.Distribution):
 
         Args:
             x1: Sample(s) from the target distribution.
+            key: PRNG key for Hutchinson estimator (required if hutchinson_samples is set).
             **kwargs: Override solver parameters.
 
         Returns:
@@ -308,12 +391,12 @@ class Flow(eqx.Module, dsx.Distribution):
         """
         event_shape = self.event_shape
 
-        def _log_prob(x):
+        def _log_prob(x, k):
             f = jnp.zeros(())
             t0 = kwargs.pop("t0", self.t0)
             t1 = kwargs.pop("t1", self.t1)
             saveat = kwargs.pop("saveat", dfx.SaveAt(t1=True))
-            sol = self.integrate_augmented_ode(x, t0=t1, t1=t0, logq0=f, saveat=saveat, **kwargs)
+            sol = self.integrate_augmented_ode(x, t0=t1, t1=t0, logq0=f, saveat=saveat, key=k, **kwargs)
             x0 = jax.tree.map(lambda y: y[-1], sol.ys["x"])
             f0 = sol.ys["logq"][-1]
             logq0 = self.base_distribution.log_prob(x0)
@@ -322,7 +405,7 @@ class Flow(eqx.Module, dsx.Distribution):
         def _has_batch_dimension(x1_leaves, shape_leaves):
             """Check if all array leaves have a consistent batch dimension."""
             if len(x1_leaves) == 0 or len(x1_leaves) != len(shape_leaves):
-                return False
+                return False, 0
 
             def is_shape_tuple(x):
                 return isinstance(x, tuple) and all(isinstance(i, int) for i in x)
@@ -334,13 +417,15 @@ class Flow(eqx.Module, dsx.Distribution):
                 if arr.ndim == len(shape) + 1:
                     batch_sizes.append(arr.shape[0])
                 elif arr.ndim == len(shape):
-                    return False
+                    return False, 0
                 else:
-                    return False
+                    return False, 0
 
             if len(batch_sizes) == 0:
-                return False
-            return len(set(batch_sizes)) == 1
+                return False, 0
+            if len(set(batch_sizes)) == 1:
+                return True, batch_sizes[0]
+            return False, 0
 
         def is_shape_tuple(x):
             return isinstance(x, tuple) and all(isinstance(i, int) for i in x)
@@ -348,6 +433,16 @@ class Flow(eqx.Module, dsx.Distribution):
         leaves_x1 = jax.tree.leaves(x1)
         leaves_shape = jax.tree.leaves(event_shape, is_leaf=is_shape_tuple)
 
-        if _has_batch_dimension(leaves_x1, leaves_shape):
-            return jax.vmap(_log_prob)(x1)
-        return _log_prob(x1)
+        has_batch, batch_size = _has_batch_dimension(leaves_x1, leaves_shape)
+        if has_batch:
+            # Split keys for batch if hutchinson_samples is set
+            if key is not None:
+                keys = jax.random.split(key, batch_size)
+            else:
+                keys = jnp.zeros((batch_size,), dtype=jnp.uint32)  # Placeholder, won't be used
+                keys = None  # Actually set to None array for vmap
+            if keys is not None:
+                return jax.vmap(_log_prob)(x1, keys)
+            else:
+                return jax.vmap(lambda x: _log_prob(x, None))(x1)
+        return _log_prob(x1, key)

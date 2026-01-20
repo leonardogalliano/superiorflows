@@ -294,7 +294,7 @@ def foo_loss(flow, X):
     return jnp.mean(logq)
 
 
-def test_ad_performance(benchmark, particles_flow_setup):
+def test_particle_ad_performance(benchmark, particles_flow_setup):
     flow = particles_flow_setup
     key = jax.random.PRNGKey(0)
     key, subkey = jax.random.split(key)
@@ -306,3 +306,88 @@ def test_ad_performance(benchmark, particles_flow_setup):
         jax.grad(foo_loss)(flow, X).velocity_field.params.block_until_ready()
 
     benchmark(run_ad)
+
+
+# ============================================================================
+# Hutchinson Trace Estimator Tests for Particles
+# ============================================================================
+
+
+@pytest.fixture
+def hutchinson_particles_flow_setup(uniform_box_distribution_setup, particles_velocity_field_setup):
+    """Particle flow with Hutchinson estimator enabled."""
+    dist = uniform_box_distribution_setup
+    velocity_field = particles_velocity_field_setup
+    key = jax.random.PRNGKey(0)
+    key, subkey = jax.random.split(key)
+    dynamic_mask = eqx.tree_at(
+        lambda x: (x.positions, x.species, x.box), dist.sample(seed=subkey), replace=(True, True, False)
+    )
+    flow = Flow(
+        velocity_field=velocity_field,
+        base_distribution=dist,
+        stepsize_controller=dfx.PIDController(rtol=1e-7, atol=1e-7),
+        dynamic_mask=dynamic_mask,
+        hutchinson_samples=5,  # Use 5 random vectors
+    )
+    return flow
+
+
+def test_hutchinson_particles_flow(hutchinson_particles_flow_setup, particles_flow_setup):
+    """Test Hutchinson estimator on particle systems."""
+    hutchinson_flow = hutchinson_particles_flow_setup
+    exact_flow = particles_flow_setup
+    key = jax.random.PRNGKey(0)
+    key, subkey1, subkey2 = jax.random.split(key, 3)
+
+    x0 = exact_flow.base_distribution.sample(seed=subkey1)
+
+    # Exact result
+    x1_exact, logq1_exact = exact_flow.apply_map_and_log_prob(x0)
+
+    # Hutchinson result
+    x1_hutch, logq1_hutch = hutchinson_flow.apply_map_and_log_prob(x0, key=subkey2)
+
+    # Positions should match (only divergence differs)
+    assert jnp.allclose(x1_exact.positions, x1_hutch.positions, atol=1e-5)
+    assert jnp.allclose(x1_exact.species, x1_hutch.species, atol=1e-5)
+    # Log prob should be reasonably close
+    assert jnp.abs(logq1_exact - logq1_hutch) < 2.0
+
+
+def test_hutchinson_particles_flow_batched(hutchinson_particles_flow_setup, particles_flow_setup):
+    """Test batched Hutchinson estimator on particle systems."""
+    hutchinson_flow = hutchinson_particles_flow_setup
+    exact_flow = particles_flow_setup
+    key = jax.random.PRNGKey(0)
+    key, subkey1, subkey2 = jax.random.split(key, 3)
+    M = 10
+
+    X0 = exact_flow.base_distribution.sample(seed=subkey1, sample_shape=(M,))
+
+    # Exact results
+    X1_exact, logq1_exact = jax.vmap(exact_flow.apply_map_and_log_prob)(X0)
+
+    # Hutchinson results
+    keys = jax.random.split(subkey2, M)
+    X1_hutch, logq1_hutch = jax.vmap(lambda x, k: hutchinson_flow.apply_map_and_log_prob(x, key=k))(X0, keys)
+
+    assert X1_hutch.positions.shape == X1_exact.positions.shape
+    assert logq1_hutch.shape == (M,)
+    assert jnp.allclose(X1_exact.positions, X1_hutch.positions, atol=1e-5)
+
+
+def test_hutchinson_particles_performance(benchmark, hutchinson_particles_flow_setup):
+    """Benchmark Hutchinson estimator on particle systems."""
+    flow = hutchinson_particles_flow_setup
+    key = jax.random.PRNGKey(0)
+    key, subkey1, subkey2 = jax.random.split(key, 3)
+    x0 = flow.base_distribution.sample(seed=subkey1)
+
+    def run_apply_map_and_log_prob():
+        x1, logq1 = flow.apply_map_and_log_prob(x0, key=subkey2)
+        jax.tree.map(lambda x: x.block_until_ready(), x1)
+        logq1.block_until_ready()
+        return x1, logq1
+
+    benchmark(run_apply_map_and_log_prob)

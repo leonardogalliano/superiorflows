@@ -221,3 +221,112 @@ def test_sample_n_and_log_prob_performance(benchmark, flow_setup):
         return samples, log_prob
 
     benchmark(run_sample_n_and_log_prob)
+
+
+# ============================================================================
+# Hutchinson Trace Estimator Tests
+# ============================================================================
+
+
+@pytest.fixture
+def hutchinson_flow_setup(uniform_distribution_setup, velocity_field_setup):
+    """Flow with Hutchinson estimator enabled."""
+    uniform_dist = uniform_distribution_setup
+    velocity_field = velocity_field_setup
+    flow = Flow(
+        velocity_field=velocity_field,
+        base_distribution=uniform_dist,
+        stepsize_controller=dfx.PIDController(rtol=1e-7, atol=1e-7),
+        hutchinson_samples=10,  # Use 10 random vectors
+    )
+    return flow
+
+
+def test_hutchinson_flow(hutchinson_flow_setup, flow_setup):
+    """Test that Hutchinson estimator gives close results to exact computation."""
+    hutchinson_flow = hutchinson_flow_setup
+    exact_flow = flow_setup
+    key = jax.random.PRNGKey(0)
+    key, subkey1, subkey2 = jax.random.split(key, 3)
+
+    x0 = exact_flow.base_distribution.sample(seed=subkey1)
+
+    # Exact result
+    x1_exact, logq1_exact = exact_flow.apply_map_and_log_prob(x0)
+
+    # Hutchinson result
+    x1_hutch, logq1_hutch = hutchinson_flow.apply_map_and_log_prob(x0, key=subkey2)
+
+    # Trajectories should be identical (only divergence differs)
+    assert jnp.allclose(x1_exact, x1_hutch, atol=1e-5)
+    # Log prob should be close (stochastic, so larger tolerance)
+    assert jnp.abs(logq1_exact - logq1_hutch) < 1.0  # Reasonable for 10 samples
+
+
+def test_hutchinson_flow_batched(hutchinson_flow_setup, flow_setup):
+    """Test Hutchinson estimator with batched inputs."""
+    hutchinson_flow = hutchinson_flow_setup
+    exact_flow = flow_setup
+    key = jax.random.PRNGKey(0)
+    key, subkey1, subkey2 = jax.random.split(key, 3)
+    M = 10
+
+    X0 = exact_flow.base_distribution.sample(seed=subkey1, sample_shape=(M,))
+
+    # Exact results
+    X1_exact, logq1_exact = jax.vmap(exact_flow.apply_map_and_log_prob)(X0)
+
+    # Hutchinson results (need to split keys for each sample)
+    keys = jax.random.split(subkey2, M)
+    X1_hutch, logq1_hutch = jax.vmap(lambda x, k: hutchinson_flow.apply_map_and_log_prob(x, key=k))(X0, keys)
+
+    assert X1_hutch.shape == X1_exact.shape
+    assert logq1_hutch.shape == (M,)
+    assert jnp.allclose(X1_exact, X1_hutch, atol=1e-5)
+
+
+def test_hutchinson_log_prob(hutchinson_flow_setup, flow_setup):
+    """Test Hutchinson log_prob method."""
+    hutchinson_flow = hutchinson_flow_setup
+    exact_flow = flow_setup
+    key = jax.random.PRNGKey(0)
+    key, subkey1, subkey2 = jax.random.split(key, 3)
+
+    x0 = exact_flow.base_distribution.sample(seed=subkey1)
+    x1 = exact_flow.apply_map(x0)
+
+    # Exact log prob
+    log_prob_exact = exact_flow.log_prob(x1)
+
+    # Hutchinson log prob
+    log_prob_hutch = hutchinson_flow.log_prob(x1, key=subkey2)
+
+    # Should be reasonably close
+    assert jnp.abs(log_prob_exact - log_prob_hutch) < 1.0
+
+
+def test_hutchinson_distrax_interface(hutchinson_flow_setup):
+    """Test that Hutchinson flow works with distrax sampling interface."""
+    flow = hutchinson_flow_setup
+    key = jax.random.PRNGKey(0)
+
+    # sample_and_log_prob should work with Hutchinson
+    samples, log_probs = flow.sample_and_log_prob(seed=key, sample_shape=(10,))
+    assert samples.shape == (10,) + flow.event_shape
+    assert log_probs.shape == (10,)
+
+
+def test_hutchinson_performance(benchmark, hutchinson_flow_setup):
+    """Benchmark Hutchinson estimator."""
+    flow = hutchinson_flow_setup
+    key = jax.random.PRNGKey(0)
+    key, subkey1, subkey2 = jax.random.split(key, 3)
+    x0 = flow.base_distribution.sample(seed=subkey1)
+
+    def run_apply_map_and_log_prob():
+        x1, logq1 = flow.apply_map_and_log_prob(x0, key=subkey2)
+        x1.block_until_ready()
+        logq1.block_until_ready()
+        return x1, logq1
+
+    benchmark(run_apply_map_and_log_prob)
