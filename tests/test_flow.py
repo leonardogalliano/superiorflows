@@ -188,13 +188,9 @@ def test_flow_log_prob_batched(flow_setup):
     flow = flow_setup
     key = jax.random.PRNGKey(0)
     samples = flow.sample(seed=key, sample_shape=(10,))
-
-    # Test batch log_prob
     log_probs = flow.log_prob(samples)
     assert log_probs.shape == (10,)
 
-    # Verify against vmapped single log_prob (simulating old behavior or verifying correctness)
-    # We can't access "old" log_prob easily, but we can manually loop or use vmap on single items
     def single_log_prob(x):
         return flow.log_prob(x)
 

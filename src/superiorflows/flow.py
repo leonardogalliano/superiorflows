@@ -1,3 +1,9 @@
+"""Continuous Normalizing Flows (CNF) implementation in JAX.
+
+This module provides a flexible, JAX-friendly implementation of continuous
+normalizing flows that can handle arbitrary pytree structures as inputs.
+This is particularly useful for complex state structures like physical systems.
+"""
 from typing import Any, Callable, Dict, Optional
 
 import diffrax as dfx
@@ -10,6 +16,22 @@ __all__ = ["Flow"]
 
 
 def _compute_velocity_and_divergence(velocity_field, t, x, args):
+    """Compute velocity field and its divergence for arbitrary pytree inputs.
+
+    Uses jax.jacfwd to efficiently compute the Jacobian and extract its trace
+    (divergence). The pytree is flattened for Jacobian computation and then
+    unraveled back to the original structure.
+
+    Args:
+        velocity_field: Callable (t, x, args) -> velocity pytree with same structure as x
+        t: Current time (scalar)
+        x: State pytree (dynamic components only)
+        args: Additional arguments passed to velocity_field
+
+    Returns:
+        Tuple of (velocity, divergence) where velocity has same structure as x
+        and divergence is a scalar.
+    """
     x_flat, unravel = jax.flatten_util.ravel_pytree(x)
 
     def v_flat(x_flat_):
@@ -18,20 +40,66 @@ def _compute_velocity_and_divergence(velocity_field, t, x, args):
         v_flattened, _ = jax.flatten_util.ravel_pytree(v)
         return v_flattened
 
-    y_flat, jvp_fun = jax.linearize(v_flat, x_flat)
+    y_flat = v_flat(x_flat)
     v = unravel(y_flat)
-    identity = jnp.eye(x_flat.size)
-    cols = jax.vmap(jvp_fun)(identity)
-    divergence = jnp.trace(cols)
+    jac = jax.jacfwd(v_flat)(x_flat)
+    divergence = jnp.trace(jac)
     return v, divergence
 
 
 def _augmented_dynamics(t, y, args, velocity_field):
+    """Augmented ODE dynamics for computing the change of variables formula.
+
+    Solves the coupled system:
+        dx/dt = v(t, x)
+        d(log q)/dt = -div(v(t, x))
+
+    where div(v) is the divergence of the velocity field.
+
+    Args:
+        t: Current time (scalar)
+        y: Dictionary with keys "x" (state) and "logq" (log probability)
+        args: Additional arguments for velocity_field
+        velocity_field: The velocity field callable
+
+    Returns:
+        Dictionary with derivatives {"x": v, "logq": -div_v}
+    """
     v, div_v = _compute_velocity_and_divergence(velocity_field, t, y["x"], args)
     return {"x": v, "logq": -div_v}
 
 
 class Flow(eqx.Module, dsx.Distribution):
+    """Continuous Normalizing Flow for generative modeling.
+
+    A Flow transforms samples from a base distribution through a learned
+    velocity field, enabling exact density evaluation via the instantaneous
+    change of variables formula.
+
+    The flow supports arbitrary pytree structures as inputs, making it suitable
+    for particle systems with complex state structures (e.g., positions, species,
+    box vectors). Use the `dynamic_mask` to specify which parts of the pytree
+    should be transformed (dynamic) vs. kept constant (context).
+
+    Attributes:
+        velocity_field: Callable with signature (t, x, args) -> velocity pytree.
+            The velocity field defining the flow dynamics. Must return a pytree
+            with the same structure as the dynamic part of x.
+        base_distribution: A distrax.Distribution representing the base/prior.
+        dynamic_mask: A pytree or callable that returns True for leaves to flow,
+            False for static context. Defaults to flowing all inexact arrays.
+        solver: Diffrax solver for forward/inverse integration (default: Tsit5).
+        augmented_solver: Solver for augmented ODE with log-prob (default: Tsit5).
+        t0: Start time of the flow (default: 0.0).
+        t1: End time of the flow (default: 1.0).
+        dt0: Initial step size (optional, None for adaptive).
+        stepsize_controller: Controller for adaptive stepping (default: PIDController).
+        augmented_stepsize_controller: Controller for augmented ODE.
+        extra_args: Additional kwargs passed to diffrax.diffeqsolve.
+        augmented_extra_args: Additional kwargs for augmented ODE solve.
+
+    """
+
     velocity_field: Callable
     base_distribution: dsx.Distribution
     dynamic_mask: Callable = eqx.field(
@@ -91,6 +159,19 @@ class Flow(eqx.Module, dsx.Distribution):
 
     @eqx.filter_jit
     def integrate(self, x0, **kwargs):
+        """Integrate the ODE from t0 to t1 (or as specified in kwargs).
+
+        Args:
+            x0: Initial state (pytree matching base_distribution.event_shape).
+            **kwargs: Override solver parameters. Common options:
+                - t0, t1: Override integration bounds
+                - dt0: Override initial step size
+                - saveat: diffrax.SaveAt for saving intermediate states
+                - args: User arguments passed to velocity_field
+
+        Returns:
+            diffrax solution object with .ys containing the trajectory.
+        """
         solver_args = dict(
             solver=self.solver,
             t0=self.t0,
@@ -117,12 +198,36 @@ class Flow(eqx.Module, dsx.Distribution):
 
     @eqx.filter_jit
     def apply_map(self, x0, **kwargs):
+        """Apply the forward flow transformation x0 -> x1.
+
+        Transforms a sample from the base distribution (at t0) to the
+        target distribution (at t1).
+
+        Args:
+            x0: Initial state at t0.
+            **kwargs: Override solver parameters (t0, t1, dt0, etc.).
+
+        Returns:
+            Transformed state x1 at t1.
+        """
         saveat = kwargs.pop("saveat", dfx.SaveAt(t1=True))
         sol = self.integrate(x0, saveat=saveat, **kwargs)
         return jax.tree.map(lambda y: y[-1], sol.ys)
 
     @eqx.filter_jit
     def apply_inverse_map(self, x1, **kwargs):
+        """Apply the inverse flow transformation x1 -> x0.
+
+        Transforms a sample from the target distribution (at t1) back to
+        the base distribution (at t0).
+
+        Args:
+            x1: State at t1.
+            **kwargs: Override solver parameters.
+
+        Returns:
+            Reconstructed state x0 at t0.
+        """
         t0 = kwargs.pop("t0", self.t0)
         t1 = kwargs.pop("t1", self.t1)
         saveat = kwargs.pop("saveat", dfx.SaveAt(t1=True))
@@ -163,6 +268,19 @@ class Flow(eqx.Module, dsx.Distribution):
 
     @eqx.filter_jit
     def apply_map_and_log_prob(self, x0, **kwargs):
+        """Apply forward flow and compute log probability simultaneously.
+
+        More efficient than calling apply_map and log_prob separately
+        when you need both the transformed sample and its log probability.
+
+        Args:
+            x0: Initial state sampled from base_distribution.
+            **kwargs: Override solver parameters.
+
+        Returns:
+            Tuple of (x1, log_prob) where x1 is the transformed state
+            and log_prob is the log probability density at x1.
+        """
         saveat = kwargs.pop("saveat", dfx.SaveAt(t1=True))
         sol = self.integrate_augmented_ode(x0, saveat=saveat, **kwargs)
         x1 = jax.tree.map(lambda y: y[-1], sol.ys["x"])
@@ -171,6 +289,23 @@ class Flow(eqx.Module, dsx.Distribution):
 
     @eqx.filter_jit
     def log_prob(self, x1, **kwargs):
+        """Compute log probability density of samples under the flow.
+
+        Inverts the flow to map x1 back to the base distribution and
+        applies the change of variables formula to compute the exact
+        log probability.
+
+        Automatically handles batched inputs: if x1 has an extra leading
+        dimension compared to event_shape, it will vmap over that dimension.
+
+        Args:
+            x1: Sample(s) from the target distribution.
+            **kwargs: Override solver parameters.
+
+        Returns:
+            Log probability density. Shape is () for single sample,
+            (batch_size,) for batched input.
+        """
         event_shape = self.event_shape
 
         def _log_prob(x):
@@ -184,18 +319,35 @@ class Flow(eqx.Module, dsx.Distribution):
             logq0 = self.base_distribution.log_prob(x0)
             return logq0 - f0
 
+        def _has_batch_dimension(x1_leaves, shape_leaves):
+            """Check if all array leaves have a consistent batch dimension."""
+            if len(x1_leaves) == 0 or len(x1_leaves) != len(shape_leaves):
+                return False
+
+            def is_shape_tuple(x):
+                return isinstance(x, tuple) and all(isinstance(i, int) for i in x)
+
+            batch_sizes = []
+            for arr, shape in zip(x1_leaves, shape_leaves):
+                if not is_shape_tuple(shape):
+                    continue
+                if arr.ndim == len(shape) + 1:
+                    batch_sizes.append(arr.shape[0])
+                elif arr.ndim == len(shape):
+                    return False
+                else:
+                    return False
+
+            if len(batch_sizes) == 0:
+                return False
+            return len(set(batch_sizes)) == 1
+
         def is_shape_tuple(x):
             return isinstance(x, tuple) and all(isinstance(i, int) for i in x)
 
         leaves_x1 = jax.tree.leaves(x1)
         leaves_shape = jax.tree.leaves(event_shape, is_leaf=is_shape_tuple)
 
-        has_batch_dim = False
-        if len(leaves_x1) > 0 and len(leaves_x1) == len(leaves_shape):
-            arr, shape = leaves_x1[0], leaves_shape[0]
-            if isinstance(shape, tuple) and arr.ndim == len(shape) + 1:
-                has_batch_dim = True
-
-        if has_batch_dim:
+        if _has_batch_dimension(leaves_x1, leaves_shape):
             return jax.vmap(_log_prob)(x1)
         return _log_prob(x1)
