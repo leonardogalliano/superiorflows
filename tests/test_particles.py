@@ -290,7 +290,7 @@ def test_particle_flow_batched_performance(benchmark, particles_flow_setup):
 
 @eqx.filter_jit
 def foo_loss(flow, X):
-    logq = jax.vmap(flow.log_prob)(X)
+    logq = flow.log_prob(X)
     return jnp.mean(logq)
 
 

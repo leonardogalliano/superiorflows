@@ -1488,6 +1488,22 @@ wheels = [
 ]
 
 [[package]]
+name = "optax"
+version = "0.2.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "absl-py" },
+    { name = "chex" },
+    { name = "jax" },
+    { name = "jaxlib" },
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6d/3b/90c11f740a3538200b61cd2b7d9346959cb9e31e0bdea3d2f886b7262203/optax-0.2.6.tar.gz", hash = "sha256:ba8d1e12678eba2657484d6feeca4fb281b8066bdfd5efbfc0f41b87663109c0", size = 269660, upload-time = "2025-09-15T22:41:24.76Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b8/ec/19c6cc6064c7fc8f0cd6d5b37c4747849e66040c6ca98f86565efc2c227c/optax-0.2.6-py3-none-any.whl", hash = "sha256:f875251a5ab20f179d4be57478354e8e21963373b10f9c3b762b94dcb8c36d91", size = 367782, upload-time = "2025-09-15T22:41:22.825Z" },
+]
+
+[[package]]
 name = "optimistix"
 version = "0.0.11"
 source = { registry = "https://pypi.org/simple" }
@@ -2196,6 +2212,7 @@ dev = [
     { name = "ipykernel" },
     { name = "matplotlib" },
     { name = "notebook" },
+    { name = "optax" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-benchmark" },
@@ -2215,6 +2232,7 @@ dev = [
     { name = "ipykernel", specifier = ">=7.1.0" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "notebook", specifier = ">=7.5.1" },
+    { name = "optax", specifier = ">=0.2.6" },
     { name = "pre-commit", specifier = ">=4.0.1" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-benchmark", specifier = ">=5.2.3" },

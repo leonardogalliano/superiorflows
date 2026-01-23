@@ -270,8 +270,9 @@ class Flow(eqx.Module, dsx.Distribution):
         Returns:
             Transformed state x1 at t1.
         """
-        saveat = kwargs.pop("saveat", dfx.SaveAt(t1=True))
-        sol = self.integrate(x0, saveat=saveat, **kwargs)
+        kw = dict(kwargs)
+        saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
+        sol = self.integrate(x0, saveat=saveat, **kw)
         return jax.tree.map(lambda y: y[-1], sol.ys)
 
     @eqx.filter_jit
@@ -288,10 +289,11 @@ class Flow(eqx.Module, dsx.Distribution):
         Returns:
             Reconstructed state x0 at t0.
         """
-        t0 = kwargs.pop("t0", self.t0)
-        t1 = kwargs.pop("t1", self.t1)
-        saveat = kwargs.pop("saveat", dfx.SaveAt(t1=True))
-        sol = self.integrate(x1, t0=t1, t1=t0, saveat=saveat, **kwargs)
+        kw = dict(kwargs)
+        t0 = kw.pop("t0", self.t0)
+        t1 = kw.pop("t1", self.t1)
+        saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
+        sol = self.integrate(x1, t0=t1, t1=t0, saveat=saveat, **kw)
         return jax.tree.map(lambda y: y[-1], sol.ys)
 
     @eqx.filter_jit
@@ -363,8 +365,9 @@ class Flow(eqx.Module, dsx.Distribution):
             Tuple of (x1, log_prob) where x1 is the transformed state
             and log_prob is the log probability density at x1.
         """
-        saveat = kwargs.pop("saveat", dfx.SaveAt(t1=True))
-        sol = self.integrate_augmented_ode(x0, saveat=saveat, key=key, **kwargs)
+        kw = dict(kwargs)
+        saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
+        sol = self.integrate_augmented_ode(x0, saveat=saveat, key=key, **kw)
         x1 = jax.tree.map(lambda y: y[-1], sol.ys["x"])
         logq1 = sol.ys["logq"][-1]
         return x1, logq1
@@ -393,10 +396,11 @@ class Flow(eqx.Module, dsx.Distribution):
 
         def _log_prob(x, k):
             f = jnp.zeros(())
-            t0 = kwargs.pop("t0", self.t0)
-            t1 = kwargs.pop("t1", self.t1)
-            saveat = kwargs.pop("saveat", dfx.SaveAt(t1=True))
-            sol = self.integrate_augmented_ode(x, t0=t1, t1=t0, logq0=f, saveat=saveat, key=k, **kwargs)
+            kw = dict(kwargs)
+            t0 = kw.pop("t0", self.t0)
+            t1 = kw.pop("t1", self.t1)
+            saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
+            sol = self.integrate_augmented_ode(x, t0=t1, t1=t0, logq0=f, saveat=saveat, key=k, **kw)
             x0 = jax.tree.map(lambda y: y[-1], sol.ys["x"])
             f0 = sol.ys["logq"][-1]
             logq0 = self.base_distribution.log_prob(x0)

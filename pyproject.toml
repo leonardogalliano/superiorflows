@@ -27,6 +27,7 @@ dev = [
     "pytest-benchmark>=5.2.3",
     "ruff>=0.14.10",
     "pre-commit>=4.0.1",
+    "optax>=0.2.6",
 ]
 
 [tool.ruff]
