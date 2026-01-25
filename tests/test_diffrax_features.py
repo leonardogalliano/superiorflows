@@ -527,7 +527,7 @@ def test_solver_benchmark(benchmark, base_distribution, velocity_field, solver_n
     benchmark(run)
 
 
-@pytest.mark.parametrize("dim", [2, 10, 20, 50])
+@pytest.mark.parametrize("dim", [2, 10, 20, 50, 100, 200])
 def test_dimension_scaling_benchmark(benchmark, velocity_field, dim):
     """Benchmark scaling with dimension (exact divergence)."""
     low = -jnp.ones(dim)
@@ -855,7 +855,7 @@ def hutchinson_flow(base_distribution, velocity_field):
     )
 
 
-@pytest.mark.parametrize("dim", [2, 10, 20, 50])
+@pytest.mark.parametrize("dim", [2, 10, 20, 50, 100, 200])
 def test_hutchinson_dimension_scaling_benchmark(benchmark, dim):
     """Benchmark Hutchinson scaling with dimension."""
     low = -jnp.ones(dim)
