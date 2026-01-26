@@ -13,7 +13,6 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List
 
-import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 
 
@@ -206,10 +205,14 @@ def plot_benchmarks(data: Dict[str, Dict], output_file: str = ".benchmarks/bench
 
             # Sort by date
             sorted_pairs = sorted(zip(dates, means, stddevs))
-            plot_dates, plot_means, plot_stds = zip(*sorted_pairs)
+            plot_dates_dt, plot_means, plot_stds = zip(*sorted_pairs)
+
+            # Use ordinal x-axis (0, 1, 2...) but map to dates for consistency
+            # Finding indices in the global sorted `all_dates` list
+            x_indices = [all_dates.index(d) for d in plot_dates_dt]
 
             ax.errorbar(
-                plot_dates,
+                x_indices,
                 plot_means,
                 yerr=plot_stds,
                 label=short_label + label_suffix,
@@ -227,9 +230,27 @@ def plot_benchmarks(data: Dict[str, Dict], output_file: str = ".benchmarks/bench
         # Log scale often better for benchmarks
         ax.set_yscale("log")
 
-        # X-axis formatting
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
-        ax.tick_params(axis="x", rotation=45)
+        # X-axis formatting: Use indices, label with dates
+        # Show all ticks if few, or sparsely if many
+        n_dates = len(all_dates)
+        if n_dates > 0:
+            # Limit to max ~10 ticks to avoid clutter
+            if n_dates <= 12:
+                ticks = range(n_dates)
+            else:
+                # Pick ~10 points including first and last
+                step = n_dates // 10
+                ticks = list(range(0, n_dates, step))
+                if ticks[-1] != n_dates - 1:
+                    ticks.append(n_dates - 1)
+
+            ax.set_xticks(ticks)
+            # Format dates as MM-DD
+            labels = [all_dates[i].strftime("%m-%d") for i in ticks]
+            ax.set_xticklabels(labels, rotation=45, ha="right", fontsize="small")
+
+            # Set limits with some padding
+            ax.set_xlim(-0.5, n_dates - 0.5)
 
         # Legend inside the plot, upper left
         ax.legend(fontsize="x-small", loc="upper left", framealpha=0.9)
