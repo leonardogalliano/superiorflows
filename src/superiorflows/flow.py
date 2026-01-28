@@ -439,12 +439,10 @@ class Flow(eqx.Module, dsx.Distribution):
 
         has_batch, batch_size = _has_batch_dimension(leaves_x1, leaves_shape)
         if has_batch:
-            # Split keys for batch if hutchinson_samples is set
             if key is not None:
                 keys = jax.random.split(key, batch_size)
             else:
-                keys = jnp.zeros((batch_size,), dtype=jnp.uint32)  # Placeholder, won't be used
-                keys = None  # Actually set to None array for vmap
+                keys = None
             if keys is not None:
                 return jax.vmap(_log_prob)(x1, keys)
             else:
