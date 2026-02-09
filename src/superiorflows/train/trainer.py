@@ -30,12 +30,12 @@ def train_step(model, opt_state, batch, key, loss_module, optimizer):
         optimizer: An Optax optimizer.
 
     Returns:
-        A tuple `(updated_model, updated_opt_state, loss)`.
+        A tuple `(updated_model, updated_opt_state, loss, grads)`.
     """
     loss, grads = eqx.filter_value_and_grad(loss_module)(model, batch, key)
     updates, opt_state = optimizer.update(grads, opt_state, model)
     model = eqx.apply_updates(model, updates)
-    return model, opt_state, loss
+    return model, opt_state, loss, grads
 
 
 class Trainer:
@@ -63,7 +63,7 @@ class Trainer:
         model: eqx.Module,
         optimizer: optax.GradientTransformation,
         loss_module: Callable,
-        seed: int = 0,
+        seed: int | jax.Array = 0,
         callbacks: Optional[List[Callback]] = None,
     ):
         """Initialize the Trainer.
@@ -72,7 +72,7 @@ class Trainer:
             model: The Equinox model to train.
             optimizer: An Optax optimizer (e.g., `optax.adam(1e-3)`).
             loss_module: Loss callable with signature `(model, batch, key) -> loss`.
-            seed: Random seed for PRNG initialization.
+            seed: Integer seed or `jax.random.PRNGKey` for initialization.
             callbacks: Optional list of `Callback` instances.
         """
         self.model = model
@@ -81,7 +81,11 @@ class Trainer:
 
         self.opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
-        self.key = jax.random.key(seed)
+        if isinstance(seed, int):
+            self.key = jax.random.key(seed)
+        else:
+            self.key = seed
+
         self.callbacks: List[Callback] = callbacks if callbacks is not None else []
         self.step = 0
 
@@ -128,7 +132,7 @@ class Trainer:
 
             self.key, subkey = jax.random.split(self.key)
 
-            self.model, self.opt_state, loss = train_step(
+            self.model, self.opt_state, loss, grads = train_step(
                 self.model,
                 self.opt_state,
                 batch,
@@ -137,7 +141,7 @@ class Trainer:
                 self.optimizer,
             )
 
-            logs = {"loss": loss}
+            logs = {"loss": loss, "grads": grads}
             self._run_callbacks("on_step_end", step=self.step, logs=logs)
 
             if val_loader and self.step % val_freq == 0:

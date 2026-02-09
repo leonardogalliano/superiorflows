@@ -335,6 +335,14 @@ class TestTrainerInitialization:
         assert trainer.model is model
         assert trainer.step == 0
 
+    def test_init_with_prng_key(self, base_dist, model):
+        """Test trainer init with explicit PRNGKey."""
+        optimizer = optax.adam(1e-3)
+        loss_fn = MaximumLikelihoodLoss(base_dist)
+        key = jax.random.key(123)
+        trainer = Trainer(model, optimizer, loss_fn, seed=key)
+        assert jnp.array_equal(trainer.key, key)
+
     def test_init_with_callbacks(self, base_dist, model):
         """Test trainer with callbacks in init."""
         optimizer = optax.adam(1e-3)

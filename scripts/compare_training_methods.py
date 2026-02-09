@@ -8,124 +8,29 @@ This script trains models using:
 
 And compares their convergence and sample quality.
 """
-import time
+import importlib.util
+import sys
 from pathlib import Path
 
 import diffrax as dfx
 import distrax as dsx
-import equinox as eqx
 import jax
 import jax.numpy as jnp
 import matplotlib
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
-import optax
 from superiorflows import Flow
-from superiorflows.train import (
-    CheckpointCallback,
-    EnergyBasedLoss,
-    KullbackLeiblerLoss,
-    LoggerCallback,
-    MaximumLikelihoodLoss,
-    ProgressBarCallback,
-    Trainer,
-)
 
-# =============================================================================
-# Models
-# =============================================================================
+# Import 8_gaussians module dynamically
+script_path = Path(__file__).parent / "8_gaussians.py"
+spec = importlib.util.spec_from_file_location("eight_gaussians", script_path)
+eight_gaussians = importlib.util.module_from_spec(spec)
+sys.modules["eight_gaussians"] = eight_gaussians
+spec.loader.exec_module(eight_gaussians)
 
-
-class MLPVelocity(eqx.Module):
-    """MLP velocity field with time conditioning."""
-
-    mlp: eqx.nn.MLP
-
-    def __init__(self, input_dim: int, width: int, depth: int, *, key):
-        self.mlp = eqx.nn.MLP(
-            in_size=input_dim + 1,
-            out_size=input_dim,
-            width_size=width,
-            depth=depth,
-            activation=jax.nn.tanh,
-            key=key,
-        )
-
-    @eqx.filter_jit
-    def __call__(self, t, x, args):
-        t_feat = jnp.broadcast_to(t, x.shape[:-1] + (1,))
-        return self.mlp(jnp.concatenate([x, t_feat], axis=-1))
-
-
-# =============================================================================
-# Data Loaders
-# =============================================================================
-
-
-def infinite_target_loader(distribution, batch_size, key):
-    """Yields samples from target distribution (for MLE training)."""
-    while True:
-        key, subkey = jax.random.split(key)
-        yield distribution.sample(seed=subkey, sample_shape=(batch_size,))
-
-
-def infinite_base_loader(distribution, batch_size, key):
-    """Yields samples from base distribution (for energy-based training)."""
-    while True:
-        key, subkey = jax.random.split(key)
-        yield distribution.sample(seed=subkey, sample_shape=(batch_size,))
-
-
-# =============================================================================
-# Training Functions
-# =============================================================================
-
-
-def train_model(model, loss_fn, train_loader, val_loader, name, ckpt_path, nsteps=2000, seed=0):
-    """Train a model and return loss history."""
-    optimizer = optax.adam(1e-3)
-
-    # Custom callback to collect loss history
-    class LossHistoryCallback:
-        def __init__(self):
-            self.losses = []
-            self.val_losses = []
-
-        def on_step_end(self, trainer, step, logs, **kwargs):
-            self.losses.append(float(logs["loss"]))
-            if "val_loss" in logs:
-                self.val_losses.append(float(logs["val_loss"]))
-
-    history_cb = LossHistoryCallback()
-
-    # Checkpoint callback
-    ckpt_cb = CheckpointCallback(ckpt_path=ckpt_path, save_freq=500, overwrite=True)
-
-    trainer = Trainer(
-        model=model,
-        optimizer=optimizer,
-        loss_module=loss_fn,
-        seed=seed,
-        callbacks=[LoggerCallback(log_freq=500), ProgressBarCallback(refresh_rate=50), history_cb, ckpt_cb],
-    )
-
-    print(f"\n{'='*60}")
-    print(f"Training: {name}")
-    print(f"Checkpoints: {ckpt_path}")
-    print(f"{'='*60}")
-
-    t_start = time.time()
-    trainer.train(train_loader=train_loader, val_loader=val_loader, max_steps=nsteps, val_freq=250)
-    t_elapsed = time.time() - t_start
-
-    print(f"Done in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)")
-
-    return trainer, history_cb.losses, history_cb.val_losses
-
-
-# =============================================================================
-# Main
-# =============================================================================
+# Expose necessary functions/classes
+train_single_model = eight_gaussians.train_single_model
+MLPVelocity = eight_gaussians.MLPVelocity
 
 
 def main():
@@ -136,90 +41,64 @@ def main():
     # Random seed
     key = jax.random.key(42)
 
-    # =================================================================
-    # 1. Setup distributions
-    # =================================================================
-    d = 2
-
-    # Target: 8 Gaussians in a circle
-    angles = jnp.arange(8) * (jnp.pi / 4)
-    locs = 10.0 * jnp.stack([jnp.sin(angles), jnp.cos(angles)], axis=1)
-    target_dist = dsx.MixtureSameFamily(
-        mixture_distribution=dsx.Categorical(probs=jnp.ones(8) / 8),
-        components_distribution=dsx.MultivariateNormalDiag(loc=locs, scale_diag=jnp.full((8, 2), 0.7)),
-    )
-
-    # Base: Standard Gaussian
-    base_dist = dsx.MultivariateNormalDiag(jnp.zeros(d), jnp.ones(d))
-
-    # =================================================================
-    # 2. Setup loss functions
-    # =================================================================
-    flow_kwargs = dict(stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5))
-
-    loss_mle = MaximumLikelihoodLoss(base_distribution=base_dist, **flow_kwargs)
-    loss_energy = EnergyBasedLoss(base_distribution=base_dist, target_distribution=target_dist, **flow_kwargs)
-    loss_hybrid = KullbackLeiblerLoss(
-        base_distribution=base_dist,
-        target_distribution=target_dist,
-        alpha=0.5,
-        **flow_kwargs,
-    )
-
-    # =================================================================
-    # 3. Train three models
-    # =================================================================
+    # Common parameters
     nsteps = 5000
-    batch_size = 32
-
-    # Same architecture for all
     width = 16
     depth = 3
-    key, k1, k2, k3 = jax.random.split(key, 4)
-    model_mle = MLPVelocity(input_dim=d, width=width, depth=depth, key=k1)
-    model_energy = MLPVelocity(input_dim=d, width=width, depth=depth, key=k2)
-    model_hybrid = MLPVelocity(input_dim=d, width=width, depth=depth, key=k3)
+    batch_size = 32
+    log_freq = 500
 
-    # Data loaders
-    key, k1, k2, k3 = jax.random.split(key, 4)
-    target_loader = infinite_target_loader(target_dist, batch_size, k1)
-    base_loader = infinite_base_loader(base_dist, batch_size, k2)
-    hybrid_loader = infinite_target_loader(target_dist, batch_size, k3)  # KL uses target batches
+    # =================================================================
+    # Train three models using the imported engine
+    # =================================================================
 
-    # Train!
-    # Validation loader (common for all, though energy-based might barely use it correctly if target unknown,
-    # but here we know target)
-    key, val_key = jax.random.split(key)
-    val_data = target_dist.sample(seed=val_key, sample_shape=(1000,))
-    val_loader = [val_data]
-
-    # Train!
-    # MLE
-    trainer_mle, losses_mle, val_losses_mle = train_model(
-        model_mle, loss_mle, target_loader, val_loader, "Maximum Likelihood", "tmp/ckpt_method_mle", nsteps
+    # 1. MLE
+    trainer_mle, losses_mle, val_losses_mle = train_single_model(
+        loss_type="maximum_likelihood",
+        width=width,
+        depth=depth,
+        lr=1e-3,
+        nsteps=nsteps,
+        batch_size=batch_size,
+        seed=0,  # Explicit seeds for reproducibility matching original split logic if needed, but 0 is fine
+        log_freq=log_freq,
+        ckpt_path=Path("tmp/ckpt_method_mle"),
+        overwrite=True,
     )
     model_mle = trainer_mle.model
 
-    # Energy
-    trainer_energy, losses_energy, val_losses_energy = train_model(
-        model_energy,
-        loss_energy,
-        base_loader,
-        val_loader,
-        "Energy-Based (Reverse KL)",
-        "tmp/ckpt_method_energy",
-        nsteps,
+    # 2. Energy
+    trainer_energy, losses_energy, val_losses_energy = train_single_model(
+        loss_type="energy_based",
+        width=width,
+        depth=depth,
+        lr=1e-3,
+        nsteps=nsteps,
+        batch_size=batch_size,
+        seed=0,
+        log_freq=log_freq,
+        ckpt_path=Path("tmp/ckpt_method_energy"),
+        overwrite=True,
     )
     model_energy = trainer_energy.model
 
-    # Hybrid
-    trainer_hybrid, losses_hybrid, val_losses_hybrid = train_model(
-        model_hybrid, loss_hybrid, hybrid_loader, val_loader, "Hybrid KL (alpha=0.5)", "tmp/ckpt_method_hybrid", nsteps
+    # 3. Hybrid
+    trainer_hybrid, losses_hybrid, val_losses_hybrid = train_single_model(
+        loss_type="hybrid",
+        width=width,
+        depth=depth,
+        lr=1e-3,
+        nsteps=nsteps,
+        batch_size=batch_size,
+        seed=0,
+        log_freq=log_freq,
+        ckpt_path=Path("tmp/ckpt_method_hybrid"),
+        overwrite=True,
     )
     model_hybrid = trainer_hybrid.model
 
     # =================================================================
-    # Reload from checkpoints to verify and for plotting
+    # Reload from checkpoints to verify
     # =================================================================
     print("\nReloading best models from checkpoints...")
     trainer_mle.load_checkpoint("tmp/ckpt_method_mle")
@@ -232,11 +111,24 @@ def main():
     model_hybrid = trainer_hybrid.model
 
     # =================================================================
-    # 4. Visualize training curves
+    # Visualizations (Losses, Samples, Animation)
     # =================================================================
+
+    # Setup Target Distribution for plotting (Recreating here as it's needed for plotting)
+    # Target: 8 Gaussians in a circle
+    d = 2
+    angles = jnp.arange(8) * (jnp.pi / 4)
+    locs = 10.0 * jnp.stack([jnp.sin(angles), jnp.cos(angles)], axis=1)
+    target_dist = dsx.MixtureSameFamily(
+        mixture_distribution=dsx.Categorical(probs=jnp.ones(8) / 8),
+        components_distribution=dsx.MultivariateNormalDiag(loc=locs, scale_diag=jnp.full((8, 2), 0.7)),
+    )
+    # Base: Standard Gaussian
+    base_dist = dsx.MultivariateNormalDiag(jnp.zeros(d), jnp.ones(d))
+
+    # --- Plot Losses ---
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    # Smooth losses for visualization
     def smooth(x, window=50):
         kernel = jnp.ones(window) / window
         return jnp.convolve(jnp.array(x), kernel, mode="valid")
@@ -256,9 +148,7 @@ def main():
     plt.savefig(output_dir / "training_comparison_losses.png", dpi=150)
     print(f"\nSaved: {output_dir / 'training_comparison_losses.png'}")
 
-    # =================================================================
-    # 5. Visualize final samples
-    # =================================================================
+    # --- Plot Samples ---
     fig, axes = plt.subplots(1, 4, figsize=(16, 4))
 
     # Compute target density on a grid
@@ -308,9 +198,7 @@ def main():
     plt.savefig(output_dir / "training_comparison_samples.png", dpi=150)
     print(f"Saved: {output_dir / 'training_comparison_samples.png'}")
 
-    # =================================================================
-    # 6. Generate Side-by-Side Animation
-    # =================================================================
+    # --- Generate Animation ---
     print("\nGenerating side-by-side animation...")
 
     # Simulation settings
@@ -337,9 +225,6 @@ def main():
     # Setup figure
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
-    # Common background density
-    # (already computed in step 5: xx, yy, density)
-
     scatters = []
     for i, ax in enumerate(axes):
         ax.contourf(xx, yy, density, levels=20, cmap="Blues", alpha=0.3)
@@ -357,9 +242,6 @@ def main():
         for i, scat in enumerate(scatters):
             data = traj_list[i][:, frame, :]
             scat.set_offsets(data)
-
-        # Optionally update title with time?
-        # fig.suptitle(f"t = {save_times[frame]:.2f}", fontsize=14)
         return scatters
 
     ani = animation.FuncAnimation(fig, animate, frames=n_frames, interval=80, blit=True)

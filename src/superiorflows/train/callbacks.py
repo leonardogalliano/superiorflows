@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import equinox as eqx
+import optax
 import orbax.checkpoint as ocp
 from tqdm.auto import tqdm
 
@@ -93,7 +94,15 @@ class LoggerCallback(Callback):
 
     def on_step_end(self, trainer, step: int, logs: Dict[str, Any], **kwargs):
         if step % self.log_freq == 0:
-            self.log_metrics(step, logs, prefix="Train")
+            # Create a copy to avoid modifying the original logs dict
+            print_logs = logs.copy()
+
+            if "grads" in print_logs:
+                grad_norm = optax.global_norm(print_logs["grads"])
+                print_logs["grad_norm"] = grad_norm
+                del print_logs["grads"]  # Don't print the full gradient pytree
+
+            self.log_metrics(step, print_logs, prefix="Train")
 
     def on_validation_end(self, trainer, metrics: Dict[str, Any], **kwargs):
         step = getattr(trainer, "step", 0)
@@ -139,11 +148,15 @@ class CheckpointCallback(Callback):
     Checkpoints include the model parameters, optimizer state, and step number.
     Uses `CheckpointManager` for automatic cleanup of old checkpoints.
 
+    Existing checkpoints in the directory are respected. The `overwrite` flag
+    controls behavior only when attempting to save a step that already exists.
+
     Args:
         ckpt_path: Directory to save checkpoints.
         save_freq: Save every N steps.
         max_to_keep: Maximum number of checkpoints to retain.
         overwrite: If True, overwrite existing checkpoints at the same step.
+                   If False, skip saving if the step already exists.
     """
 
     def __init__(
