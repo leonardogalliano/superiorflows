@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import optax
 import pytest
-from superiorflows import Flow
+from superiorflows import DistributionDataSource, Flow
 from superiorflows.train import (
     Callback,
     CheckpointCallback,
@@ -18,6 +18,7 @@ from superiorflows.train import (
     KullbackLeiblerLoss,
     LoggerCallback,
     MaximumLikelihoodLoss,
+    ProfilingCallback,
     ProgressBarCallback,
     Trainer,
 )
@@ -82,22 +83,6 @@ def target_dist():
 def model(base_dist):
     """Small MLP velocity model."""
     return MLPVelocity(input_dim=2, width=16, depth=2, key=jax.random.key(42))
-
-
-def finite_loader(dist, batch_size, n_batches, key):
-    """Create a finite loader for testing."""
-    batches = []
-    for i in range(n_batches):
-        key, subkey = jax.random.split(key)
-        batches.append(dist.sample(seed=subkey, sample_shape=(batch_size,)))
-    return batches
-
-
-def infinite_loader(dist, batch_size, key):
-    """Create infinite loader for training."""
-    while True:
-        key, subkey = jax.random.split(key)
-        yield dist.sample(seed=subkey, sample_shape=(batch_size,))
 
 
 # =============================================================================
@@ -270,8 +255,8 @@ class TestLoggerCallback:
         logger = LoggerCallback(log_freq=1)
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[logger])
 
-        loader = infinite_loader(target_dist, batch_size=16, key=jax.random.key(0))
-        trainer.train(loader, max_steps=2)
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        trainer.train(source, max_steps=2)
 
         captured = capsys.readouterr()
         assert "Step 1" in captured.out
@@ -294,8 +279,8 @@ class TestProgressBarCallback:
         pbar = ProgressBarCallback(refresh_rate=1)
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[pbar])
 
-        loader = infinite_loader(target_dist, batch_size=16, key=jax.random.key(0))
-        trainer.train(loader, max_steps=3)
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        trainer.train(source, max_steps=3)
 
         captured = capsys.readouterr()
         assert "Training" in captured.err or "Training" in captured.out
@@ -317,6 +302,58 @@ class TestCheckpointCallback:
         cb_overwrite = CheckpointCallback(ckpt_path=str(tmp_path / "b"), overwrite=True)
         assert cb_no_overwrite.overwrite is False
         assert cb_overwrite.overwrite is True
+
+
+class TestProfilingCallback:
+    """Tests for ProfilingCallback."""
+
+    def test_initialization(self, tmp_path):
+        """Test callback can be created with default and custom values."""
+        cb_default = ProfilingCallback()
+        assert cb_default.warmup_steps == 50
+        assert cb_default.profile_steps is None
+        assert not cb_default._is_profiling
+
+        cb_custom = ProfilingCallback(log_dir=tmp_path / "traces", warmup_steps=10, profile_steps=20)
+        assert cb_custom.warmup_steps == 10
+        assert cb_custom.profile_steps == 20
+        assert cb_custom.log_dir == tmp_path / "traces"
+
+    def test_profiling_creates_trace(self, base_dist, target_dist, model, tmp_path):
+        """Test that profiling actually produces trace files."""
+        trace_dir = tmp_path / "traces"
+        cb = ProfilingCallback(log_dir=trace_dir, warmup_steps=2, profile_steps=3)
+
+        loss_fn = MaximumLikelihoodLoss(base_dist)
+        optimizer = optax.adam(1e-3)
+        trainer = Trainer(model, optimizer, loss_fn, callbacks=[cb])
+
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        trainer.train(source, max_steps=10)
+
+        assert not cb._is_profiling  # should have stopped
+        assert trace_dir.exists()
+        # jax.profiler writes .xplane.pb or similar files
+        trace_files = list(trace_dir.iterdir())
+        assert len(trace_files) > 0, f"No trace files in {trace_dir}"
+
+    def test_profile_steps_none_runs_to_end(self, base_dist, target_dist, model, tmp_path):
+        """Test that profile_steps=None keeps profiling until training ends."""
+        trace_dir = tmp_path / "traces_none"
+        cb = ProfilingCallback(log_dir=trace_dir, warmup_steps=2, profile_steps=None)
+
+        loss_fn = MaximumLikelihoodLoss(base_dist)
+        optimizer = optax.adam(1e-3)
+        trainer = Trainer(model, optimizer, loss_fn, callbacks=[cb])
+
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        trainer.train(source, max_steps=5)
+
+        # on_train_end should have stopped it
+        assert not cb._is_profiling
+        assert trace_dir.exists()
+        trace_files = list(trace_dir.iterdir())
+        assert len(trace_files) > 0
 
 
 # =============================================================================
@@ -369,8 +406,8 @@ class TestTrainerTraining:
         loss_fn = MaximumLikelihoodLoss(base_dist)
         trainer = Trainer(model, optimizer, loss_fn, seed=0)
 
-        loader = infinite_loader(target_dist, batch_size=16, key=jax.random.key(0))
-        final_model = trainer.train(loader, max_steps=5)
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        final_model = trainer.train(source, max_steps=5)
 
         assert trainer.step == 5
         assert final_model is not None
@@ -384,23 +421,23 @@ class TestTrainerTraining:
         initial_loss = loss_fn(model, test_batch, key=jax.random.key(100))
 
         trainer = Trainer(model, optimizer, loss_fn, seed=0)
-        loader = infinite_loader(target_dist, batch_size=64, key=jax.random.key(0))
-        trained_model = trainer.train(loader, max_steps=50)
+        source = DistributionDataSource(target_dist, batch_size=64, seed=0)
+        trained_model = trainer.train(source, max_steps=50)
 
         final_loss = loss_fn(trained_model, test_batch, key=jax.random.key(100))
 
         assert final_loss < initial_loss + 1.0
 
-    def test_training_with_finite_loader(self, base_dist, target_dist, model):
-        """Test training stops gracefully when loader exhausts."""
+    def test_training_with_small_source(self, base_dist, target_dist, model):
+        """Test training with a small data source (grain repeats it)."""
         optimizer = optax.adam(1e-3)
         loss_fn = MaximumLikelihoodLoss(base_dist)
         trainer = Trainer(model, optimizer, loss_fn, seed=0)
 
-        loader = finite_loader(target_dist, batch_size=16, n_batches=3, key=jax.random.key(0))
-        trainer.train(iter(loader), max_steps=10)
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0, length=3)
+        trainer.train(source, max_steps=10)
 
-        assert trainer.step == 4
+        assert trainer.step == 10
 
     def test_training_with_validation(self, base_dist, target_dist, model):
         """Test training with validation runs."""
@@ -414,11 +451,11 @@ class TestTrainerTraining:
                 val_calls.append(metrics)
 
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[ValTracker()])
-        train_loader = infinite_loader(target_dist, batch_size=16, key=jax.random.key(0))
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
         val_data = target_dist.sample(seed=jax.random.key(1), sample_shape=(32,))
         val_loader = [val_data]
 
-        trainer.train(train_loader, val_loader=val_loader, max_steps=10, val_freq=5)
+        trainer.train(source, val_loader=val_loader, max_steps=10, val_freq=5)
 
         assert len(val_calls) == 2
         assert all("val_loss" in m for m in val_calls)
@@ -436,8 +473,8 @@ class TestTrainerCheckpointing:
         cb = CheckpointCallback(ckpt_path=str(ckpt_path), save_freq=5)
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[cb])
 
-        loader = infinite_loader(target_dist, batch_size=16, key=jax.random.key(0))
-        trainer.train(loader, max_steps=10)
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        trainer.train(source, max_steps=10)
 
         cb.checkpointer.wait_until_finished()
         assert len(cb.checkpointer.all_steps()) > 0
@@ -458,9 +495,9 @@ class TestTrainerCheckpointing:
         cb_no = CheckpointCallback(ckpt_path=str(ckpt_path), save_freq=1, overwrite=False)
         trainer1 = Trainer(model, optimizer, loss_fn, callbacks=[cb_no])
 
-        loader = infinite_loader(target_dist, batch_size=16, key=jax.random.key(0))
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
 
-        trainer1.train(loader, max_steps=1)
+        trainer1.train(source, max_steps=1)
         cb_no.checkpointer.wait_until_finished()
 
         step_dir = None
@@ -507,20 +544,19 @@ class TestCompilationEfficiency:
         loss_fn = MaximumLikelihoodLoss(base_dist)
         trainer = Trainer(model, optimizer, loss_fn)
 
-        loader = infinite_loader(target_dist, batch_size=32, key=jax.random.key(0))
-        iter_data = iter(loader)
+        source = DistributionDataSource(target_dist, batch_size=32, seed=0)
 
         times = []
         n_steps = 5
 
         start = time.perf_counter()
-        trainer.train(iter_data, max_steps=1)
+        trainer.train(source, max_steps=1)
         jax.block_until_ready(trainer.model)
         times.append(time.perf_counter() - start)
 
         for i in range(1, n_steps):
             start = time.perf_counter()
-            trainer.train(iter_data, max_steps=i + 1)
+            trainer.train(source, max_steps=i + 1)
             jax.block_until_ready(trainer.model)
             times.append(time.perf_counter() - start)
 
@@ -648,13 +684,8 @@ class TestTrainerWithParticleSystems:
         optimizer = optax.sgd(1e-4)
         trainer = Trainer(velocity_field, optimizer, loss_fn, seed=0)
 
-        def particle_loader():
-            k = jax.random.key(0)
-            while True:
-                k, subkey = jax.random.split(k)
-                yield base_dist.sample(seed=subkey)
-
-        trained_model = trainer.train(particle_loader(), max_steps=5)
+        source = DistributionDataSource(base_dist, batch_size=1, seed=0)
+        trained_model = trainer.train(source, max_steps=5)
 
         assert trainer.step == 5
         flow = Flow(
@@ -686,13 +717,8 @@ class TestTrainerWithParticleSystems:
         optimizer = optax.sgd(1e-4)
         trainer = Trainer(velocity_field, optimizer, loss_fn, seed=0)
 
-        def particle_loader():
-            k = jax.random.key(0)
-            while True:
-                k, subkey = jax.random.split(k)
-                yield base_dist.sample(seed=subkey)
-
-        trainer.train(particle_loader(), max_steps=5)
+        source = DistributionDataSource(base_dist, batch_size=1, seed=0)
+        trainer.train(source, max_steps=5)
         assert trainer.step == 5
 
     def test_particle_gradient_flows(self, particle_setup):
@@ -752,8 +778,8 @@ class TestEndToEndTraining:
         logger = LoggerCallback(log_freq=10)
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[logger])
 
-        loader = infinite_loader(target_dist, batch_size=32, key=jax.random.key(0))
-        trained_model = trainer.train(loader, max_steps=20)
+        source = DistributionDataSource(target_dist, batch_size=32, seed=0)
+        trained_model = trainer.train(source, max_steps=20)
 
         assert trainer.step == 20
 
@@ -769,8 +795,8 @@ class TestEndToEndTraining:
         loss_fn = EnergyBasedLoss(base_dist, target_dist)
         trainer = Trainer(model, optimizer, loss_fn)
 
-        loader = infinite_loader(base_dist, batch_size=32, key=jax.random.key(0))
-        trained_model = trainer.train(loader, max_steps=20)
+        source = DistributionDataSource(base_dist, batch_size=32, seed=0)
+        trained_model = trainer.train(source, max_steps=20)
 
         assert trainer.step == 20
 
@@ -786,8 +812,8 @@ class TestEndToEndTraining:
         loss_fn = KullbackLeiblerLoss(base_dist, target_dist, alpha=0.5)
         trainer = Trainer(model, optimizer, loss_fn)
 
-        loader = infinite_loader(target_dist, batch_size=32, key=jax.random.key(0))
-        trained_model = trainer.train(loader, max_steps=20)
+        source = DistributionDataSource(target_dist, batch_size=32, seed=0)
+        trained_model = trainer.train(source, max_steps=20)
 
         assert trainer.step == 20
 
@@ -812,8 +838,8 @@ class TestHutchinsonTraining:
         loss_fn = MaximumLikelihoodLoss(base_dist, hutchinson_samples=5)
         trainer = Trainer(model, optimizer, loss_fn)
 
-        loader = infinite_loader(target_dist, batch_size=16, key=jax.random.key(0))
-        trained_model = trainer.train(loader, max_steps=10)
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        trained_model = trainer.train(source, max_steps=10)
 
         assert trainer.step == 10
 
@@ -837,8 +863,8 @@ class TestHutchinsonTraining:
         loss_fn = EnergyBasedLoss(base_dist, target_dist, hutchinson_samples=3)
         trainer = Trainer(model, optimizer, loss_fn)
 
-        loader = infinite_loader(base_dist, batch_size=16, key=jax.random.key(0))
-        trained_model = trainer.train(loader, max_steps=10)
+        source = DistributionDataSource(base_dist, batch_size=16, seed=0)
+        trained_model = trainer.train(source, max_steps=10)
 
         assert trainer.step == 10
 
@@ -861,8 +887,8 @@ class TestHutchinsonTraining:
         loss_fn = KullbackLeiblerLoss(base_dist, target_dist, alpha=0.5, hutchinson_samples=3)
         trainer = Trainer(model, optimizer, loss_fn)
 
-        loader = infinite_loader(target_dist, batch_size=16, key=jax.random.key(0))
-        trainer.train(loader, max_steps=10)
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        trainer.train(source, max_steps=10)
 
         assert trainer.step == 10
 
@@ -880,13 +906,13 @@ class TestHutchinsonParticleTraining:
 
         loss_exact = MaximumLikelihoodLoss(base_dist)
         trainer_exact = Trainer(model_exact, optax.adam(1e-3), loss_exact, seed=0)
-        loader_exact = infinite_loader(target_dist, batch_size=32, key=jax.random.key(10))
-        trained_exact = trainer_exact.train(loader_exact, max_steps=20)
+        source_exact = DistributionDataSource(target_dist, batch_size=32, seed=10)
+        trained_exact = trainer_exact.train(source_exact, max_steps=20)
 
         loss_hutch = MaximumLikelihoodLoss(base_dist, hutchinson_samples=5)
         trainer_hutch = Trainer(model_hutch, optax.adam(1e-3), loss_hutch, seed=0)
-        loader_hutch = infinite_loader(target_dist, batch_size=32, key=jax.random.key(10))
-        trained_hutch = trainer_hutch.train(loader_hutch, max_steps=20)
+        source_hutch = DistributionDataSource(target_dist, batch_size=32, seed=10)
+        trained_hutch = trainer_hutch.train(source_hutch, max_steps=20)
 
         x0 = base_dist.sample(seed=jax.random.key(99), sample_shape=(10,))
 

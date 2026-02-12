@@ -12,7 +12,7 @@ import optax
 import orbax.checkpoint as ocp
 from tqdm.auto import tqdm
 
-__all__ = ["Callback", "LoggerCallback", "ProgressBarCallback", "CheckpointCallback"]
+__all__ = ["Callback", "LoggerCallback", "ProgressBarCallback", "CheckpointCallback", "ProfilingCallback"]
 
 
 class Callback:
@@ -94,13 +94,12 @@ class LoggerCallback(Callback):
 
     def on_step_end(self, trainer, step: int, logs: Dict[str, Any], **kwargs):
         if step % self.log_freq == 0:
-            # Create a copy to avoid modifying the original logs dict
             print_logs = logs.copy()
 
             if "grads" in print_logs:
                 grad_norm = optax.global_norm(print_logs["grads"])
                 print_logs["grad_norm"] = grad_norm
-                del print_logs["grads"]  # Don't print the full gradient pytree
+                del print_logs["grads"]
 
             self.log_metrics(step, print_logs, prefix="Train")
 
@@ -145,11 +144,13 @@ class ProgressBarCallback(Callback):
 class CheckpointCallback(Callback):
     """Saves model checkpoints using Orbax.
 
-    Checkpoints include the model parameters, optimizer state, and step number.
-    Uses `CheckpointManager` for automatic cleanup of old checkpoints.
+    Checkpoints are split into separate items following Orbax best practices:
 
-    Existing checkpoints in the directory are respected. The `overwrite` flag
-    controls behavior only when attempting to save a step that already exists.
+    - **model**: model parameters (``StandardSave``)
+    - **optimizer**: optimizer state (``StandardSave``)
+    - **metadata**: step number and data iterator state (``JsonSave``)
+
+    Uses ``CheckpointManager`` for automatic cleanup of old checkpoints.
 
     Args:
         ckpt_path: Directory to save checkpoints.
@@ -175,7 +176,7 @@ class CheckpointCallback(Callback):
         options = ocp.CheckpointManagerOptions(max_to_keep=max_to_keep, create=True)
         self.checkpointer = ocp.CheckpointManager(
             self.ckpt_path,
-            item_names=("state",),
+            item_names=("model", "optimizer", "metadata"),
             options=options,
         )
 
@@ -208,12 +209,75 @@ class CheckpointCallback(Callback):
             self.checkpointer.wait_until_finished()
             self.checkpointer.delete(step)
 
-        ckpt = {
-            "model": model_params,
-            "opt_state": trainer.opt_state,
-            "step": step,
-        }
+        metadata = {"step": step}
+        if trainer._data_iter is not None:
+            metadata["data_state"] = trainer._data_iter.get_state()
 
-        save_args = ocp.args.Composite(state=ocp.args.StandardSave(ckpt))
+        save_args = ocp.args.Composite(
+            model=ocp.args.StandardSave(model_params),
+            optimizer=ocp.args.StandardSave(trainer.opt_state),
+            metadata=ocp.args.JsonSave(metadata),
+        )
 
         self.checkpointer.save(step, args=save_args, force=force)
+
+
+class ProfilingCallback(Callback):
+    """Captures JAX/XLA traces for performance analysis.
+
+    Wraps ``jax.profiler.start_trace`` / ``stop_trace`` to produce
+    TensorBoard-compatible traces. A configurable warmup period lets
+    JIT compilation finish before profiling begins.
+
+    View traces with::
+
+        tensorboard --logdir <log_dir>
+
+    Args:
+        log_dir: Directory to write trace files.
+        warmup_steps: Steps to skip before starting the trace (lets JIT
+            compilation finish so you only see steady-state performance).
+        profile_steps: Number of steps to profile after warmup.
+            ``None`` means profile until training ends.
+    """
+
+    def __init__(
+        self,
+        log_dir: str | Path = Path("tmp/profiles"),
+        warmup_steps: int = 50,
+        profile_steps: int | None = None,
+    ):
+        self.log_dir = Path(log_dir)
+        self.warmup_steps = warmup_steps
+        self.profile_steps = profile_steps
+        self._is_profiling = False
+
+    def on_train_start(self, trainer, **kwargs):
+        total = kwargs.get("total_steps", "?")
+        tqdm.write(
+            f"[Profiling] Configured: warmup={self.warmup_steps}, "
+            f"profile_steps={self.profile_steps or 'until end'}, "
+            f"total_steps={total}, log_dir={self.log_dir}"
+        )
+
+    def on_step_end(self, trainer, step: int, logs: Dict[str, Any], **kwargs):
+        import jax.profiler
+
+        if step == self.warmup_steps:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+            tqdm.write(f"[Profiling] Starting trace at step {step}...")
+            jax.profiler.start_trace(str(self.log_dir))
+            self._is_profiling = True
+
+        elif self.profile_steps is not None and step == self.warmup_steps + self.profile_steps and self._is_profiling:
+            jax.profiler.stop_trace()
+            self._is_profiling = False
+            tqdm.write(f"[Profiling] Stopped trace at step {step}. " f"Trace saved to {self.log_dir}")
+
+    def on_train_end(self, trainer, **kwargs):
+        import jax.profiler
+
+        if self._is_profiling:
+            jax.profiler.stop_trace()
+            self._is_profiling = False
+            tqdm.write(f"[Profiling] Stopped trace at training end. " f"Trace saved to {self.log_dir}")

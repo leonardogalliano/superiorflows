@@ -4,9 +4,10 @@ This module provides a `Trainer` class that wraps the standard training loop,
 handling optimizer state, PRNG key management, and callback dispatch.
 """
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional
+from typing import Callable, List, Optional
 
 import equinox as eqx
+import grain
 import jax
 import jax.numpy as jnp
 import optax
@@ -42,7 +43,8 @@ class Trainer:
     """Orchestrates the training loop for Equinox models.
 
     The Trainer manages the training state (model, optimizer, step counter)
-    and dispatches events to registered callbacks.
+    and dispatches events to registered callbacks. Data loading is handled
+    via a grain pipeline built from a ``RandomAccessDataSource``.
 
     Attributes:
         model: The Equinox model being trained.
@@ -54,8 +56,10 @@ class Trainer:
         step: Current training step (0-indexed before first step).
 
     Example:
+        >>> from superiorflows.data import DistributionDataSource
+        >>> source = DistributionDataSource(target_dist, batch_size=32)
         >>> trainer = Trainer(model, optax.adam(1e-3), loss_fn)
-        >>> trained_model = trainer.train(data_loader, max_steps=1000)
+        >>> trained_model = trainer.train(source, max_steps=1000)
     """
 
     def __init__(
@@ -88,6 +92,8 @@ class Trainer:
 
         self.callbacks: List[Callback] = callbacks if callbacks is not None else []
         self.step = 0
+        self._data_iter = None
+        self._restored_data_state = None
 
     def add_callback(self, callback: Callback):
         """Register a callback to receive training events.
@@ -99,36 +105,44 @@ class Trainer:
 
     def train(
         self,
-        train_loader: Iterable,
-        val_loader: Optional[Iterable] = None,
+        data_source,
+        val_loader=None,
         max_steps: int = 1000,
         val_freq: int = 100,
+        read_options: Optional[grain.ReadOptions] = None,
     ):
         """Run the training loop.
 
-        Iterates over `train_loader`, performing gradient updates until
-        `max_steps` is reached or the loader is exhausted.
+        Builds a grain pipeline from ``data_source`` with prefetching,
+        then iterates until ``max_steps`` is reached.
 
         Args:
-            train_loader: An iterable yielding training batches.
+            data_source: A ``grain.RandomAccessDataSource`` (or any object
+                with ``__getitem__`` and ``__len__``) yielding training batches.
             val_loader: Optional iterable for validation (consumed each val run).
             max_steps: Maximum number of training steps.
             val_freq: Frequency (in steps) of validation runs.
+            read_options: Grain ``ReadOptions`` for prefetching. Defaults to
+                4 threads and a prefetch buffer of 500.
 
         Returns:
             The trained model.
         """
-        self._run_callbacks("on_train_start", total_steps=max_steps)
+        if read_options is None:
+            read_options = grain.ReadOptions(num_threads=4, prefetch_buffer_size=500)
 
-        iter_data = iter(train_loader)
+        dataset = grain.MapDataset.source(data_source).repeat()
+        self._data_iter = iter(dataset.to_iter_dataset(read_options))
+
+        if self._restored_data_state is not None:
+            self._data_iter.set_state(self._restored_data_state)
+            self._restored_data_state = None
+
+        self._run_callbacks("on_train_start", total_steps=max_steps)
 
         while self.step < max_steps:
             self.step += 1
-            try:
-                batch = next(iter_data)
-            except StopIteration:
-                print("Training loader exhausted.")
-                break
+            batch = next(self._data_iter)
 
             self.key, subkey = jax.random.split(self.key)
 
@@ -187,7 +201,7 @@ class Trainer:
             True if restoration succeeded, False otherwise.
         """
         ckpt_path = Path(ckpt_path).resolve()
-        checkpointer = ocp.CheckpointManager(ckpt_path, item_names=("state",))
+        checkpointer = ocp.CheckpointManager(ckpt_path, item_names=("model", "optimizer", "metadata"))
 
         available_steps = checkpointer.all_steps()
         if not available_steps:
@@ -205,23 +219,22 @@ class Trainer:
 
         model_params = eqx.filter(self.model, eqx.is_array)
 
-        target = {
-            "model": model_params,
-            "opt_state": self.opt_state,
-            "step": 0,
-        }
-
         try:
-            args = ocp.args.Composite(state=ocp.args.StandardRestore(target))
+            args = ocp.args.Composite(
+                model=ocp.args.StandardRestore(model_params),
+                optimizer=ocp.args.StandardRestore(self.opt_state),
+                metadata=ocp.args.JsonRestore(),
+            )
 
             restored = checkpointer.restore(step, args=args)
-            state = restored["state"]
 
             static_model = eqx.filter(self.model, eqx.is_array, inverse=True)
-            self.model = eqx.combine(state["model"], static_model)
+            self.model = eqx.combine(restored.model, static_model)
+            self.opt_state = restored.optimizer
 
-            self.opt_state = state["opt_state"]
-            self.step = state["step"]
+            metadata = restored.metadata
+            self.step = metadata["step"]
+            self._restored_data_state = metadata.get("data_state")
 
             print(f"Restored checkpoint from step {self.step}")
             return True

@@ -17,6 +17,7 @@ dependencies = [
     "tqdm>=4.67.1",
     "optax>=0.2.6",
     "typer>=0.21.1",
+    "grain>=0.2.15",
 ]
 
 [tool.hatch.build]
@@ -31,7 +32,7 @@ dev = [
     "pytest-benchmark>=5.2.3",
     "ruff>=0.14.10",
     "pre-commit>=4.0.1",
-    "grain>=0.2.15",
+    "six>=1.16.0",
 ]
 
 [tool.ruff]

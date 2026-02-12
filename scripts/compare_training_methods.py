@@ -60,7 +60,7 @@ def main():
         lr=1e-3,
         nsteps=nsteps,
         batch_size=batch_size,
-        seed=0,  # Explicit seeds for reproducibility matching original split logic if needed, but 0 is fine
+        seed=0,
         log_freq=log_freq,
         ckpt_path=Path("tmp/ckpt_method_mle"),
         overwrite=True,

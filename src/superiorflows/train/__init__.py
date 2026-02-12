@@ -4,6 +4,7 @@ from superiorflows.train.callbacks import (
     Callback,
     CheckpointCallback,
     LoggerCallback,
+    ProfilingCallback,
     ProgressBarCallback,
 )
 from superiorflows.train.losses import (
@@ -19,6 +20,7 @@ __all__ = [
     "Callback",
     "CheckpointCallback",
     "LoggerCallback",
+    "ProfilingCallback",
     "ProgressBarCallback",
     "MaximumLikelihoodLoss",
     "EnergyBasedLoss",

@@ -8,12 +8,14 @@ import jax
 import jax.numpy as jnp
 import optax
 import typer
+from superiorflows import DistributionDataSource
 from superiorflows.train import (
     CheckpointCallback,
     EnergyBasedLoss,
     KullbackLeiblerLoss,
     LoggerCallback,
     MaximumLikelihoodLoss,
+    ProfilingCallback,
     ProgressBarCallback,
     Trainer,
 )
@@ -43,20 +45,6 @@ class MLPVelocity(eqx.Module):
         return self.mlp(jnp.concatenate([x, t_feat], axis=-1))
 
 
-def infinite_target_loader(distribution, batch_size, key):
-    """Yields samples from target distribution (for MLE training)."""
-    while True:
-        key, subkey = jax.random.split(key)
-        yield distribution.sample(seed=subkey, sample_shape=(batch_size,))
-
-
-def infinite_base_loader(distribution, batch_size, key):
-    """Yields samples from base distribution (for energy-based training)."""
-    while True:
-        key, subkey = jax.random.split(key)
-        yield distribution.sample(seed=subkey, sample_shape=(batch_size,))
-
-
 def train_single_model(
     loss_type: str,
     width: int,
@@ -68,13 +56,16 @@ def train_single_model(
     log_freq: int,
     ckpt_path: Path,
     overwrite: bool,
+    profile: bool = False,
+    profile_log_dir: Path = Path("tmp/profiles"),
+    profile_warmup: int = 50,
+    profile_steps: int | None = None,
 ):
     # Setup key
     key = jax.random.key(seed)
 
-    # Distributions
-    d = 2
     # Target: 8 Gaussians in a circle
+    d = 2
     angles = jnp.arange(8) * (jnp.pi / 4)
     locs = 10.0 * jnp.stack([jnp.sin(angles), jnp.cos(angles)], axis=1)
     target_dist = dsx.MixtureSameFamily(
@@ -89,12 +80,10 @@ def train_single_model(
 
     if loss_type == "maximum_likelihood":
         loss_fn = MaximumLikelihoodLoss(base_distribution=base_dist, **flow_kwargs)
-        key, loader_key = jax.random.split(key)
-        train_loader = infinite_target_loader(target_dist, batch_size, loader_key)
+        data_source = DistributionDataSource(target_dist, batch_size, seed=seed)
     elif loss_type == "energy_based":
         loss_fn = EnergyBasedLoss(base_distribution=base_dist, target_distribution=target_dist, **flow_kwargs)
-        key, loader_key = jax.random.split(key)
-        train_loader = infinite_base_loader(base_dist, batch_size, loader_key)
+        data_source = DistributionDataSource(base_dist, batch_size, seed=seed)
     elif loss_type == "hybrid":
         loss_fn = KullbackLeiblerLoss(
             base_distribution=base_dist,
@@ -102,8 +91,7 @@ def train_single_model(
             alpha=0.5,
             **flow_kwargs,
         )
-        key, loader_key = jax.random.split(key)
-        train_loader = infinite_target_loader(target_dist, batch_size, loader_key)
+        data_source = DistributionDataSource(target_dist, batch_size, seed=seed)
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")
 
@@ -140,6 +128,15 @@ def train_single_model(
         history_cb,
     ]
 
+    if profile:
+        callbacks.append(
+            ProfilingCallback(
+                log_dir=profile_log_dir,
+                warmup_steps=profile_warmup,
+                profile_steps=profile_steps,
+            )
+        )
+
     trainer = Trainer(
         model=model,
         optimizer=optimizer,
@@ -155,7 +152,7 @@ def train_single_model(
     print(f"{'='*60}")
 
     t_start = time.time()
-    trainer.train(train_loader=train_loader, val_loader=val_loader, max_steps=nsteps, val_freq=250)
+    trainer.train(data_source=data_source, val_loader=val_loader, max_steps=nsteps, val_freq=250)
     t_elapsed = time.time() - t_start
 
     print(f"Done in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)")
@@ -176,10 +173,20 @@ def main(
     log_freq: Annotated[int, typer.Option(help="Logging frequency")] = 500,
     ckpt_path: Annotated[Path, typer.Option(help="Checkpoint path")] = Path("tmp/ckpt_8gaussians"),
     overwrite: Annotated[bool, typer.Option(help="Overwrite existing checkpoints")] = True,
+    profile: Annotated[bool, typer.Option(help="Enable JAX profiling")] = False,
+    profile_log_dir: Annotated[Path, typer.Option(help="Directory to save profiling traces")] = Path("tmp/profiles"),
+    profile_warmup: Annotated[int, typer.Option(help="Steps to wait before starting profiling")] = 50,
+    profile_steps: Annotated[int, typer.Option(help="Number of steps to profile (0=until end)")] = 0,
+    device: Annotated[str | None, typer.Option(help="JAX device: 'cpu', 'gpu', or None (auto)")] = None,
 ):
     """
     Train a flow on the 8 Gaussians problem.
     """
+    if device is not None:
+        jax.config.update("jax_platform_name", device)
+        print(f"JAX process: {jax.process_index()}/{jax.process_count()}")
+        print(f"JAX devices: {jax.devices()}")
+
     train_single_model(
         loss_type=loss_type,
         width=width,
@@ -191,6 +198,10 @@ def main(
         log_freq=log_freq,
         ckpt_path=ckpt_path,
         overwrite=overwrite,
+        profile=profile,
+        profile_log_dir=profile_log_dir,
+        profile_warmup=profile_warmup,
+        profile_steps=profile_steps or None,
     )
 
 
