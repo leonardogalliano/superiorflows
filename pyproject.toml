@@ -23,6 +23,12 @@ dependencies = [
 [tool.hatch.build]
 sources = ["src"]
 
+[project.optional-dependencies]
+monitoring = [
+    "tensorboardX",
+    "tensorboard>=2.18",
+]
+
 [dependency-groups]
 dev = [
     "ipykernel>=7.1.0",

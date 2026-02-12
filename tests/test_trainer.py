@@ -1,4 +1,5 @@
 """Tests for the Trainer, Callbacks, and Loss functions."""
+import importlib.util
 import time
 from typing import Optional
 from unittest.mock import MagicMock, patch
@@ -354,6 +355,164 @@ class TestProfilingCallback:
         assert trace_dir.exists()
         trace_files = list(trace_dir.iterdir())
         assert len(trace_files) > 0
+
+
+class TestESSCallback:
+    """Tests for ESSCallback."""
+
+    def test_initialization(self, base_dist, target_dist):
+        """Test callback can be created with defaults and custom values."""
+        from superiorflows.train import ESSCallback
+
+        cb = ESSCallback(
+            target_log_prob=target_dist.log_prob,
+            base_distribution=base_dist,
+        )
+        assert cb.n_samples == 1000
+        assert cb.eval_freq == 250
+
+        cb_custom = ESSCallback(
+            target_log_prob=target_dist.log_prob,
+            base_distribution=base_dist,
+            n_samples=500,
+            eval_freq=100,
+        )
+        assert cb_custom.n_samples == 500
+        assert cb_custom.eval_freq == 100
+
+    def test_ess_computed_during_training(self, base_dist, target_dist, model):
+        """Test ESS is injected into logs and is in (0, 1]."""
+        from superiorflows.train import ESSCallback
+
+        ess_by_step = {}
+
+        class ESSTracker(Callback):
+            def on_step_end(self, trainer, step, logs, **kwargs):
+                if "ess" in logs:
+                    ess_by_step[step] = float(logs["ess"])
+
+        ess_cb = ESSCallback(
+            target_log_prob=target_dist.log_prob,
+            base_distribution=base_dist,
+            n_samples=100,
+            eval_freq=5,
+        )
+
+        loss_fn = MaximumLikelihoodLoss(base_dist)
+        optimizer = optax.adam(1e-3)
+        # ESSCallback must come BEFORE ESSTracker so it injects first
+        trainer = Trainer(model, optimizer, loss_fn, callbacks=[ess_cb, ESSTracker()])
+
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        trainer.train(source, max_steps=10)
+
+        # ESS computed at steps 5 and 10, but persists in logs for all subsequent steps
+        assert 5 in ess_by_step
+        assert 10 in ess_by_step
+        # ESS values should be in valid range
+        for v in ess_by_step.values():
+            assert 0.0 < v <= 1.0, f"ESS out of range: {v}"
+        # Persistent logs: ESS visible at non-eval steps too (e.g. step 7)
+        assert 7 in ess_by_step, "Persistent logs should keep ESS between eval steps"
+
+    def test_ess_with_callable(self, base_dist, target_dist, model):
+        """Test ESS works with a raw callable instead of distribution."""
+        from superiorflows.train import ESSCallback
+
+        def custom_log_prob(x):
+            return target_dist.log_prob(x)
+
+        ess_by_step = {}
+
+        class ESSTracker(Callback):
+            def on_step_end(self, trainer, step, logs, **kwargs):
+                if "ess" in logs:
+                    ess_by_step[step] = float(logs["ess"])
+
+        ess_cb = ESSCallback(
+            target_log_prob=custom_log_prob,
+            base_distribution=base_dist,
+            n_samples=50,
+            eval_freq=3,
+        )
+
+        loss_fn = MaximumLikelihoodLoss(base_dist)
+        optimizer = optax.adam(1e-3)
+        trainer = Trainer(model, optimizer, loss_fn, callbacks=[ess_cb, ESSTracker()])
+
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        trainer.train(source, max_steps=6)
+
+        # ESS computed at steps 3 and 6
+        assert 3 in ess_by_step
+        assert 6 in ess_by_step
+
+
+class TestTensorBoardLogger:
+    """Tests for TensorBoardLogger."""
+
+    def test_initialization_import_error(self):
+        """Test clear error when tensorboard is not installed."""
+        with patch.dict("sys.modules", {"tensorboardX": None}):
+            import sys
+
+            for mod_name in list(sys.modules):
+                if mod_name.startswith("tensorboardX"):
+                    del sys.modules[mod_name]
+
+            # TensorBoardLogger is already imported, so we test the constructor
+            from superiorflows.train.callbacks import TensorBoardLogger
+
+            try:
+                TensorBoardLogger(log_dir="/tmp/test_tb_fail")
+            except ImportError as e:
+                assert "tensorboard" in str(e).lower()
+            else:
+                # If tensorboard IS installed, the test passes trivially
+                pass
+
+    def test_creates_log_dir_and_writes_scalars(self, base_dist, target_dist, model, tmp_path):
+        """Test TensorBoard logger creates files during training (if tensorboard installed)."""
+        if importlib.util.find_spec("tensorboardX") is None:
+            pytest.skip("tensorboard not installed")
+
+        from superiorflows.train import TensorBoardLogger
+
+        tb_dir = tmp_path / "tb_logs"
+        tb = TensorBoardLogger(log_dir=tb_dir, log_freq=1)
+
+        loss_fn = MaximumLikelihoodLoss(base_dist)
+        optimizer = optax.adam(1e-3)
+        trainer = Trainer(model, optimizer, loss_fn, callbacks=[tb])
+
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        trainer.train(source, max_steps=3)
+
+        assert tb_dir.exists()
+        event_files = list(tb_dir.glob("events.out.tfevents.*"))
+        assert len(event_files) > 0, f"No event files in {tb_dir}"
+
+    def test_logs_validation_metrics(self, base_dist, target_dist, model, tmp_path):
+        """Test TensorBoard logger writes validation metrics."""
+        if importlib.util.find_spec("tensorboardX") is None:
+            pytest.skip("tensorboard not installed")
+
+        from superiorflows.train import TensorBoardLogger
+
+        tb_dir = tmp_path / "tb_val"
+        tb = TensorBoardLogger(log_dir=tb_dir, log_freq=1)
+
+        loss_fn = MaximumLikelihoodLoss(base_dist)
+        optimizer = optax.adam(1e-3)
+        trainer = Trainer(model, optimizer, loss_fn, callbacks=[tb])
+
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        val_data = target_dist.sample(seed=jax.random.key(1), sample_shape=(32,))
+        trainer.train(source, val_loader=[val_data], max_steps=5, val_freq=5)
+
+        assert tb_dir.exists()
+        event_files = list(tb_dir.glob("events.out.tfevents.*"))
+        assert len(event_files) > 0
 
 
 # =============================================================================

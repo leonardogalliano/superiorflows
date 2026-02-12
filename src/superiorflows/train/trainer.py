@@ -92,6 +92,7 @@ class Trainer:
 
         self.callbacks: List[Callback] = callbacks if callbacks is not None else []
         self.step = 0
+        self.logs: dict = {}
         self._data_iter = None
         self._restored_data_state = None
 
@@ -155,8 +156,8 @@ class Trainer:
                 self.optimizer,
             )
 
-            logs = {"loss": loss, "grads": grads}
-            self._run_callbacks("on_step_end", step=self.step, logs=logs)
+            self.logs.update({"loss": loss, "grads": grads})
+            self._run_callbacks("on_step_end", step=self.step, logs=self.logs)
 
             if val_loader and self.step % val_freq == 0:
                 val_metrics = self._run_validation(val_loader, self.loss_module)

@@ -5,14 +5,22 @@ progress tracking, checkpointing, and custom behaviors without modifying
 the core `Trainer` logic.
 """
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 import equinox as eqx
 import optax
 import orbax.checkpoint as ocp
 from tqdm.auto import tqdm
 
-__all__ = ["Callback", "LoggerCallback", "ProgressBarCallback", "CheckpointCallback", "ProfilingCallback"]
+__all__ = [
+    "Callback",
+    "LoggerCallback",
+    "ProgressBarCallback",
+    "CheckpointCallback",
+    "ProfilingCallback",
+    "TensorBoardLogger",
+    "ESSCallback",
+]
 
 
 class Callback:
@@ -281,3 +289,129 @@ class ProfilingCallback(Callback):
             jax.profiler.stop_trace()
             self._is_profiling = False
             tqdm.write(f"[Profiling] Stopped trace at training end. " f"Trace saved to {self.log_dir}")
+
+
+class TensorBoardLogger(Callback):
+    """Logs training metrics to TensorBoard for remote monitoring.
+
+    Writes scalar metrics from the ``logs`` dict every ``log_freq`` steps.
+    Works alongside ``LoggerCallback`` — both consume the same ``logs``.
+
+    Requires ``tensorboard`` to be installed::
+
+        pip install tensorboard
+        # or: pip install superiorflows[monitoring]
+
+    View logs remotely with::
+
+        tensorboard --logdir <log_dir> --bind_all
+
+    Args:
+        log_dir: Directory for TensorBoard event files.
+        log_freq: Log scalars every N steps.
+    """
+
+    def __init__(self, log_dir: str | Path = Path("tmp/tb_logs"), log_freq: int = 100):
+        try:
+            from tensorboardX import SummaryWriter
+        except ImportError:
+            raise ImportError(
+                "TensorBoard logging requires the `tensorboardX` package. "
+                "Install it with: pip install tensorboardX  "
+                "or: pip install superiorflows[monitoring]"
+            ) from None
+
+        self.log_dir = Path(log_dir)
+        self.log_freq = log_freq
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self._writer = SummaryWriter(log_dir=str(self.log_dir))
+
+    def _write_scalars(self, step: int, metrics: Dict[str, Any], prefix: str = ""):
+        """Write scalar metrics to TensorBoard."""
+        import optax
+
+        for k, v in metrics.items():
+            if k == "grads":
+                grad_norm = optax.global_norm(v)
+                self._writer.add_scalar(f"{prefix}grad_norm", float(grad_norm), step)
+                continue
+            if isinstance(v, (int, float)):
+                self._writer.add_scalar(f"{prefix}{k}", v, step)
+            elif hasattr(v, "item"):
+                self._writer.add_scalar(f"{prefix}{k}", v.item(), step)
+
+    def on_step_end(self, trainer, step: int, logs: Dict[str, Any], **kwargs):
+        if step % self.log_freq == 0:
+            self._write_scalars(step, logs, prefix="train/")
+
+    def on_validation_end(self, trainer, metrics: Dict[str, Any], **kwargs):
+        step = getattr(trainer, "step", 0)
+        self._write_scalars(step, metrics, prefix="val/")
+
+    def on_train_end(self, trainer, **kwargs):
+        self._writer.flush()
+        self._writer.close()
+
+
+class ESSCallback(Callback):
+    """Monitors Effective Sample Size (ESS) during training.
+
+    Periodically draws samples from the current flow and computes the
+    normalised ESS via importance weights against a target log-probability:
+
+    .. math::
+
+        \\text{ESS} = \\frac{1}{N \\sum_i w_i^2}, \\quad w_i = \\text{softmax}(\\log p(x_i) - \\log q(x_i))
+
+    The ESS is injected into the ``logs`` dict so downstream callbacks
+    (``LoggerCallback``, ``TensorBoardLogger``) automatically pick it up.
+
+    Args:
+        target_log_prob: Callable ``(x) -> log_prob``. Can be a distrax
+            distribution's ``.log_prob`` method, an unnormalised energy
+            function, or any ``(batch,) -> (batch,)`` callable.
+        base_distribution: The base/prior distribution for the flow.
+        flow_kwargs: Extra kwargs passed to ``Flow(...)`` (e.g., ``dt0``).
+        n_samples: Number of samples for ESS estimation.
+        eval_freq: Compute ESS every N steps.
+    """
+
+    def __init__(
+        self,
+        target_log_prob: Callable,
+        base_distribution,
+        flow_kwargs: dict | None = None,
+        n_samples: int = 1000,
+        eval_freq: int = 250,
+    ):
+        self.target_log_prob = target_log_prob
+        self.base_distribution = base_distribution
+        self.flow_kwargs = flow_kwargs or {}
+        self.n_samples = n_samples
+        self.eval_freq = eval_freq
+
+    def on_step_end(self, trainer, step: int, logs: Dict[str, Any], **kwargs):
+        if step % self.eval_freq != 0:
+            return
+
+        import jax
+        import jax.numpy as jnp
+
+        from superiorflows import Flow
+
+        flow = Flow(
+            velocity_field=trainer.model,
+            base_distribution=self.base_distribution,
+            **self.flow_kwargs,
+        )
+
+        key, subkey = jax.random.split(trainer.key)
+        X, log_q = flow.sample_and_log_prob(seed=subkey, sample_shape=(self.n_samples,))
+
+        log_p = self.target_log_prob(X)
+        log_weights = log_p - log_q
+        weights = jax.nn.softmax(log_weights)
+
+        ess = 1.0 / jnp.sum(weights**2) / self.n_samples
+
+        logs["ess"] = ess

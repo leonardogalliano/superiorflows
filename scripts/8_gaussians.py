@@ -12,11 +12,13 @@ from superiorflows import DistributionDataSource
 from superiorflows.train import (
     CheckpointCallback,
     EnergyBasedLoss,
+    ESSCallback,
     KullbackLeiblerLoss,
     LoggerCallback,
     MaximumLikelihoodLoss,
     ProfilingCallback,
     ProgressBarCallback,
+    TensorBoardLogger,
     Trainer,
 )
 from typing_extensions import Annotated
@@ -60,6 +62,11 @@ def train_single_model(
     profile_log_dir: Path = Path("tmp/profiles"),
     profile_warmup: int = 50,
     profile_steps: int | None = None,
+    tensorboard: bool = False,
+    tensorboard_log_dir: Path = Path("tmp/tb_logs"),
+    ess: bool = False,
+    ess_freq: int = 250,
+    ess_samples: int = 1000,
 ):
     # Setup key
     key = jax.random.key(seed)
@@ -120,8 +127,21 @@ def train_single_model(
 
     history_cb = LossHistoryCallback()
 
-    # Callbacks
-    callbacks = [
+    # Callbacks — metric producers first, then consumers
+    callbacks = []
+
+    if ess:
+        callbacks.append(
+            ESSCallback(
+                target_log_prob=target_dist.log_prob,
+                base_distribution=base_dist,
+                flow_kwargs=flow_kwargs,
+                n_samples=ess_samples,
+                eval_freq=ess_freq,
+            )
+        )
+
+    callbacks += [
         LoggerCallback(log_freq=log_freq),
         ProgressBarCallback(refresh_rate=50),
         CheckpointCallback(ckpt_path=ckpt_path, save_freq=500, overwrite=overwrite),
@@ -136,6 +156,9 @@ def train_single_model(
                 profile_steps=profile_steps,
             )
         )
+
+    if tensorboard:
+        callbacks.append(TensorBoardLogger(log_dir=tensorboard_log_dir, log_freq=log_freq))
 
     trainer = Trainer(
         model=model,
@@ -177,6 +200,11 @@ def main(
     profile_log_dir: Annotated[Path, typer.Option(help="Directory to save profiling traces")] = Path("tmp/profiles"),
     profile_warmup: Annotated[int, typer.Option(help="Steps to wait before starting profiling")] = 50,
     profile_steps: Annotated[int, typer.Option(help="Number of steps to profile (0=until end)")] = 0,
+    tensorboard: Annotated[bool, typer.Option(help="Enable TensorBoard logging")] = False,
+    tensorboard_log_dir: Annotated[Path, typer.Option(help="TensorBoard log directory")] = Path("tmp/tb_logs"),
+    ess: Annotated[bool, typer.Option(help="Enable ESS monitoring")] = False,
+    ess_freq: Annotated[int, typer.Option(help="ESS evaluation frequency (steps)")] = 250,
+    ess_samples: Annotated[int, typer.Option(help="Number of samples for ESS estimation")] = 1000,
     device: Annotated[str | None, typer.Option(help="JAX device: 'cpu', 'gpu', or None (auto)")] = None,
 ):
     """
@@ -202,6 +230,11 @@ def main(
         profile_log_dir=profile_log_dir,
         profile_warmup=profile_warmup,
         profile_steps=profile_steps or None,
+        tensorboard=tensorboard,
+        tensorboard_log_dir=tensorboard_log_dir,
+        ess=ess,
+        ess_freq=ess_freq,
+        ess_samples=ess_samples,
     )
 
 

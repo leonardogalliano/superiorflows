@@ -3,9 +3,11 @@
 from superiorflows.train.callbacks import (
     Callback,
     CheckpointCallback,
+    ESSCallback,
     LoggerCallback,
     ProfilingCallback,
     ProgressBarCallback,
+    TensorBoardLogger,
 )
 from superiorflows.train.losses import (
     EnergyBasedLoss,
@@ -19,9 +21,11 @@ __all__ = [
     "train_step",
     "Callback",
     "CheckpointCallback",
+    "ESSCallback",
     "LoggerCallback",
     "ProfilingCallback",
     "ProgressBarCallback",
+    "TensorBoardLogger",
     "MaximumLikelihoodLoss",
     "EnergyBasedLoss",
     "KullbackLeiblerLoss",
