@@ -330,3 +330,123 @@ def test_hutchinson_performance(benchmark, hutchinson_flow_setup):
         return x1, logq1
 
     benchmark(run_apply_map_and_log_prob)
+
+
+# ============================================================================
+# Analytical Divergence Tests
+# ============================================================================
+
+
+def _analytical_divergence(velocity_field, t, x, args):
+    """Analytical divergence for VelocityField: v = -t * x @ A.T.
+
+    For a linear map v_i = -t * sum_j A_{ij} x_j applied to each of the N rows,
+    div(v) = -t * trace(A) * N (the trace is summed over all N particles).
+    """
+    v = velocity_field(t, x, args)
+    # x has shape (N, d) and A has shape (d, d)
+    N = x.shape[0]
+    div_v = -t * jnp.trace(velocity_field.params) * N
+    return v, div_v
+
+
+@pytest.fixture
+def analytical_flow_setup(uniform_distribution_setup, velocity_field_setup):
+    """Flow with analytical divergence function."""
+    uniform_dist = uniform_distribution_setup
+    velocity_field = velocity_field_setup
+    flow = Flow(
+        velocity_field=velocity_field,
+        base_distribution=uniform_dist,
+        stepsize_controller=dfx.PIDController(rtol=1e-7, atol=1e-7),
+        divergence_fn=_analytical_divergence,
+    )
+    return flow
+
+
+def test_analytical_flow(analytical_flow_setup, flow_setup):
+    """Test that analytical divergence gives identical results to exact computation."""
+    analytical_flow = analytical_flow_setup
+    exact_flow = flow_setup
+    key = jax.random.PRNGKey(0)
+    key, subkey = jax.random.split(key)
+
+    x0 = exact_flow.base_distribution.sample(seed=subkey)
+
+    x1_exact, logq1_exact = exact_flow.apply_map_and_log_prob(x0)
+    x1_anal, logq1_anal = analytical_flow.apply_map_and_log_prob(x0)
+
+    assert jnp.allclose(x1_exact, x1_anal, atol=1e-5)
+    assert jnp.allclose(logq1_exact, logq1_anal, atol=1e-4)
+
+
+def test_analytical_flow_batched(analytical_flow_setup, flow_setup):
+    """Test analytical divergence with batched inputs."""
+    analytical_flow = analytical_flow_setup
+    exact_flow = flow_setup
+    key = jax.random.PRNGKey(0)
+    key, subkey = jax.random.split(key)
+    M = 10
+
+    X0 = exact_flow.base_distribution.sample(seed=subkey, sample_shape=(M,))
+
+    X1_exact, logq1_exact = jax.vmap(exact_flow.apply_map_and_log_prob)(X0)
+    X1_anal, logq1_anal = jax.vmap(analytical_flow.apply_map_and_log_prob)(X0)
+
+    assert X1_anal.shape == X1_exact.shape
+    assert logq1_anal.shape == (M,)
+    assert jnp.allclose(X1_exact, X1_anal, atol=1e-5)
+    assert jnp.allclose(logq1_exact, logq1_anal, atol=1e-4)
+
+
+def test_analytical_log_prob(analytical_flow_setup, flow_setup):
+    """Test analytical log_prob method."""
+    analytical_flow = analytical_flow_setup
+    exact_flow = flow_setup
+    key = jax.random.PRNGKey(0)
+    key, subkey = jax.random.split(key)
+
+    x0 = exact_flow.base_distribution.sample(seed=subkey)
+    x1 = exact_flow.apply_map(x0)
+
+    log_prob_exact = exact_flow.log_prob(x1)
+    log_prob_anal = analytical_flow.log_prob(x1)
+
+    assert jnp.allclose(log_prob_exact, log_prob_anal, atol=1e-4)
+
+
+def test_analytical_distrax_interface(analytical_flow_setup):
+    """Test that analytical flow works with distrax sampling interface."""
+    flow = analytical_flow_setup
+    key = jax.random.PRNGKey(0)
+
+    samples, log_probs = flow.sample_and_log_prob(seed=key, sample_shape=(10,))
+    assert samples.shape == (10,) + flow.event_shape
+    assert log_probs.shape == (10,)
+
+
+def test_analytical_performance(benchmark, analytical_flow_setup):
+    """Benchmark analytical divergence."""
+    flow = analytical_flow_setup
+    key = jax.random.PRNGKey(0)
+    key, subkey = jax.random.split(key)
+    x0 = flow.base_distribution.sample(seed=subkey)
+
+    def run_apply_map_and_log_prob():
+        x1, logq1 = flow.apply_map_and_log_prob(x0)
+        x1.block_until_ready()
+        logq1.block_until_ready()
+        return x1, logq1
+
+    benchmark(run_apply_map_and_log_prob)
+
+
+def test_divergence_fn_and_hutchinson_exclusive(uniform_distribution_setup, velocity_field_setup):
+    """Test that setting both divergence_fn and hutchinson_samples raises ValueError."""
+    with pytest.raises(ValueError, match="Cannot set both"):
+        Flow(
+            velocity_field=velocity_field_setup,
+            base_distribution=uniform_distribution_setup,
+            divergence_fn=_analytical_divergence,
+            hutchinson_samples=5,
+        )

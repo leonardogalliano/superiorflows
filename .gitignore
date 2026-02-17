@@ -19,6 +19,8 @@ wheels/
 # Output files
 .benchmarks/
 tmp/
+log_error/
+log_output/
 
 # Other files
 .DS_Store

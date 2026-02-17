@@ -105,7 +105,7 @@ class LoggerCallback(Callback):
             print_logs = logs.copy()
 
             if "grads" in print_logs:
-                grad_norm = optax.global_norm(print_logs["grads"])
+                grad_norm = optax.tree_utils.tree_norm(print_logs["grads"])
                 print_logs["grad_norm"] = grad_norm
                 del print_logs["grads"]
 
@@ -332,7 +332,7 @@ class TensorBoardLogger(Callback):
 
         for k, v in metrics.items():
             if k == "grads":
-                grad_norm = optax.global_norm(v)
+                grad_norm = optax.tree_utils.tree_norm(v)
                 self._writer.add_scalar(f"{prefix}grad_norm", float(grad_norm), step)
                 continue
             if isinstance(v, (int, float)):

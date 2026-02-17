@@ -1094,3 +1094,109 @@ class TestHutchinsonParticleTraining:
         logp_hutch = flow_hutch.log_prob(x1_hutch, key=jax.random.key(100))
         assert jnp.all(jnp.isfinite(logp_exact))
         assert jnp.all(jnp.isfinite(logp_hutch))
+
+
+# =============================================================================
+# Analytical Divergence Training Tests
+# =============================================================================
+
+
+class LinearVelocity(eqx.Module):
+    """Simple linear velocity field v(t, x) = t * W @ x for testing analytical divergence."""
+
+    W: jax.Array
+
+    def __init__(self, dim, *, key):
+        self.W = jax.random.normal(key, (dim, dim)) * 0.1
+
+    def __call__(self, t, x, args):
+        return t * (x @ self.W.T)
+
+
+def _linear_divergence_fn(velocity_field, t, x, args):
+    """Analytical divergence for v(t, x) = t * W @ x.
+
+    div(v) = t * trace(W).
+    """
+    v = velocity_field(t, x, args)
+    div_v = t * jnp.trace(velocity_field.W)
+    return v, div_v
+
+
+class TestAnalyticalDivergenceTraining:
+    """Tests for training with analytical divergence."""
+
+    def test_ml_loss_with_analytical(self, base_dist, target_dist):
+        """Test ML training with analytical divergence."""
+        model = LinearVelocity(dim=2, key=jax.random.key(42))
+        optimizer = optax.adam(1e-3)
+        loss_fn = MaximumLikelihoodLoss(base_dist, divergence_fn=_linear_divergence_fn)
+        trainer = Trainer(model, optimizer, loss_fn)
+
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        trained_model = trainer.train(source, max_steps=10)
+
+        assert trainer.step == 10
+
+        flow = Flow(
+            velocity_field=trained_model,
+            base_distribution=base_dist,
+            divergence_fn=_linear_divergence_fn,
+        )
+        x0 = base_dist.sample(seed=jax.random.key(1), sample_shape=(5,))
+        x1 = jax.vmap(flow.apply_map)(x0)
+        assert x1.shape == (5, 2)
+        assert jnp.all(jnp.isfinite(x1))
+
+        logp = flow.log_prob(x1)
+        assert logp.shape == (5,)
+        assert jnp.all(jnp.isfinite(logp))
+
+    def test_energy_loss_with_analytical(self, base_dist, target_dist):
+        """Test Energy-based training with analytical divergence."""
+        model = LinearVelocity(dim=2, key=jax.random.key(42))
+        optimizer = optax.adam(1e-3)
+        loss_fn = EnergyBasedLoss(base_dist, target_dist, divergence_fn=_linear_divergence_fn)
+        trainer = Trainer(model, optimizer, loss_fn)
+
+        source = DistributionDataSource(base_dist, batch_size=16, seed=0)
+        trained_model = trainer.train(source, max_steps=10)
+
+        assert trainer.step == 10
+
+        flow = Flow(
+            velocity_field=trained_model,
+            base_distribution=base_dist,
+            divergence_fn=_linear_divergence_fn,
+        )
+        x0 = base_dist.sample(seed=jax.random.key(1), sample_shape=(5,))
+        x1, logq = jax.vmap(flow.apply_map_and_log_prob)(x0)
+        assert x1.shape == (5, 2)
+        assert logq.shape == (5,)
+        assert jnp.all(jnp.isfinite(x1))
+        assert jnp.all(jnp.isfinite(logq))
+
+    def test_hybrid_loss_with_analytical(self, base_dist, target_dist):
+        """Test Hybrid KL training with analytical divergence."""
+        model = LinearVelocity(dim=2, key=jax.random.key(42))
+        optimizer = optax.adam(1e-3)
+        loss_fn = KullbackLeiblerLoss(base_dist, target_dist, alpha=0.5, divergence_fn=_linear_divergence_fn)
+        trainer = Trainer(model, optimizer, loss_fn)
+
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        trainer.train(source, max_steps=10)
+
+        assert trainer.step == 10
+
+    def test_analytical_gives_same_as_exact(self, base_dist, target_dist):
+        """Verify analytical divergence training produces same loss as exact."""
+        model = LinearVelocity(dim=2, key=jax.random.key(42))
+        batch = target_dist.sample(seed=jax.random.key(0), sample_shape=(16,))
+
+        loss_exact = MaximumLikelihoodLoss(base_dist)
+        loss_analytical = MaximumLikelihoodLoss(base_dist, divergence_fn=_linear_divergence_fn)
+
+        l_exact = loss_exact(model, batch)
+        l_analytical = loss_analytical(model, batch)
+
+        assert jnp.allclose(l_exact, l_analytical, atol=1e-4)

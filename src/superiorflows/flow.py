@@ -72,30 +72,7 @@ def _divergence_hutchinson(velocity_field, t, x, args, random_vectors):
     return v, divergence
 
 
-def _compute_velocity_and_divergence(velocity_field, t, x, args, random_vectors=None):
-    """Compute velocity field and its divergence for arbitrary pytree inputs.
-
-    Uses jax.jacfwd for exact divergence (when random_vectors is None) or
-    Hutchinson's trace estimator for stochastic approximation.
-
-    Args:
-        velocity_field: Callable (t, x, args) -> velocity pytree with same structure as x
-        t: Current time (scalar)
-        x: State pytree (dynamic components only)
-        args: Additional arguments passed to velocity_field
-        random_vectors: Optional array of shape (n_samples, d) for Hutchinson estimator.
-            If None, uses exact divergence computation.
-
-    Returns:
-        Tuple of (velocity, divergence) where velocity has same structure as x
-        and divergence is a scalar.
-    """
-    if random_vectors is None:
-        return _divergence_exact(velocity_field, t, x, args)
-    return _divergence_hutchinson(velocity_field, t, x, args, random_vectors)
-
-
-def _augmented_dynamics(t, y, args, velocity_field, random_vectors=None):
+def _augmented_dynamics(t, y, args, divergence_fn):
     """Augmented ODE dynamics for computing the change of variables formula.
 
     Solves the coupled system:
@@ -108,13 +85,12 @@ def _augmented_dynamics(t, y, args, velocity_field, random_vectors=None):
         t: Current time (scalar)
         y: Dictionary with keys "x" (state) and "logq" (log probability)
         args: Context pytree passed to velocity_field
-        velocity_field: The velocity field callable
-        random_vectors: Optional Rademacher vectors for Hutchinson estimator
+        divergence_fn: Callable (t, x, args) -> (velocity, divergence)
 
     Returns:
         Dictionary with derivatives {"x": v, "logq": -div_v}
     """
-    v, div_v = _compute_velocity_and_divergence(velocity_field, t, y["x"], args, random_vectors)
+    v, div_v = divergence_fn(t, y["x"], args)
     return {"x": v, "logq": -div_v}
 
 
@@ -130,6 +106,15 @@ class Flow(eqx.Module, dsx.Distribution):
     box vectors). Use the `dynamic_mask` to specify which parts of the pytree
     should be transformed (dynamic) vs. kept constant (context).
 
+    Three divergence computation strategies are available, selected at
+    construction time and resolved once via `__check_init__`:
+
+    - **Exact** (default): Full Jacobian computation, O(d²) complexity.
+    - **Hutchinson**: Stochastic trace estimator, O(d·n_samples) complexity.
+      Activated by setting `hutchinson_samples`.
+    - **Analytical**: User-supplied closed-form divergence. Activated by
+      setting `divergence_fn`.
+
     Attributes:
         velocity_field: Callable with signature (t, x, args) -> velocity pytree.
             The velocity field defining the flow dynamics. Must return a pytree
@@ -137,6 +122,9 @@ class Flow(eqx.Module, dsx.Distribution):
         base_distribution: A distrax.Distribution representing the base/prior.
         dynamic_mask: A pytree or callable that returns True for leaves to flow,
             False for static context. Defaults to flowing all inexact arrays.
+        divergence_fn: Optional callable (velocity_field, t, x, args) -> (v, div_v)
+            providing a closed-form divergence. Mutually exclusive with
+            hutchinson_samples.
         hutchinson_samples: Number of random vectors for stochastic divergence
             estimation. If None (default), uses exact O(d²) computation.
             Set to a positive integer (e.g., 1-10) for O(d) stochastic estimation.
@@ -158,6 +146,7 @@ class Flow(eqx.Module, dsx.Distribution):
         default=lambda x: jax.tree.map(eqx.is_inexact_array, x),
         static=True,
     )
+    divergence_fn: Optional[Callable] = eqx.field(default=None, static=True)
     hutchinson_samples: Optional[int] = eqx.field(default=None, static=True)
     solver: dfx.AbstractSolver = eqx.field(
         default_factory=lambda: dfx.Tsit5(),
@@ -181,6 +170,10 @@ class Flow(eqx.Module, dsx.Distribution):
     extra_args: Dict[str, Any] = eqx.field(default_factory=dict, static=True)
     augmented_extra_args: Dict[str, Any] = eqx.field(default_factory=dict, static=True)
 
+    def __check_init__(self):
+        if self.divergence_fn is not None and self.hutchinson_samples is not None:
+            raise ValueError("Cannot set both divergence_fn and hutchinson_samples. " "Choose one divergence strategy.")
+
     @property
     def event_shape(self):
         return self.base_distribution.event_shape
@@ -192,7 +185,6 @@ class Flow(eqx.Module, dsx.Distribution):
 
     def _sample_n_and_log_prob(self, key, n):
         if self.hutchinson_samples is not None:
-            # Need separate keys for sampling and for Hutchinson estimation
             key1, key2 = jax.random.split(key)
             x0 = self.base_distribution.sample(seed=key1, sample_shape=(n,))
             keys = jax.random.split(key2, n)
@@ -216,6 +208,36 @@ class Flow(eqx.Module, dsx.Distribution):
             ctx,
             is_leaf=lambda x: x is None,
         )
+
+    def _make_divergence_fn(self, random_vectors=None):
+        """Resolve the divergence strategy into a single callable.
+
+        Returns a callable with signature (t, x, args) -> (velocity, divergence)
+        that is fully bound and ready to be passed to _augmented_dynamics.
+        """
+        if self.divergence_fn is not None:
+            vf = self.velocity_field
+
+            def analytical(t, x, args):
+                return self.divergence_fn(vf, t, x, args)
+
+            return analytical
+
+        if self.hutchinson_samples is not None:
+            vf = self.velocity_field
+            rv = random_vectors
+
+            def hutchinson(t, x, args):
+                return _divergence_hutchinson(vf, t, x, args, rv)
+
+            return hutchinson
+
+        vf = self.velocity_field
+
+        def exact(t, x, args):
+            return _divergence_exact(vf, t, x, args)
+
+        return exact
 
     @eqx.filter_jit
     def integrate(self, x0, **kwargs):
@@ -341,9 +363,8 @@ class Flow(eqx.Module, dsx.Distribution):
         else:
             solver_args["args"] = ctx
 
-        term_func = jax.tree_util.Partial(
-            _augmented_dynamics, velocity_field=self.velocity_field, random_vectors=random_vectors
-        )
+        div_fn = self._make_divergence_fn(random_vectors=random_vectors)
+        term_func = jax.tree_util.Partial(_augmented_dynamics, divergence_fn=div_fn)
 
         term = dfx.ODETerm(term_func)
         sol = dfx.diffeqsolve(term, y0=u0, **solver_args)
