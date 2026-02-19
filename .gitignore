@@ -8,6 +8,9 @@ wheels/
 
 # Virtual environments
 .venv/
+.direnv/
+.envrc
+shell.nix
 
 # Cache
 .pytest_cache/

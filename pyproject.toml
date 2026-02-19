@@ -28,6 +28,9 @@ monitoring = [
     "tensorboardX",
     "tensorboard>=2.18",
 ]
+cuda = [
+    "jax[cuda12]",
+]
 
 [dependency-groups]
 dev = [
