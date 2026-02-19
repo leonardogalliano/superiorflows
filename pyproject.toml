@@ -26,7 +26,7 @@ sources = ["src"]
 [project.optional-dependencies]
 monitoring = [
     "tensorboardX",
-    "tensorboard>=2.18",
+    "tb-nightly",
 ]
 cuda = [
     "jax[cuda12]",

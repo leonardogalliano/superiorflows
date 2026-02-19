@@ -114,18 +114,25 @@ def train_single_model(
     val_data = target_dist.sample(seed=val_key, sample_shape=(1000,))
     val_loader = [val_data]
 
-    # Custom callback to collect loss history
-    class LossHistoryCallback:
-        def __init__(self):
-            self.losses = []
-            self.val_losses = []
+    # Construct unique run name for TensorBoard
+    # Convention: {loss_type}_w{width}d{depth}_lr{lr}_s{seed}_{timestamp}
+    import datetime
 
-        def on_step_end(self, trainer, step, logs, **kwargs):
-            self.losses.append(float(logs["loss"]))
-            if "val_loss" in logs:
-                self.val_losses.append(float(logs["val_loss"]))
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"{loss_type}_" f"w{width}d{depth}_" f"lr{lr}_" f"b{batch_size}_" f"s{seed}_" f"{timestamp}"
+    chkpt_run_path = ckpt_path / run_name
+    tb_run_dir = tensorboard_log_dir / run_name
 
-    history_cb = LossHistoryCallback()
+    # HParams dictionary
+    hparams = {
+        "loss_type": loss_type,
+        "width": width,
+        "depth": depth,
+        "lr": lr,
+        "batch_size": batch_size,
+        "seed": seed,
+        "nsteps": nsteps,
+    }
 
     # Callbacks — metric producers first, then consumers
     callbacks = []
@@ -144,8 +151,7 @@ def train_single_model(
     callbacks += [
         LoggerCallback(log_freq=log_freq),
         ProgressBarCallback(refresh_rate=50),
-        CheckpointCallback(ckpt_path=ckpt_path, save_freq=500, overwrite=overwrite),
-        history_cb,
+        CheckpointCallback(ckpt_path=chkpt_run_path, save_freq=500, overwrite=overwrite),
     ]
 
     if profile:
@@ -158,7 +164,7 @@ def train_single_model(
         )
 
     if tensorboard:
-        callbacks.append(TensorBoardLogger(log_dir=tensorboard_log_dir, log_freq=log_freq))
+        callbacks.append(TensorBoardLogger(log_dir=tb_run_dir, log_freq=log_freq, hparams=hparams))
 
     trainer = Trainer(
         model=model,
@@ -170,16 +176,18 @@ def train_single_model(
 
     print(f"\n{'='*60}")
     print("Training 8 Gaussians")
+    print(f"Run Name: {run_name}")
     print(f"Loss: {loss_type}")
-    print(f"Checkpoints: {ckpt_path}")
+    print(f"Checkpoints: {chkpt_run_path}")
+    print(f"TensorBoard: {tb_run_dir}")
     print(f"{'='*60}")
 
     t_start = time.time()
-    trainer.train(data_source=data_source, val_loader=val_loader, max_steps=nsteps, val_freq=250)
+    trainer.train(data_source=data_source, val_loader=val_loader, max_steps=nsteps, val_freq=500)
     t_elapsed = time.time() - t_start
 
     print(f"Done in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)")
-    return trainer, history_cb.losses, history_cb.val_losses
+    return trainer
 
 
 @app.command()
@@ -197,7 +205,7 @@ def main(
     ckpt_path: Annotated[Path, typer.Option(help="Checkpoint path")] = Path("tmp/ckpt_8gaussians"),
     overwrite: Annotated[bool, typer.Option(help="Overwrite existing checkpoints")] = True,
     profile: Annotated[bool, typer.Option(help="Enable JAX profiling")] = False,
-    profile_log_dir: Annotated[Path, typer.Option(help="Directory to save profiling traces")] = Path("tmp/profiles"),
+    profile_log_dir: Annotated[Path, typer.Option(help="Directory to save profiling traces")] = Path("tmp/tb_logs"),
     profile_warmup: Annotated[int, typer.Option(help="Steps to wait before starting profiling")] = 50,
     profile_steps: Annotated[int, typer.Option(help="Number of steps to profile (0=until end)")] = 0,
     tensorboard: Annotated[bool, typer.Option(help="Enable TensorBoard logging")] = False,
