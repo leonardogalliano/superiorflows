@@ -311,7 +311,12 @@ class TensorBoardLogger(Callback):
         log_freq: Log scalars every N steps.
     """
 
-    def __init__(self, log_dir: str | Path = Path("tmp/tb_logs"), log_freq: int = 100):
+    def __init__(
+        self,
+        log_dir: str | Path = Path("tmp/tb_logs"),
+        log_freq: int = 100,
+        hparams: Dict[str, Any] | None = None,
+    ):
         try:
             from tensorboardX import SummaryWriter
         except ImportError:
@@ -323,8 +328,14 @@ class TensorBoardLogger(Callback):
 
         self.log_dir = Path(log_dir)
         self.log_freq = log_freq
+        self.hparams = hparams
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._writer = SummaryWriter(log_dir=str(self.log_dir))
+
+    def on_train_start(self, trainer, **kwargs):
+        """Log hyperparameters at the start of training."""
+        if self.hparams:
+            self._writer.add_hparams(self.hparams, metric_dict={}, name=".", global_step=0)
 
     def _write_scalars(self, step: int, metrics: Dict[str, Any], prefix: str = ""):
         """Write scalar metrics to TensorBoard."""
@@ -343,6 +354,7 @@ class TensorBoardLogger(Callback):
     def on_step_end(self, trainer, step: int, logs: Dict[str, Any], **kwargs):
         if step % self.log_freq == 0:
             self._write_scalars(step, logs, prefix="train/")
+            self._writer.flush()
 
     def on_validation_end(self, trainer, metrics: Dict[str, Any], **kwargs):
         step = getattr(trainer, "step", 0)

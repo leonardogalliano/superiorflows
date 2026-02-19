@@ -53,7 +53,7 @@ def main():
     # =================================================================
 
     # 1. MLE
-    trainer_mle, losses_mle, val_losses_mle = train_single_model(
+    trainer_mle = train_single_model(
         loss_type="maximum_likelihood",
         width=width,
         depth=depth,
@@ -68,7 +68,7 @@ def main():
     model_mle = trainer_mle.model
 
     # 2. Energy
-    trainer_energy, losses_energy, val_losses_energy = train_single_model(
+    trainer_energy = train_single_model(
         loss_type="energy_based",
         width=width,
         depth=depth,
@@ -83,7 +83,7 @@ def main():
     model_energy = trainer_energy.model
 
     # 3. Hybrid
-    trainer_hybrid, losses_hybrid, val_losses_hybrid = train_single_model(
+    trainer_hybrid = train_single_model(
         loss_type="hybrid",
         width=width,
         depth=depth,
@@ -125,28 +125,6 @@ def main():
     )
     # Base: Standard Gaussian
     base_dist = dsx.MultivariateNormalDiag(jnp.zeros(d), jnp.ones(d))
-
-    # --- Plot Losses ---
-    fig, ax = plt.subplots(figsize=(10, 6))
-
-    def smooth(x, window=50):
-        kernel = jnp.ones(window) / window
-        return jnp.convolve(jnp.array(x), kernel, mode="valid")
-
-    steps = range(len(smooth(losses_mle)))
-    ax.plot(steps, smooth(losses_mle), label="Maximum Likelihood", linewidth=2)
-    ax.plot(steps, smooth(losses_energy), label="Energy-Based", linewidth=2)
-    ax.plot(steps, smooth(losses_hybrid), label="Hybrid KL", linewidth=2)
-
-    ax.set_xlabel("Training Step", fontsize=12)
-    ax.set_ylabel("Loss (smoothed)", fontsize=12)
-    ax.set_title("Training Loss Comparison", fontsize=14)
-    ax.legend(fontsize=11)
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig(output_dir / "training_comparison_losses.png", dpi=150)
-    print(f"\nSaved: {output_dir / 'training_comparison_losses.png'}")
 
     # --- Plot Samples ---
     fig, axes = plt.subplots(1, 4, figsize=(16, 4))
