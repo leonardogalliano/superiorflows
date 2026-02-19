@@ -2,9 +2,9 @@ import time
 from pathlib import Path
 
 import diffrax as dfx
-import grain
 import distrax as dsx
 import equinox as eqx
+import grain
 import jax
 import jax.numpy as jnp
 import optax
@@ -187,7 +187,9 @@ def train_single_model(
 
     t_start = time.time()
     read_options = grain.ReadOptions(num_threads=num_workers, prefetch_buffer_size=prefetch_buffer_size)
-    trainer.train(data_source=data_source, val_loader=val_loader, max_steps=nsteps, val_freq=500, read_options=read_options)
+    trainer.train(
+        data_source=data_source, val_loader=val_loader, max_steps=nsteps, val_freq=500, read_options=read_options
+    )
     t_elapsed = time.time() - t_start
 
     print(f"Done in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)")
