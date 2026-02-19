@@ -31,5 +31,6 @@ class DistributionDataSource(grain.sources.RandomAccessDataSource):
         return self._length
 
     def __getitem__(self, idx):
-        key = jax.random.fold_in(jax.random.key(self._seed), idx)
-        return self._distribution.sample(seed=key, sample_shape=(self._batch_size,))
+        with jax.default_device(jax.devices("cpu")[0]):
+            key = jax.random.fold_in(jax.random.key(self._seed), idx)
+            return self._distribution.sample(seed=key, sample_shape=(self._batch_size,))

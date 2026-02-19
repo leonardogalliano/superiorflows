@@ -2,6 +2,7 @@ import time
 from pathlib import Path
 
 import diffrax as dfx
+import grain
 import distrax as dsx
 import equinox as eqx
 import jax
@@ -67,6 +68,8 @@ def train_single_model(
     ess: bool = False,
     ess_freq: int = 250,
     ess_samples: int = 1000,
+    num_workers: int = 1,
+    prefetch_buffer_size: int = 2,
 ):
     # Setup key
     key = jax.random.key(seed)
@@ -183,7 +186,8 @@ def train_single_model(
     print(f"{'='*60}")
 
     t_start = time.time()
-    trainer.train(data_source=data_source, val_loader=val_loader, max_steps=nsteps, val_freq=500)
+    read_options = grain.ReadOptions(num_threads=num_workers, prefetch_buffer_size=prefetch_buffer_size)
+    trainer.train(data_source=data_source, val_loader=val_loader, max_steps=nsteps, val_freq=500, read_options=read_options)
     t_elapsed = time.time() - t_start
 
     print(f"Done in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)")
@@ -214,6 +218,8 @@ def main(
     ess_freq: Annotated[int, typer.Option(help="ESS evaluation frequency (steps)")] = 250,
     ess_samples: Annotated[int, typer.Option(help="Number of samples for ESS estimation")] = 1000,
     device: Annotated[str | None, typer.Option(help="JAX device: 'cpu', 'gpu', or None (auto)")] = None,
+    num_workers: Annotated[int, typer.Option(help="Number of Grain data loading threads (match --cpus-per-task)")] = 1,
+    prefetch_buffer_size: Annotated[int, typer.Option(help="Grain prefetch buffer size")] = 2,
 ):
     """
     Train a flow on the 8 Gaussians problem.
@@ -243,6 +249,8 @@ def main(
         ess=ess,
         ess_freq=ess_freq,
         ess_samples=ess_samples,
+        num_workers=num_workers,
+        prefetch_buffer_size=prefetch_buffer_size,
     )
 
 

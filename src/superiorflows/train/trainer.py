@@ -130,7 +130,7 @@ class Trainer:
             The trained model.
         """
         if read_options is None:
-            read_options = grain.ReadOptions(num_threads=4, prefetch_buffer_size=500)
+            read_options = grain.ReadOptions(num_threads=1, prefetch_buffer_size=2)
 
         dataset = grain.MapDataset.source(data_source).repeat()
         self._data_iter = iter(dataset.to_iter_dataset(read_options))
