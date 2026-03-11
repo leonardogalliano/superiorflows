@@ -497,18 +497,21 @@ class TestTensorBoardLogger:
         if importlib.util.find_spec("tensorboardX") is None:
             pytest.skip("tensorboard not installed")
 
-        from superiorflows.train import TensorBoardLogger
+        from superiorflows.train import TensorBoardLogger, ValidationCallback
 
         tb_dir = tmp_path / "tb_val"
         tb = TensorBoardLogger(log_dir=tb_dir, log_freq=1)
 
         loss_fn = MaximumLikelihoodLoss(base_dist)
         optimizer = optax.adam(1e-3)
-        trainer = Trainer(model, optimizer, loss_fn, callbacks=[tb])
+
+        val_data = [target_dist.sample(seed=jax.random.key(1), sample_shape=(32,))]
+        val_cb = ValidationCallback(val_data=val_data, loss_module=loss_fn, val_freq=5)
+
+        trainer = Trainer(model, optimizer, loss_fn, callbacks=[val_cb, tb])
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        val_data = target_dist.sample(seed=jax.random.key(1), sample_shape=(32,))
-        trainer.train(source, val_loader=[val_data], max_steps=5, val_freq=5)
+        trainer.train(source, max_steps=5)
 
         assert tb_dir.exists()
         event_files = list(tb_dir.glob("events.out.tfevents.*"))
@@ -600,24 +603,32 @@ class TestTrainerTraining:
 
     def test_training_with_validation(self, base_dist, target_dist, model):
         """Test training with validation runs."""
+        from superiorflows.train import ValidationCallback
+
         optimizer = optax.adam(1e-3)
         loss_fn = MaximumLikelihoodLoss(base_dist)
 
-        val_calls = []
+        val_steps = []
 
         class ValTracker(Callback):
-            def on_validation_end(self, trainer, metrics, **kwargs):
-                val_calls.append(metrics)
+            """Track which steps produce new val_loss values."""
 
-        trainer = Trainer(model, optimizer, loss_fn, callbacks=[ValTracker()])
+            def on_step_end(self, trainer, step, logs, **kwargs):
+                if "val_loss" in logs and step % 5 == 0:
+                    val_steps.append(step)
+
+        val_data = [target_dist.sample(seed=jax.random.key(1), sample_shape=(32,))]
+        val_cb = ValidationCallback(val_data=val_data, loss_module=loss_fn, val_freq=5)
+
+        trainer = Trainer(model, optimizer, loss_fn, callbacks=[val_cb, ValTracker()])
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        val_data = target_dist.sample(seed=jax.random.key(1), sample_shape=(32,))
-        val_loader = [val_data]
 
-        trainer.train(source, val_loader=val_loader, max_steps=10, val_freq=5)
+        trainer.train(source, max_steps=10)
 
-        assert len(val_calls) == 2
-        assert all("val_loss" in m for m in val_calls)
+        # ValidationCallback fires at steps 5 and 10
+        assert len(val_steps) == 2
+        assert 5 in val_steps
+        assert 10 in val_steps
 
 
 class TestTrainerCheckpointing:

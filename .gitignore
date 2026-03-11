@@ -15,6 +15,7 @@ shell.nix
 # Cache
 .pytest_cache/
 .ruff_cache/
+.f2py-jit/
 
 # Visual Studio Code
 .vscode/

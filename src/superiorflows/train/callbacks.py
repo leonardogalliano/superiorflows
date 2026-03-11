@@ -5,9 +5,11 @@ progress tracking, checkpointing, and custom behaviors without modifying
 the core `Trainer` logic.
 """
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, List
 
 import equinox as eqx
+import jax
+import jax.numpy as jnp
 import optax
 import orbax.checkpoint as ocp
 from tqdm.auto import tqdm
@@ -15,6 +17,7 @@ from tqdm.auto import tqdm
 __all__ = [
     "Callback",
     "LoggerCallback",
+    "ValidationCallback",
     "ProgressBarCallback",
     "CheckpointCallback",
     "ProfilingCallback",
@@ -33,7 +36,6 @@ class Callback:
         on_train_start(trainer, total_steps): Called before training begins.
         on_train_end(trainer): Called after training completes.
         on_step_end(trainer, step, logs): Called after each training step.
-        on_validation_end(trainer, metrics): Called after each validation run.
     """
 
     def on_train_start(self, trainer, **kwargs):
@@ -51,15 +53,6 @@ class Callback:
             trainer: The Trainer instance.
             step: Current training step (1-indexed).
             logs: Dict containing at least `{"loss": ...}`.
-        """
-        pass
-
-    def on_validation_end(self, trainer, metrics: Dict[str, Any], **kwargs):
-        """Called after each validation run.
-
-        Args:
-            trainer: The Trainer instance.
-            metrics: Dict containing at least `{"val_loss": ...}`.
         """
         pass
 
@@ -111,9 +104,45 @@ class LoggerCallback(Callback):
 
             self.log_metrics(step, print_logs, prefix="Train")
 
-    def on_validation_end(self, trainer, metrics: Dict[str, Any], **kwargs):
-        step = getattr(trainer, "step", 0)
-        self.log_metrics(step, metrics, prefix="Val")
+
+class ValidationCallback(Callback):
+    """Computes validation loss periodically during training.
+
+    Iterates over a fixed validation loader every ``val_freq`` steps,
+    computes the mean loss, and injects ``val_loss`` into the trainer's
+    logs dict so downstream callbacks (``LoggerCallback``,
+    ``TensorBoardLogger``) pick it up automatically.
+
+    Args:
+        val_data: A list of validation batches (or any iterable of batches).
+        loss_module: Loss callable with signature ``(model, batch, key) -> loss``.
+        val_freq: Validate every N steps.
+    """
+
+    def __init__(
+        self,
+        val_data: List,
+        loss_module: Callable,
+        val_freq: int = 100,
+    ):
+        self.val_data = val_data
+        self.loss_module = loss_module
+        self.val_freq = val_freq
+
+    def on_step_end(self, trainer, step: int, logs: Dict[str, Any], **kwargs):
+        if step % self.val_freq != 0:
+            return
+
+        val_losses = []
+        for batch in self.val_data:
+            key, subkey = jax.random.split(trainer.key)
+            trainer.key = key
+            loss = self.loss_module(trainer.model, batch, subkey)
+            val_losses.append(loss)
+
+        if val_losses:
+            avg_loss = jnp.mean(jnp.stack(val_losses))
+            logs["val_loss"] = avg_loss
 
 
 class ProgressBarCallback(Callback):
@@ -355,10 +384,6 @@ class TensorBoardLogger(Callback):
         if step % self.log_freq == 0:
             self._write_scalars(step, logs, prefix="train/")
             self._writer.flush()
-
-    def on_validation_end(self, trainer, metrics: Dict[str, Any], **kwargs):
-        step = getattr(trainer, "step", 0)
-        self._write_scalars(step, metrics, prefix="val/")
 
     def on_train_end(self, trainer, **kwargs):
         self._writer.flush()

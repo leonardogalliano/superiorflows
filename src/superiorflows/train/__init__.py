@@ -8,6 +8,7 @@ from superiorflows.train.callbacks import (
     ProfilingCallback,
     ProgressBarCallback,
     TensorBoardLogger,
+    ValidationCallback,
 )
 from superiorflows.train.losses import (
     EnergyBasedLoss,
@@ -26,6 +27,7 @@ __all__ = [
     "ProfilingCallback",
     "ProgressBarCallback",
     "TensorBoardLogger",
+    "ValidationCallback",
     "MaximumLikelihoodLoss",
     "EnergyBasedLoss",
     "KullbackLeiblerLoss",

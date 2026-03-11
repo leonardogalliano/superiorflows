@@ -320,7 +320,7 @@ def train_model(
     t_start = time.time()
     # No validation loader for now to keep it simple as in original script,
     # but could be added easily.
-    trainer.train(data_source=data_source, val_loader=None, max_steps=nsteps)
+    trainer.train(data_source=data_source, max_steps=nsteps)
     t_elapsed = time.time() - t_start
 
     print(f"Done in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)")

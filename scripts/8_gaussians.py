@@ -21,6 +21,7 @@ from superiorflows.train import (
     ProgressBarCallback,
     TensorBoardLogger,
     Trainer,
+    ValidationCallback,
 )
 from typing_extensions import Annotated
 
@@ -112,10 +113,9 @@ def train_single_model(
     # Optimizer
     optimizer = optax.adam(lr)
 
-    # Validation loader (fixed for consistency)
+    # Validation data (fixed for consistency)
     key, val_key = jax.random.split(key)
-    val_data = target_dist.sample(seed=val_key, sample_shape=(1000,))
-    val_loader = [val_data]
+    val_data = [target_dist.sample(seed=val_key, sample_shape=(1000,))]
 
     # Construct unique run name for TensorBoard
     # Convention: {loss_type}_w{width}d{depth}_lr{lr}_s{seed}_{timestamp}
@@ -152,6 +152,7 @@ def train_single_model(
         )
 
     callbacks += [
+        ValidationCallback(val_data=val_data, loss_module=loss_fn, val_freq=500),
         LoggerCallback(log_freq=log_freq),
         ProgressBarCallback(refresh_rate=50),
         CheckpointCallback(ckpt_path=chkpt_run_path, save_freq=500, overwrite=overwrite),
@@ -187,9 +188,7 @@ def train_single_model(
 
     t_start = time.time()
     read_options = grain.ReadOptions(num_threads=num_workers, prefetch_buffer_size=prefetch_buffer_size)
-    trainer.train(
-        data_source=data_source, val_loader=val_loader, max_steps=nsteps, val_freq=500, read_options=read_options
-    )
+    trainer.train(data_source=data_source, max_steps=nsteps, read_options=read_options)
     t_elapsed = time.time() - t_start
 
     print(f"Done in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)")

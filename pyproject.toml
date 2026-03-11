@@ -20,8 +20,14 @@ dependencies = [
     "grain>=0.2.15",
 ]
 
-[tool.hatch.build]
-sources = ["src"]
+[tool.hatch.build.targets.wheel]
+packages = ["src/superiorflows", "particle_systems"]
+
+[tool.hatch.build.targets.editable]
+paths = ["src/superiorflows", "particle_systems"]
+
+[project.scripts]
+training-particles = "particle_systems.training_particles:app"
 
 [project.optional-dependencies]
 monitoring = [
@@ -42,6 +48,8 @@ dev = [
     "ruff>=0.14.10",
     "pre-commit>=4.0.1",
     "six>=1.16.0",
+    "jax-md>=0.2.27",
+    "atooms-pp>=4.2.1",
 ]
 
 [tool.ruff]

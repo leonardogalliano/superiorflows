@@ -9,7 +9,6 @@ from typing import Callable, List, Optional
 import equinox as eqx
 import grain
 import jax
-import jax.numpy as jnp
 import optax
 import orbax.checkpoint as ocp
 
@@ -107,9 +106,7 @@ class Trainer:
     def train(
         self,
         data_source,
-        val_loader=None,
         max_steps: int = 1000,
-        val_freq: int = 100,
         read_options: Optional[grain.ReadOptions] = None,
     ):
         """Run the training loop.
@@ -120,11 +117,8 @@ class Trainer:
         Args:
             data_source: A ``grain.RandomAccessDataSource`` (or any object
                 with ``__getitem__`` and ``__len__``) yielding training batches.
-            val_loader: Optional iterable for validation (consumed each val run).
             max_steps: Maximum number of training steps.
-            val_freq: Frequency (in steps) of validation runs.
-            read_options: Grain ``ReadOptions`` for prefetching. Defaults to
-                4 threads and a prefetch buffer of 500.
+            read_options: Grain ``ReadOptions`` for prefetching.
 
         Returns:
             The trained model.
@@ -159,37 +153,8 @@ class Trainer:
             self.logs.update({"loss": loss, "grads": grads})
             self._run_callbacks("on_step_end", step=self.step, logs=self.logs)
 
-            if val_loader and self.step % val_freq == 0:
-                val_metrics = self._run_validation(val_loader, self.loss_module)
-                self._run_callbacks("on_validation_end", metrics=val_metrics)
-
         self._run_callbacks("on_train_end")
         return self.model
-
-    def _run_validation(self, val_loader, loss_module):
-        """Compute validation loss over the entire validation set.
-
-        Args:
-            val_loader: An iterable yielding validation batches.
-            loss_module: The loss callable.
-
-        Returns:
-            A dict `{"val_loss": float}`.
-        """
-        val_losses = []
-
-        for batch in val_loader:
-            self.key, subkey = jax.random.split(self.key)
-            loss = loss_module(self.model, batch, subkey)
-            val_losses.append(loss)
-
-        if not val_losses:
-            return {"val_loss": 0.0}
-
-        all_losses = jnp.stack(val_losses)
-        avg_loss = jnp.mean(all_losses)
-
-        return {"val_loss": avg_loss.item()}
 
     def load_checkpoint(self, ckpt_path: str, step: Optional[int] = None):
         """Restore model and optimizer state from an Orbax checkpoint.

@@ -1,0 +1,54 @@
+{
+    "potential": [
+        {
+            "type": "inverse_power",
+            "parameters": {
+                "exponent": 12,
+                "sigma": [
+                    [
+                        1.0,
+                        1.2
+                    ],
+                    [
+                        1.2,
+                        1.4
+                    ]
+                ],
+                "epsilon": [
+                    [
+                        1.0,
+                        1.0
+                    ],
+                    [
+                        1.0,
+                        1.0
+                    ]
+                ]
+            }
+        }
+    ],
+    "cutoff": [
+        {
+            "type": "cut_shift",
+            "parameters": {
+                "rcut": [
+                    [
+                        2.5,
+                        3.0
+                    ],
+                    [
+                        2.5,
+                        3.5
+                    ]
+                ]
+            }
+        }
+    ],
+    "metadata": {
+        "name": "soft_spheres_14",
+        "doi": "",
+        "reference": "",
+        "description": "Binary soft-sphere mixture with size ratio of 1.4",
+        "notes": "Same as BHHP model, but with cutoff set to 2.5 * sigma"
+    }
+}
