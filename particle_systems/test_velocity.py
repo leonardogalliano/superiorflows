@@ -17,7 +17,7 @@ N, d = 10, 2
 @pytest.fixture(scope="module")
 def velocity_field():
     key = jax.random.key(0)
-    return ParticlesMLPVelocity(N=N, d=d, width=32, depth=2, key=key)
+    return ParticlesMLPVelocity(N=N, d=d, n_species=2, width=32, depth=2, key=key)
 
 
 @pytest.fixture(scope="module")

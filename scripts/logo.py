@@ -95,12 +95,7 @@ key, subkey = jax.random.split(key)
 model = MLPVelocity(input_dim=d, width=width, depth=depth, key=subkey)
 
 batch_size = 2048
-train_loader = (
-    grain.MapDataset.source(dataset)
-    .shuffle(seed=10)
-    # .to_iter_dataset()
-    .batch(batch_size=batch_size)
-)
+train_loader = grain.MapDataset.source(dataset).shuffle(seed=10).batch(batch_size=batch_size).repeat()
 
 optimizer = optax.chain(
     optax.clip_by_global_norm(1.0),
@@ -119,7 +114,7 @@ trainer = Trainer(
 )
 
 max_steps = 10000
-# trainer.train(train_loader=train_loader, max_steps=max_steps)
+# trainer.train(dataset=train_loader, max_steps=max_steps)
 
 
 # =================================================================

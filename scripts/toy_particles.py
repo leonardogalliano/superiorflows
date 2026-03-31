@@ -4,6 +4,7 @@ from pathlib import Path
 import diffrax as dfx
 import distrax as dsx
 import equinox as eqx
+import grain
 import jax
 import jax.numpy as jnp
 import optax
@@ -281,7 +282,7 @@ def train_model(
     uniform_dist = UniformToyParticles(L=L, ref_species=ref_species)
 
     # Data Source
-    data_source = DistributionDataSource(target_dist, batch_size)
+    dataset = grain.MapDataset.source(DistributionDataSource(target_dist, batch_size)).repeat()
 
     # Loss & Flow
     flow_kwargs = dict(
@@ -320,7 +321,7 @@ def train_model(
     t_start = time.time()
     # No validation loader for now to keep it simple as in original script,
     # but could be added easily.
-    trainer.train(data_source=data_source, max_steps=nsteps)
+    trainer.train(dataset=dataset, max_steps=nsteps)
     t_elapsed = time.time() - t_start
 
     print(f"Done in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)")

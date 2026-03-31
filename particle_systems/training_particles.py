@@ -108,6 +108,7 @@ def train_single_model(
     log_freq: int,
     ckpt_path: Path,
     overwrite: bool,
+    num_checkpoints: int = 1,
     temperature: float | None = None,
     ess: bool = False,
     ess_freq: int = 250,
@@ -120,6 +121,10 @@ def train_single_model(
     tensorboard_log_dir: Path = Path("tmp/tb_logs"),
     num_workers: int = 1,
     prefetch_buffer_size: int = 2,
+    solver: str = "tsit5",
+    atol: float = 1e-5,
+    rtol: float = 1e-5,
+    euler_steps: int | None = None,
 ):
     key = jax.random.key(seed)
 
@@ -131,11 +136,32 @@ def train_single_model(
     # Distributions
     base_dist = UniformParticles(N=N, d=d, L=L, composition=(0.5, 0.5))
 
-    flow_kwargs = dict(
-        dynamic_mask=ParticleSystem.get_dynamic_mask(),
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
-        augmented_stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
-    )
+    if solver.lower() == "euler":
+        if euler_steps is None:
+            raise ValueError("--euler-steps must be specified when using the 'euler' solver.")
+        flow_kwargs = dict(
+            dynamic_mask=ParticleSystem.get_dynamic_mask(),
+            solver=dfx.Euler(),
+            augmented_solver=dfx.Euler(),
+            stepsize_controller=dfx.ConstantStepSize(),
+            augmented_stepsize_controller=dfx.ConstantStepSize(),
+            dt0=1.0 / euler_steps,
+        )
+    else:
+        if solver.lower() == "tsit5":
+            slv = dfx.Tsit5()
+        elif solver.lower() == "dopri5":
+            slv = dfx.Dopri5()
+        else:
+            raise ValueError(f"Unknown solver '{solver}'.")
+
+        flow_kwargs = dict(
+            dynamic_mask=ParticleSystem.get_dynamic_mask(),
+            solver=slv,
+            augmented_solver=slv,
+            stepsize_controller=dfx.PIDController(rtol=rtol, atol=atol),
+            augmented_stepsize_controller=dfx.PIDController(rtol=rtol, atol=atol),
+        )
 
     # Load Boltzmann model from JSON if provided
     boltzmann_model = None
@@ -157,7 +183,7 @@ def train_single_model(
     # Loss and data source
     if loss_type == "maximum_likelihood":
         loss_fn = MaximumLikelihoodLoss(base_distribution=base_dist, **flow_kwargs)
-        data_source = source.to_dataset(batch_size=batch_size, shuffle=True, seed=seed)
+        dataset = source.to_dataset(batch_size=batch_size, shuffle=True, seed=seed).repeat()
 
     elif loss_type == "energy_based":
         if target_dist is None:
@@ -167,7 +193,7 @@ def train_single_model(
             target_distribution=target_dist,
             **flow_kwargs,
         )
-        data_source = DistributionDataSource(base_dist, batch_size, seed=seed)
+        dataset = grain.MapDataset.source(DistributionDataSource(base_dist, batch_size, seed=seed)).repeat()
 
     elif loss_type == "hybrid":
         if target_dist is None:
@@ -178,14 +204,15 @@ def train_single_model(
             alpha=0.5,
             **flow_kwargs,
         )
-        data_source = source.to_dataset(batch_size=batch_size, shuffle=True, seed=seed)
+        dataset = source.to_dataset(batch_size=batch_size, shuffle=True, seed=seed).repeat()
 
     else:
         raise ValueError(f"Unknown loss_type '{loss_type}'. " "Choose from: maximum_likelihood, energy_based, hybrid.")
 
     # Model
     key, model_key = jax.random.split(key)
-    model = ParticlesMLPVelocity(N=N, d=d, width=width, depth=depth, key=model_key)
+    n_species = len(jnp.unique(jnp.asarray(source[0].species)))
+    model = ParticlesMLPVelocity(N=N, d=d, n_species=n_species, width=width, depth=depth, key=model_key)
     num_params = sum(x.size for x in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_inexact_array)))
 
     # Optimizer
@@ -246,11 +273,12 @@ def train_single_model(
             )
         )
 
+    save_freq = max(1, nsteps // num_checkpoints) if num_checkpoints > 0 else nsteps + 1
     callbacks += [
-        ValidationCallback(val_data=val_data, loss_module=loss_fn, val_freq=500),
+        ValidationCallback(val_data=val_data, loss_module=loss_fn, val_freq=log_freq),
         LoggerCallback(log_freq=log_freq),
         ProgressBarCallback(refresh_rate=max(1, nsteps // 100)),
-        CheckpointCallback(ckpt_path=chkpt_run_path, save_freq=500, overwrite=overwrite),
+        CheckpointCallback(ckpt_path=chkpt_run_path, save_freq=save_freq, overwrite=overwrite),
     ]
 
     if profile:
@@ -276,27 +304,27 @@ def train_single_model(
     model_label = model_file.name if model_file else "none"
     print(f"\n{'='*60}")
     print("Training CNF on particle trajectories")
-    print(f"  Data   : {data_path}")
-    print(f"  Model  : {model_label}")
+    print(f"    Data       : {data_path}")
+    print(f"  Potential    : {model_label}")
     print(f"  N={N}, d={d}, L={L:.4f}")
-    print(f"  Frames : {len(source)}")
-    print(f"  Loss   : {loss_type}")
-    print(f"  MLP    : width={width}, depth={depth}")
-    print(f"  Params : {num_params:,}")
-    print(f"  Run    : {run_name}")
-    print(f"  Ckpts  : {chkpt_run_path}")
+    print(f"  Dataset size : {len(source)}")
+    print(f"  Loss         : {loss_type}")
+    print(f"  MLP          : width={width}, depth={depth}")
+    print(f"  Parameters   : {num_params:,}")
+    print(f"  Run          : {run_name}")
+    print(f"  Ckpts        : {chkpt_run_path}")
     print(f"{'='*60}\n")
 
     t_start = time.time()
     read_options = grain.ReadOptions(num_threads=num_workers, prefetch_buffer_size=prefetch_buffer_size)
     trainer.train(
-        data_source=data_source,
+        dataset=dataset,
         max_steps=nsteps,
         read_options=read_options,
     )
     t_elapsed = time.time() - t_start
 
-    print(f"\nDone in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)")
+    print(f"\nDone in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)\n")
     return trainer
 
 
@@ -318,6 +346,7 @@ def main(
     log_freq: Annotated[int, typer.Option(help="Logging frequency")] = 100,
     ckpt_path: Annotated[Path, typer.Option(help="Checkpoint root path")] = Path("tmp/ckpt_particles"),
     overwrite: Annotated[bool, typer.Option(help="Overwrite existing checkpoints")] = True,
+    num_checkpoints: Annotated[int, typer.Option(help="Number of checkpoints to save during training")] = 1,
     temperature: Annotated[
         float | None, typer.Option(help="Boltzmann temperature — required with --model-file")
     ] = None,
@@ -333,6 +362,12 @@ def main(
     device: Annotated[str | None, typer.Option(help="JAX device: cpu | gpu | None")] = None,
     num_workers: Annotated[int, typer.Option(help="Grain data loading threads")] = 1,
     prefetch_buffer_size: Annotated[int, typer.Option(help="Grain prefetch buffer size")] = 2,
+    solver: Annotated[str, typer.Option(help="ODE solver (tsit5, dopri5, euler)")] = "tsit5",
+    atol: Annotated[float, typer.Option(help="Absolute tolerance for adaptive solvers")] = 1e-5,
+    rtol: Annotated[float, typer.Option(help="Relative tolerance for adaptive solvers")] = 1e-5,
+    euler_steps: Annotated[
+        int | None, typer.Option(help="Number of steps for Euler solver (required if solver=euler)")
+    ] = None,
 ):
     """Train a CNF on MD particle trajectory data."""
     if device is not None:
@@ -353,6 +388,7 @@ def main(
         log_freq=log_freq,
         ckpt_path=ckpt_path,
         overwrite=overwrite,
+        num_checkpoints=num_checkpoints,
         temperature=temperature,
         ess=ess,
         ess_freq=ess_freq,
@@ -365,6 +401,10 @@ def main(
         tensorboard_log_dir=tensorboard_log_dir,
         num_workers=num_workers,
         prefetch_buffer_size=prefetch_buffer_size,
+        solver=solver,
+        atol=atol,
+        rtol=rtol,
+        euler_steps=euler_steps,
     )
 
 

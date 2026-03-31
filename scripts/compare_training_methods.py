@@ -197,6 +197,15 @@ def main():
     traj_energy = get_trajectories(model_energy)
     traj_hybrid = get_trajectories(model_hybrid)
 
+    # Save and reload trajectories
+    jnp.save(output_dir / "traj_mle.npy", traj_mle)
+    jnp.save(output_dir / "traj_energy.npy", traj_energy)
+    jnp.save(output_dir / "traj_hybrid.npy", traj_hybrid)
+
+    traj_mle = jnp.load(output_dir / "traj_mle.npy")
+    traj_energy = jnp.load(output_dir / "traj_energy.npy")
+    traj_hybrid = jnp.load(output_dir / "traj_hybrid.npy")
+
     traj_list = [traj_mle, traj_energy, traj_hybrid]
     titles = ["Maximum Likelihood", "Energy-Based", "Hybrid KL"]
 

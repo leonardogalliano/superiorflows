@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import diffrax as dfx
 import distrax as dsx
 import equinox as eqx
+import grain
 import jax
 import jax.numpy as jnp
 import optax
@@ -15,6 +16,7 @@ from superiorflows import DistributionDataSource, Flow
 from superiorflows.train import (
     Callback,
     CheckpointCallback,
+    DatasetExhausted,
     EnergyBasedLoss,
     KullbackLeiblerLoss,
     LoggerCallback,
@@ -257,7 +259,8 @@ class TestLoggerCallback:
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[logger])
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        trainer.train(source, max_steps=2)
+        dataset = grain.MapDataset.source(source).repeat()
+        trainer.train(dataset, max_steps=2)
 
         captured = capsys.readouterr()
         assert "Step 1" in captured.out
@@ -281,7 +284,8 @@ class TestProgressBarCallback:
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[pbar])
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        trainer.train(source, max_steps=3)
+        dataset = grain.MapDataset.source(source).repeat()
+        trainer.train(dataset, max_steps=3)
 
         captured = capsys.readouterr()
         assert "Training" in captured.err or "Training" in captured.out
@@ -330,7 +334,8 @@ class TestProfilingCallback:
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[cb])
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        trainer.train(source, max_steps=10)
+        dataset = grain.MapDataset.source(source).repeat()
+        trainer.train(dataset, max_steps=10)
 
         assert not cb._is_profiling  # should have stopped
         assert trace_dir.exists()
@@ -348,7 +353,8 @@ class TestProfilingCallback:
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[cb])
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        trainer.train(source, max_steps=5)
+        dataset = grain.MapDataset.source(source).repeat()
+        trainer.train(dataset, max_steps=5)
 
         # on_train_end should have stopped it
         assert not cb._is_profiling
@@ -404,7 +410,8 @@ class TestESSCallback:
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[ess_cb, ESSTracker()])
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        trainer.train(source, max_steps=10)
+        dataset = grain.MapDataset.source(source).repeat()
+        trainer.train(dataset, max_steps=10)
 
         # ESS computed at steps 5 and 10, but persists in logs for all subsequent steps
         assert 5 in ess_by_step
@@ -441,7 +448,8 @@ class TestESSCallback:
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[ess_cb, ESSTracker()])
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        trainer.train(source, max_steps=6)
+        dataset = grain.MapDataset.source(source).repeat()
+        trainer.train(dataset, max_steps=6)
 
         # ESS computed at steps 3 and 6
         assert 3 in ess_by_step
@@ -486,7 +494,8 @@ class TestTensorBoardLogger:
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[tb])
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        trainer.train(source, max_steps=3)
+        dataset = grain.MapDataset.source(source).repeat()
+        trainer.train(dataset, max_steps=3)
 
         assert tb_dir.exists()
         event_files = list(tb_dir.glob("events.out.tfevents.*"))
@@ -511,7 +520,8 @@ class TestTensorBoardLogger:
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[val_cb, tb])
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        trainer.train(source, max_steps=5)
+        dataset = grain.MapDataset.source(source).repeat()
+        trainer.train(dataset, max_steps=5)
 
         assert tb_dir.exists()
         event_files = list(tb_dir.glob("events.out.tfevents.*"))
@@ -569,7 +579,8 @@ class TestTrainerTraining:
         trainer = Trainer(model, optimizer, loss_fn, seed=0)
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        final_model = trainer.train(source, max_steps=5)
+        dataset = grain.MapDataset.source(source).repeat()
+        final_model = trainer.train(dataset, max_steps=5)
 
         assert trainer.step == 5
         assert final_model is not None
@@ -584,7 +595,8 @@ class TestTrainerTraining:
 
         trainer = Trainer(model, optimizer, loss_fn, seed=0)
         source = DistributionDataSource(target_dist, batch_size=64, seed=0)
-        trained_model = trainer.train(source, max_steps=50)
+        dataset = grain.MapDataset.source(source).repeat()
+        trained_model = trainer.train(dataset, max_steps=50)
 
         final_loss = loss_fn(trained_model, test_batch, key=jax.random.key(100))
 
@@ -597,7 +609,8 @@ class TestTrainerTraining:
         trainer = Trainer(model, optimizer, loss_fn, seed=0)
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0, length=3)
-        trainer.train(source, max_steps=10)
+        dataset = grain.MapDataset.source(source).repeat()
+        trainer.train(dataset, max_steps=10)
 
         assert trainer.step == 10
 
@@ -622,8 +635,9 @@ class TestTrainerTraining:
 
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[val_cb, ValTracker()])
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        dataset = grain.MapDataset.source(source).repeat()
 
-        trainer.train(source, max_steps=10)
+        trainer.train(dataset, max_steps=10)
 
         # ValidationCallback fires at steps 5 and 10
         assert len(val_steps) == 2
@@ -644,7 +658,8 @@ class TestTrainerCheckpointing:
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[cb])
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        trainer.train(source, max_steps=10)
+        dataset = grain.MapDataset.source(source).repeat()
+        trainer.train(dataset, max_steps=10)
 
         cb.checkpointer.wait_until_finished()
         assert len(cb.checkpointer.all_steps()) > 0
@@ -666,8 +681,9 @@ class TestTrainerCheckpointing:
         trainer1 = Trainer(model, optimizer, loss_fn, callbacks=[cb_no])
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
+        dataset = grain.MapDataset.source(source).repeat()
 
-        trainer1.train(source, max_steps=1)
+        trainer1.train(dataset, max_steps=1)
         cb_no.checkpointer.wait_until_finished()
 
         step_dir = None
@@ -715,18 +731,19 @@ class TestCompilationEfficiency:
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(target_dist, batch_size=32, seed=0)
+        dataset = grain.MapDataset.source(source).repeat()
 
         times = []
         n_steps = 5
 
         start = time.perf_counter()
-        trainer.train(source, max_steps=1)
+        trainer.train(dataset, max_steps=1)
         jax.block_until_ready(trainer.model)
         times.append(time.perf_counter() - start)
 
         for i in range(1, n_steps):
             start = time.perf_counter()
-            trainer.train(source, max_steps=i + 1)
+            trainer.train(dataset, max_steps=i + 1)
             jax.block_until_ready(trainer.model)
             times.append(time.perf_counter() - start)
 
@@ -855,7 +872,8 @@ class TestTrainerWithParticleSystems:
         trainer = Trainer(velocity_field, optimizer, loss_fn, seed=0)
 
         source = DistributionDataSource(base_dist, batch_size=1, seed=0)
-        trained_model = trainer.train(source, max_steps=5)
+        dataset = grain.MapDataset.source(source).repeat()
+        trained_model = trainer.train(dataset, max_steps=5)
 
         assert trainer.step == 5
         flow = Flow(
@@ -888,7 +906,8 @@ class TestTrainerWithParticleSystems:
         trainer = Trainer(velocity_field, optimizer, loss_fn, seed=0)
 
         source = DistributionDataSource(base_dist, batch_size=1, seed=0)
-        trainer.train(source, max_steps=5)
+        dataset = grain.MapDataset.source(source).repeat()
+        trainer.train(dataset, max_steps=5)
         assert trainer.step == 5
 
     def test_particle_gradient_flows(self, particle_setup):
@@ -949,7 +968,8 @@ class TestEndToEndTraining:
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[logger])
 
         source = DistributionDataSource(target_dist, batch_size=32, seed=0)
-        trained_model = trainer.train(source, max_steps=20)
+        dataset = grain.MapDataset.source(source).repeat()
+        trained_model = trainer.train(dataset, max_steps=20)
 
         assert trainer.step == 20
 
@@ -966,7 +986,8 @@ class TestEndToEndTraining:
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(base_dist, batch_size=32, seed=0)
-        trained_model = trainer.train(source, max_steps=20)
+        dataset = grain.MapDataset.source(source).repeat()
+        trained_model = trainer.train(dataset, max_steps=20)
 
         assert trainer.step == 20
 
@@ -983,7 +1004,8 @@ class TestEndToEndTraining:
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(target_dist, batch_size=32, seed=0)
-        trained_model = trainer.train(source, max_steps=20)
+        dataset = grain.MapDataset.source(source).repeat()
+        trained_model = trainer.train(dataset, max_steps=20)
 
         assert trainer.step == 20
 
@@ -1009,7 +1031,8 @@ class TestHutchinsonTraining:
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        trained_model = trainer.train(source, max_steps=10)
+        dataset = grain.MapDataset.source(source).repeat()
+        trained_model = trainer.train(dataset, max_steps=10)
 
         assert trainer.step == 10
 
@@ -1034,7 +1057,8 @@ class TestHutchinsonTraining:
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(base_dist, batch_size=16, seed=0)
-        trained_model = trainer.train(source, max_steps=10)
+        dataset = grain.MapDataset.source(source).repeat()
+        trained_model = trainer.train(dataset, max_steps=10)
 
         assert trainer.step == 10
 
@@ -1058,7 +1082,8 @@ class TestHutchinsonTraining:
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        trainer.train(source, max_steps=10)
+        dataset = grain.MapDataset.source(source).repeat()
+        trainer.train(dataset, max_steps=10)
 
         assert trainer.step == 10
 
@@ -1077,12 +1102,14 @@ class TestHutchinsonParticleTraining:
         loss_exact = MaximumLikelihoodLoss(base_dist)
         trainer_exact = Trainer(model_exact, optax.adam(1e-3), loss_exact, seed=0)
         source_exact = DistributionDataSource(target_dist, batch_size=32, seed=10)
-        trained_exact = trainer_exact.train(source_exact, max_steps=20)
+        dataset_exact = grain.MapDataset.source(source_exact).repeat()
+        trained_exact = trainer_exact.train(dataset_exact, max_steps=20)
 
         loss_hutch = MaximumLikelihoodLoss(base_dist, hutchinson_samples=5)
         trainer_hutch = Trainer(model_hutch, optax.adam(1e-3), loss_hutch, seed=0)
         source_hutch = DistributionDataSource(target_dist, batch_size=32, seed=10)
-        trained_hutch = trainer_hutch.train(source_hutch, max_steps=20)
+        dataset_hutch = grain.MapDataset.source(source_hutch).repeat()
+        trained_hutch = trainer_hutch.train(dataset_hutch, max_steps=20)
 
         x0 = base_dist.sample(seed=jax.random.key(99), sample_shape=(10,))
 
@@ -1145,7 +1172,8 @@ class TestAnalyticalDivergenceTraining:
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        trained_model = trainer.train(source, max_steps=10)
+        dataset = grain.MapDataset.source(source).repeat()
+        trained_model = trainer.train(dataset, max_steps=10)
 
         assert trainer.step == 10
 
@@ -1171,7 +1199,8 @@ class TestAnalyticalDivergenceTraining:
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(base_dist, batch_size=16, seed=0)
-        trained_model = trainer.train(source, max_steps=10)
+        dataset = grain.MapDataset.source(source).repeat()
+        trained_model = trainer.train(dataset, max_steps=10)
 
         assert trainer.step == 10
 
@@ -1195,7 +1224,8 @@ class TestAnalyticalDivergenceTraining:
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
-        trainer.train(source, max_steps=10)
+        dataset = grain.MapDataset.source(source).repeat()
+        trainer.train(dataset, max_steps=10)
 
         assert trainer.step == 10
 
@@ -1211,3 +1241,38 @@ class TestAnalyticalDivergenceTraining:
         l_analytical = loss_analytical(model, batch)
 
         assert jnp.allclose(l_exact, l_analytical, atol=1e-4)
+
+
+# =============================================================================
+# DatasetExhausted Tests
+# =============================================================================
+
+
+class TestDatasetExhausted:
+    """Tests for DatasetExhausted exception."""
+
+    def test_exhausted_without_repeat(self, base_dist, target_dist, model):
+        """Test that training without .repeat() raises DatasetExhausted."""
+        optimizer = optax.adam(1e-3)
+        loss_fn = MaximumLikelihoodLoss(base_dist)
+        trainer = Trainer(model, optimizer, loss_fn, seed=0)
+
+        # Dataset with 3 elements and no .repeat()
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0, length=3)
+        dataset = grain.MapDataset.source(source)  # NO .repeat()
+
+        with pytest.raises(DatasetExhausted, match="Dataset exhausted"):
+            trainer.train(dataset, max_steps=10)
+
+    def test_exact_exhaustion_with_repeat(self, base_dist, target_dist, model):
+        """Test that .repeat() prevents DatasetExhausted."""
+        optimizer = optax.adam(1e-3)
+        loss_fn = MaximumLikelihoodLoss(base_dist)
+        trainer = Trainer(model, optimizer, loss_fn, seed=0)
+
+        source = DistributionDataSource(target_dist, batch_size=16, seed=0, length=3)
+        dataset = grain.MapDataset.source(source).repeat()  # WITH .repeat()
+
+        # Should complete without error
+        trainer.train(dataset, max_steps=10)
+        assert trainer.step == 10

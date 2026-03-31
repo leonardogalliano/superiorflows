@@ -15,9 +15,10 @@ from superiorflows.train.losses import (
     KullbackLeiblerLoss,
     MaximumLikelihoodLoss,
 )
-from superiorflows.train.trainer import Trainer, train_step
+from superiorflows.train.trainer import DatasetExhausted, Trainer, train_step
 
 __all__ = [
+    "DatasetExhausted",
     "Trainer",
     "train_step",
     "Callback",

@@ -91,10 +91,10 @@ def train_single_model(
 
     if loss_type == "maximum_likelihood":
         loss_fn = MaximumLikelihoodLoss(base_distribution=base_dist, **flow_kwargs)
-        data_source = DistributionDataSource(target_dist, batch_size, seed=seed)
+        dataset = grain.MapDataset.source(DistributionDataSource(target_dist, batch_size, seed=seed)).repeat()
     elif loss_type == "energy_based":
         loss_fn = EnergyBasedLoss(base_distribution=base_dist, target_distribution=target_dist, **flow_kwargs)
-        data_source = DistributionDataSource(base_dist, batch_size, seed=seed)
+        dataset = grain.MapDataset.source(DistributionDataSource(base_dist, batch_size, seed=seed)).repeat()
     elif loss_type == "hybrid":
         loss_fn = KullbackLeiblerLoss(
             base_distribution=base_dist,
@@ -102,7 +102,7 @@ def train_single_model(
             alpha=0.5,
             **flow_kwargs,
         )
-        data_source = DistributionDataSource(target_dist, batch_size, seed=seed)
+        dataset = grain.MapDataset.source(DistributionDataSource(target_dist, batch_size, seed=seed)).repeat()
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")
 
@@ -188,7 +188,7 @@ def train_single_model(
 
     t_start = time.time()
     read_options = grain.ReadOptions(num_threads=num_workers, prefetch_buffer_size=prefetch_buffer_size)
-    trainer.train(data_source=data_source, max_steps=nsteps, read_options=read_options)
+    trainer.train(dataset=dataset, max_steps=nsteps, read_options=read_options)
     t_elapsed = time.time() - t_start
 
     print(f"Done in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)")

@@ -14,7 +14,21 @@ import orbax.checkpoint as ocp
 
 from superiorflows.train.callbacks import Callback
 
-__all__ = ["Trainer", "train_step"]
+__all__ = ["Trainer", "train_step", "DatasetExhausted"]
+
+
+class DatasetExhausted(Exception):
+    """Raised when the dataset iterator runs out of data before ``max_steps``.
+
+    This happens when the ``grain.MapDataset`` passed to ``Trainer.train()``
+    has not been ``.repeat()``-ed and contains fewer elements than the
+    requested number of training steps.
+
+    To train for multiple epochs, call ``.repeat()`` on your dataset::
+
+        dataset = grain.MapDataset.source(source).repeat()
+        trainer.train(dataset, max_steps=10000)
+    """
 
 
 @eqx.filter_jit
@@ -43,7 +57,8 @@ class Trainer:
 
     The Trainer manages the training state (model, optimizer, step counter)
     and dispatches events to registered callbacks. Data loading is handled
-    via a grain pipeline built from a ``RandomAccessDataSource``.
+    via a ``grain.MapDataset`` that the caller assembles with any desired
+    transformations (shuffle, map, batch, repeat, etc.).
 
     Attributes:
         model: The Equinox model being trained.
@@ -55,10 +70,12 @@ class Trainer:
         step: Current training step (0-indexed before first step).
 
     Example:
+        >>> import grain
         >>> from superiorflows.data import DistributionDataSource
         >>> source = DistributionDataSource(target_dist, batch_size=32)
+        >>> dataset = grain.MapDataset.source(source).repeat()
         >>> trainer = Trainer(model, optax.adam(1e-3), loss_fn)
-        >>> trained_model = trainer.train(source, max_steps=1000)
+        >>> trained_model = trainer.train(dataset, max_steps=1000)
     """
 
     def __init__(
@@ -105,28 +122,36 @@ class Trainer:
 
     def train(
         self,
-        data_source,
+        dataset: grain.MapDataset,
         max_steps: int = 1000,
         read_options: Optional[grain.ReadOptions] = None,
     ):
         """Run the training loop.
 
-        Builds a grain pipeline from ``data_source`` with prefetching,
-        then iterates until ``max_steps`` is reached.
+        Converts the given ``dataset`` into an iterator with prefetching,
+        then iterates until ``max_steps`` is reached or the dataset is
+        exhausted.
+
+        The caller is responsible for assembling the full grain pipeline
+        (source → shuffle → map → batch → repeat) before passing it here.
+        If the dataset is not repeated and runs out before ``max_steps``,
+        a ``DatasetExhausted`` exception is raised.
 
         Args:
-            data_source: A ``grain.RandomAccessDataSource`` (or any object
-                with ``__getitem__`` and ``__len__``) yielding training batches.
+            dataset: A ``grain.MapDataset`` with all desired transformations
+                already applied (shuffling, batching, repeating, etc.).
             max_steps: Maximum number of training steps.
             read_options: Grain ``ReadOptions`` for prefetching.
 
         Returns:
             The trained model.
+
+        Raises:
+            DatasetExhausted: If the dataset runs out before ``max_steps``.
         """
         if read_options is None:
             read_options = grain.ReadOptions(num_threads=1, prefetch_buffer_size=2)
 
-        dataset = grain.MapDataset.source(data_source).repeat()
         self._data_iter = iter(dataset.to_iter_dataset(read_options))
 
         if self._restored_data_state is not None:
@@ -137,7 +162,13 @@ class Trainer:
 
         while self.step < max_steps:
             self.step += 1
-            batch = next(self._data_iter)
+            try:
+                batch = next(self._data_iter)
+            except StopIteration:
+                raise DatasetExhausted(
+                    f"Dataset exhausted at step {self.step} of {max_steps}. "
+                    f"Call .repeat() on your dataset for multi-epoch training."
+                )
 
             self.key, subkey = jax.random.split(self.key)
 
