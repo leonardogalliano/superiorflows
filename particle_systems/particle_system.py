@@ -1,4 +1,5 @@
 import logging
+from itertools import permutations, product
 from pathlib import Path
 
 import distrax as dsx
@@ -7,6 +8,7 @@ import grain
 import jax
 import jax.numpy as jnp
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,17 @@ class ParticleSystem(eqx.Module):
     @classmethod
     def get_dynamic_mask(cls):
         return cls(positions=True, species=False, box=False)
+
+
+def log_map(x, y, L):
+    """Shortest displacement vector from x to y under PBC."""
+    diff = y - x
+    return diff - jnp.round(diff / L) * L
+
+
+def exp_map(x, v, L):
+    """Apply displacement v to position x, folding back into the box."""
+    return jnp.remainder(x + v, L)
 
 
 class UniformParticles(eqx.Module, dsx.Distribution):
@@ -267,7 +280,7 @@ class TrajectoryDataSource(grain.sources.RandomAccessDataSource):
             f"species_map={self._species_map})"
         )
 
-    def to_dataset(self, batch_size, shuffle=True, seed=0):
+    def to_dataset(self, batch_size, shuffle=True, repeat=True, seed=0):
         """Build a grain pipeline: source → shuffle → batch → repeat.
 
         Returns a ``grain.MapDataset`` ready to be consumed via
@@ -285,6 +298,8 @@ class TrajectoryDataSource(grain.sources.RandomAccessDataSource):
         ds = grain.MapDataset.source(self)
         if shuffle:
             ds = ds.shuffle(seed=seed)
+        if repeat:
+            ds = ds.repeat()
         ds = ds.batch(batch_size=batch_size, drop_remainder=True)
         return ds
 
@@ -312,3 +327,144 @@ class TrajectoryDataSource(grain.sources.RandomAccessDataSource):
     def box_size(self):
         """Box side lengths from the first frame."""
         return self._box[0]
+
+
+def particle_geodesic_interpolant(t, x0, x1, L):
+    """Geodesic interpolation from x0 to x1 at time t in [0, 1]."""
+    v = log_map(x0.positions, x1.positions, L)
+    xt = exp_map(x0.positions, t * v, L)
+    return type(x0)(positions=xt, species=x0.species, box=x0.box)
+
+
+class CoupleBaseSamples:
+    """Stateless callable to generate the base distribution and couple it."""
+
+    def __init__(self, base_dist, seed=0):
+        self.base_dist = base_dist
+        self.seed = seed
+
+    def __call__(self, index, x1):
+        batch_size = x1.positions.shape[0]
+
+        with jax.default_device(jax.devices("cpu")[0]):
+            key = jax.random.fold_in(jax.random.key(self.seed), index)
+            x0 = self.base_dist.sample(seed=key, sample_shape=(batch_size,))
+
+        return (x0, x1)
+
+
+def generate_hyperoctahedral_group(d):
+    """All elements of the hyperoctahedral group B_d as signed-permutation matrices.
+
+    Returns:
+        np.ndarray of shape ``(2^d * d!, d, d)``.
+    """
+    matrices = []
+    for perm in permutations(range(d)):
+        P = np.eye(d)[list(perm)]
+        for signs in product([1, -1], repeat=d):
+            matrices.append(np.diag(signs) @ P)
+    return np.array(matrices)
+
+
+def apply_box_symmetry(positions, g, L):
+    """Apply a hyperoctahedral group element on the flat torus ``[0, L)^d``.
+
+    Centres at ``L/2``, applies the linear map *g*, re-centres and wraps.
+    """
+    center = L / 2.0
+    return ((positions - center) @ g.T + center) % L
+
+
+def _solve_ot_single(pos_0, pos_1, species_1, box):
+    """Solve species-wise OT for a single sample pair.
+
+    Returns ``(aligned_positions, total_cost)``.
+    """
+    N, d = pos_0.shape
+    aligned = np.empty_like(pos_0)
+    total_cost = 0.0
+
+    for s in np.unique(species_1):
+        mask = species_1 == s
+        N_s = np.count_nonzero(mask)
+        if N_s == 0:
+            continue
+
+        p0_s = pos_0[mask]
+        p1_s = pos_1[mask]
+
+        delta = p0_s[:, None, :] - p1_s[None, :, :]
+        delta -= box * np.round(delta / box)
+        cost_matrix = np.sum(delta**2, axis=-1)
+
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        idx = np.where(mask)[0]
+        aligned[idx[col_ind]] = p0_s[row_ind]
+        total_cost += cost_matrix[row_ind, col_ind].sum()
+
+    return aligned, total_cost
+
+
+class EquivariantOptimalTransport:
+    """Equivariant Optimal Transport for particle systems.
+
+    Minimises the total squared geodesic distance between coupled samples
+    ``(x0, x1)`` by exploiting symmetries of the base distribution:
+
+    1. **Permutation within species** (always active): particles of the same
+       species are interchangeable.
+    2. **Hyperoctahedral group** (``use_box_symmetry=True``): the cubic
+       periodic box is invariant under axis reflections and permutations
+       (8 elements in 2D, 48 in 3D).
+
+    Args:
+        use_box_symmetry: Also optimise over the hyperoctahedral group B_d.
+    """
+
+    def __init__(self, use_box_symmetry=False):
+        self.use_box_symmetry = use_box_symmetry
+
+    def __call__(self, batch):
+        x0, x1 = batch
+
+        pos_0 = np.asarray(x0.positions)
+        pos_1 = np.asarray(x1.positions)
+        species_1 = np.asarray(x1.species)
+        box = np.asarray(x1.box)
+
+        B, N, d = pos_0.shape
+
+        if self.use_box_symmetry:
+            if not np.allclose(box[:, 0:1], box):
+                raise ValueError("Box symmetry requires a cubic box, but box sides differ: " f"{box[0]}")
+            group = generate_hyperoctahedral_group(d)
+        else:
+            group = np.eye(d)[np.newaxis]
+
+        aligned_positions = np.empty_like(pos_0)
+
+        for i in range(B):
+            best_cost = np.inf
+            best_aligned = None
+
+            for g in group:
+                p0_g = apply_box_symmetry(pos_0[i], g, box[i])
+                aligned_i, cost_i = _solve_ot_single(
+                    p0_g,
+                    pos_1[i],
+                    species_1[i],
+                    box[i],
+                )
+                if cost_i < best_cost:
+                    best_cost = cost_i
+                    best_aligned = aligned_i
+
+            aligned_positions[i] = best_aligned
+
+        x0_aligned = type(x0)(
+            positions=aligned_positions,
+            species=species_1,
+            box=box,
+        )
+        return (x0_aligned, x1)

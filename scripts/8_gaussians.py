@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import optax
 import typer
-from superiorflows import DistributionDataSource
+from superiorflows import CoupledDataSource, DistributionDataSource
 from superiorflows.train import (
     CheckpointCallback,
     EnergyBasedLoss,
@@ -19,6 +19,7 @@ from superiorflows.train import (
     MaximumLikelihoodLoss,
     ProfilingCallback,
     ProgressBarCallback,
+    StochasticInterpolantLoss,
     TensorBoardLogger,
     Trainer,
     ValidationCallback,
@@ -103,6 +104,21 @@ def train_single_model(
             **flow_kwargs,
         )
         dataset = grain.MapDataset.source(DistributionDataSource(target_dist, batch_size, seed=seed)).repeat()
+    elif loss_type == "stochastic_interpolant":
+
+        def interpolant(t, x0, x1):
+            return (1 - t) * x0 + t * x1
+
+        def gamma_fn(t):
+            return jnp.sqrt(2 * t * (1 - t))
+
+        loss_fn = StochasticInterpolantLoss(interpolant=interpolant, gamma=gamma_fn)
+        dataset = grain.MapDataset.source(
+            CoupledDataSource(
+                DistributionDataSource(base_dist, batch_size, seed=seed),
+                DistributionDataSource(target_dist, batch_size, seed=seed + 1),
+            )
+        ).repeat()
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")
 
@@ -115,7 +131,16 @@ def train_single_model(
 
     # Validation data (fixed for consistency)
     key, val_key = jax.random.split(key)
-    val_data = [target_dist.sample(seed=val_key, sample_shape=(1000,))]
+    if loss_type == "stochastic_interpolant":
+        val_key1, val_key2 = jax.random.split(val_key)
+        val_data = [
+            (
+                base_dist.sample(seed=val_key1, sample_shape=(1000,)),
+                target_dist.sample(seed=val_key2, sample_shape=(1000,)),
+            )
+        ]
+    else:
+        val_data = [target_dist.sample(seed=val_key, sample_shape=(1000,))]
 
     # Construct unique run name for TensorBoard
     # Convention: {loss_type}_w{width}d{depth}_lr{lr}_s{seed}_{timestamp}
@@ -198,7 +223,10 @@ def train_single_model(
 @app.command()
 def main(
     loss_type: Annotated[
-        str, typer.Option(help="Type of loss function: 'maximum_likelihood', 'energy_based', 'hybrid'")
+        str,
+        typer.Option(
+            help="Type of loss function: 'maximum_likelihood', 'energy_based', 'hybrid', 'stochastic_interpolant'"
+        ),
     ] = "maximum_likelihood",
     width: Annotated[int, typer.Option(help="Width of the MLP")] = 16,
     depth: Annotated[int, typer.Option(help="Depth of the MLP")] = 3,

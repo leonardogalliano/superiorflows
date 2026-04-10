@@ -14,6 +14,7 @@ from superiorflows.train.losses import (
     EnergyBasedLoss,
     KullbackLeiblerLoss,
     MaximumLikelihoodLoss,
+    StochasticInterpolantLoss,
 )
 from superiorflows.train.trainer import DatasetExhausted, Trainer, train_step
 
@@ -32,4 +33,5 @@ __all__ = [
     "MaximumLikelihoodLoss",
     "EnergyBasedLoss",
     "KullbackLeiblerLoss",
+    "StochasticInterpolantLoss",
 ]

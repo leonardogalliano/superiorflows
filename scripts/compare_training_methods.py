@@ -97,6 +97,21 @@ def main():
     )
     model_hybrid = trainer_hybrid.model
 
+    # 4. Stochastic Interpolant
+    trainer_si = train_single_model(
+        loss_type="stochastic_interpolant",
+        width=width,
+        depth=depth,
+        lr=1e-3,
+        nsteps=nsteps,
+        batch_size=batch_size,
+        seed=0,
+        log_freq=log_freq,
+        ckpt_path=Path("tmp/ckpt_method_si"),
+        overwrite=True,
+    )
+    model_si = trainer_si.model
+
     # =================================================================
     # Reload from checkpoints to verify
     # =================================================================
@@ -109,6 +124,9 @@ def main():
 
     trainer_hybrid.load_checkpoint("tmp/ckpt_method_hybrid")
     model_hybrid = trainer_hybrid.model
+
+    trainer_si.load_checkpoint("tmp/ckpt_method_si")
+    model_si = trainer_si.model
 
     # =================================================================
     # Visualizations (Losses, Samples, Animation)
@@ -127,7 +145,7 @@ def main():
     base_dist = dsx.MultivariateNormalDiag(jnp.zeros(d), jnp.ones(d))
 
     # --- Plot Samples ---
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+    fig, axes = plt.subplots(1, 5, figsize=(20, 4))
 
     # Compute target density on a grid
     grid_size = 100
@@ -139,7 +157,7 @@ def main():
     density = jnp.exp(log_probs).reshape(grid_size, grid_size)
 
     # Sample from each trained model
-    key, k1, k2, k3 = jax.random.split(key, 4)
+    key, k1, k2, k3, k4 = jax.random.split(key, 5)
     n_samples = 500
 
     def get_samples(model, key):
@@ -150,6 +168,7 @@ def main():
     samples_mle = get_samples(model_mle, k1)
     samples_energy = get_samples(model_energy, k2)
     samples_hybrid = get_samples(model_hybrid, k3)
+    samples_si = get_samples(model_si, k4)
 
     # Plot target
     ax = axes[0]
@@ -161,8 +180,8 @@ def main():
     ax.set_aspect("equal")
 
     # Plot samples
-    titles = ["Maximum Likelihood", "Energy-Based", "Hybrid KL"]
-    samples_list = [samples_mle, samples_energy, samples_hybrid]
+    titles = ["Maximum Likelihood", "Energy-Based", "Hybrid KL", "Stochastic Interpolant"]
+    samples_list = [samples_mle, samples_energy, samples_hybrid, samples_si]
 
     for i, (ax, title, samples) in enumerate(zip(axes[1:], titles, samples_list)):
         ax.contourf(xx, yy, density, levels=20, cmap="Blues", alpha=0.3)
@@ -196,21 +215,25 @@ def main():
     traj_mle = get_trajectories(model_mle)
     traj_energy = get_trajectories(model_energy)
     traj_hybrid = get_trajectories(model_hybrid)
+    traj_si = get_trajectories(model_si)
 
     # Save and reload trajectories
     jnp.save(output_dir / "traj_mle.npy", traj_mle)
     jnp.save(output_dir / "traj_energy.npy", traj_energy)
     jnp.save(output_dir / "traj_hybrid.npy", traj_hybrid)
+    jnp.save(output_dir / "traj_si.npy", traj_si)
 
     traj_mle = jnp.load(output_dir / "traj_mle.npy")
     traj_energy = jnp.load(output_dir / "traj_energy.npy")
     traj_hybrid = jnp.load(output_dir / "traj_hybrid.npy")
+    traj_si = jnp.load(output_dir / "traj_si.npy")
 
-    traj_list = [traj_mle, traj_energy, traj_hybrid]
-    titles = ["Maximum Likelihood", "Energy-Based", "Hybrid KL"]
+    traj_list = [traj_mle, traj_energy, traj_hybrid, traj_si]
+    titles = ["Maximum Likelihood", "Energy-Based", "Hybrid KL", "Stochastic Interpolant"]
 
     # Setup figure
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(2, 2, figsize=(10, 10))
+    axes = axes.flatten()
 
     scatters = []
     for i, ax in enumerate(axes):

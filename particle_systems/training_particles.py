@@ -1,3 +1,11 @@
+"""Train a CNF on MD particle trajectory data.
+
+Supports layered configuration: defaults → JSON config → CLI overrides.
+Run with ``--help`` for available CLI arguments, or pass ``--config config.json``
+to specify everything in a single file.
+"""
+
+import copy
 import datetime
 import json
 import time
@@ -9,6 +17,7 @@ import equinox as eqx
 import grain
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import typer
 from superiorflows import DistributionDataSource, Flow
@@ -22,6 +31,7 @@ from superiorflows.train import (
     MaximumLikelihoodLoss,
     ProfilingCallback,
     ProgressBarCallback,
+    StochasticInterpolantLoss,
     TensorBoardLogger,
     Trainer,
     ValidationCallback,
@@ -30,30 +40,152 @@ from typing_extensions import Annotated
 
 from particle_systems.particle_system import (
     BoltzmannDistribution,
+    CoupleBaseSamples,
+    EquivariantOptimalTransport,
     ParticleSystem,
     TrajectoryDataSource,
     UniformParticles,
+    particle_geodesic_interpolant,
 )
-from particle_systems.velocities import ParticlesMLPVelocity
+from particle_systems.velocities import ParticlesEGNNVelocity, ParticlesMLPVelocity
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
+
+
+# ── Default configuration ────────────────────────────────────────────────────
+
+DEFAULT_CONFIG = {
+    "data": {
+        "data_path": None,
+        "model_file": None,
+        "temperature": None,
+        "num_workers": 1,
+        "prefetch_buffer_size": 2,
+    },
+    "training": {
+        "nsteps": None,
+        "lr": 1e-3,
+        "batch_size": 32,
+        "seed": 0,
+        "loss_type": "maximum_likelihood",
+        "log_freq": 100,
+        "ckpt_path": "tmp/ckpt_particles",
+        "overwrite": True,
+        "num_checkpoints": 1,
+    },
+    "velocity": {
+        "type": "mlp",
+        "kwargs": {},
+    },
+    "solver": {
+        "type": "tsit5",
+        "atol": 1e-5,
+        "rtol": 1e-5,
+        "euler_steps": None,
+    },
+    "stochastic_interpolant": {
+        "use_gamma": False,
+    },
+    "ot": {
+        "enabled": True,
+        "box_symmetry": False,
+    },
+    "callbacks": {
+        "ess": {
+            "enabled": False,
+            "freq": 250,
+            "samples": 512,
+        },
+        "potential_energy": {
+            "enabled": False,
+            "freq": 100,
+        },
+        "tensorboard": {
+            "enabled": False,
+            "freq": 100,
+            "log_dir": "tmp/tb_logs",
+        },
+        "profile": {
+            "enabled": False,
+            "log_dir": "tmp/profiles",
+            "warmup": 50,
+            "steps": None,
+        },
+    },
+}
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def merge_config(base: dict, overrides: dict) -> dict:
+    """Recursively merge *overrides* into *base*, returning a new dict."""
+    result = base.copy()
+    for k, v in overrides.items():
+        if isinstance(v, dict) and isinstance(result.get(k), dict):
+            result[k] = merge_config(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
+VELOCITY_REGISTRY = {
+    "mlp": ParticlesMLPVelocity,
+    "egnn": ParticlesEGNNVelocity,
+}
+
+
+def build_velocity(config: dict, N: int, d: int, n_species: int, *, key):
+    """Instantiate a velocity field from the ``velocity`` config block."""
+    vtype = config["velocity"]["type"]
+    cls = VELOCITY_REGISTRY.get(vtype)
+    if cls is None:
+        raise ValueError(f"Unknown velocity type '{vtype}'. " f"Available: {list(VELOCITY_REGISTRY)}")
+    kwargs = config["velocity"].get("kwargs", {})
+    return cls(N=N, d=d, n_species=n_species, **kwargs, key=key)
+
+
+def build_solver(config: dict) -> dict:
+    """Build ``flow_kwargs`` from the ``solver`` config block."""
+    scfg = config["solver"]
+    stype = scfg["type"].lower()
+
+    if stype == "euler":
+        euler_steps = scfg.get("euler_steps")
+        if euler_steps is None:
+            raise ValueError("solver.euler_steps is required when solver.type='euler'.")
+        return dict(
+            dynamic_mask=ParticleSystem.get_dynamic_mask(),
+            solver=dfx.Euler(),
+            augmented_solver=dfx.Euler(),
+            stepsize_controller=dfx.ConstantStepSize(),
+            augmented_stepsize_controller=dfx.ConstantStepSize(),
+            dt0=1.0 / euler_steps,
+        )
+
+    solvers = {"tsit5": dfx.Tsit5, "dopri5": dfx.Dopri5}
+    if stype not in solvers:
+        raise ValueError(f"Unknown solver '{stype}'. Available: {list(solvers)}")
+    slv = solvers[stype]()
+    return dict(
+        dynamic_mask=ParticleSystem.get_dynamic_mask(),
+        solver=slv,
+        augmented_solver=slv,
+        stepsize_controller=dfx.PIDController(rtol=scfg["rtol"], atol=scfg["atol"]),
+        augmented_stepsize_controller=dfx.PIDController(rtol=scfg["rtol"], atol=scfg["atol"]),
+    )
+
+
+# ── Callbacks ─────────────────────────────────────────────────────────────────
 
 
 class PotentialEnergyCallback(Callback):
     """Periodically samples from the current flow and logs mean potential energy.
 
-    Draws `n_samples` configurations from the flow's pushforward distribution,
-    evaluates the interatomic potential on each, and injects `energy`
-    into the logs dict so that `LoggerCallback` and `TensorBoardLogger` pick
+    Draws ``n_samples`` configurations from the flow's pushforward distribution,
+    evaluates the interatomic potential on each, and injects ``energy``
+    into the logs dict so that ``LoggerCallback`` and ``TensorBoardLogger`` pick
     it up automatically.
-
-    Args:
-        energy_fn: Callable ``(positions, species) -> scalar`` for a single frame.
-        base_distribution: The base distribution used by the flow.
-        ref_species: Integer species array for a single frame, shape ``(N,)``.
-        flow_kwargs: Extra kwargs forwarded to ``Flow(...)`` at eval time.
-        n_samples: Number of flow samples to average over.
-        eval_freq: Compute every N steps.
     """
 
     def __init__(
@@ -82,93 +214,69 @@ class PotentialEnergyCallback(Callback):
             **self.flow_kwargs,
         )
 
-        key, subkey = jax.random.split(trainer.key)
-        samples = flow.sample(seed=subkey, sample_shape=(self.n_samples,))
+        try:
+            key, subkey = jax.random.split(trainer.key)
+            samples = flow.sample(seed=subkey, sample_shape=(self.n_samples,))
 
-        energy_fn = self.energy_fn
-        ref_species = self.ref_species
+            energy_fn = self.energy_fn
+            ref_species = self.ref_species
 
-        def single_energy(sample: ParticleSystem):
-            return energy_fn(sample.positions, ref_species)
+            def single_energy(sample: ParticleSystem):
+                return energy_fn(sample.positions, ref_species)
 
-        mean_energy = jnp.mean(jax.vmap(single_energy)(samples))
+            mean_energy = jnp.mean(jax.vmap(single_energy)(samples))
+        except Exception:
+            mean_energy = float("nan")
         logs["energy"] = mean_energy
 
 
-def train_single_model(
-    data_path: Path,
-    model_file: Path | None,
-    loss_type: str,
-    width: int,
-    depth: int,
-    lr: float,
-    nsteps: int,
-    batch_size: int,
-    seed: int,
-    log_freq: int,
-    ckpt_path: Path,
-    overwrite: bool,
-    num_checkpoints: int = 1,
-    temperature: float | None = None,
-    ess: bool = False,
-    ess_freq: int = 250,
-    ess_samples: int = 512,
-    profile: bool = False,
-    profile_log_dir: Path = Path("tmp/profiles"),
-    profile_warmup: int = 50,
-    profile_steps: int | None = None,
-    tensorboard: bool = False,
-    tensorboard_log_dir: Path = Path("tmp/tb_logs"),
-    num_workers: int = 1,
-    prefetch_buffer_size: int = 2,
-    solver: str = "tsit5",
-    atol: float = 1e-5,
-    rtol: float = 1e-5,
-    euler_steps: int | None = None,
-):
+# ── Core training logic ──────────────────────────────────────────────────────
+
+
+def train_single_model(config: dict):
+    """Run a single training job from a fully-merged configuration dict."""
+    dcfg = config["data"]
+    tcfg = config["training"]
+
+    data_path = Path(dcfg["data_path"])
+    model_file = Path(dcfg["model_file"]) if dcfg["model_file"] else None
+    temperature = dcfg["temperature"]
+    num_workers = dcfg["num_workers"]
+    prefetch_buffer_size = dcfg["prefetch_buffer_size"]
+
+    nsteps = tcfg["nsteps"]
+    lr = tcfg["lr"]
+    batch_size = tcfg["batch_size"]
+    seed = tcfg["seed"]
+    loss_type = tcfg["loss_type"]
+    log_freq = tcfg["log_freq"]
+    ckpt_path = Path(tcfg["ckpt_path"])
+    overwrite = tcfg["overwrite"]
+    num_checkpoints = tcfg["num_checkpoints"]
+
+    use_gamma = config["stochastic_interpolant"]["use_gamma"]
+    use_ot = config["ot"]["enabled"]
+    use_ot_box_symmetry = config["ot"]["box_symmetry"]
+
     key = jax.random.key(seed)
 
     # Data
     source = TrajectoryDataSource(data_path)
     N, d = source.N, source.d
     L = float(source.box_size[0])
+    ref_species = source[0].species
+    composition = np.bincount(ref_species) / len(ref_species)
 
     # Distributions
-    base_dist = UniformParticles(N=N, d=d, L=L, composition=(0.5, 0.5))
+    base_dist = UniformParticles(N=N, d=d, L=L, composition=composition)
+    flow_kwargs = build_solver(config)
 
-    if solver.lower() == "euler":
-        if euler_steps is None:
-            raise ValueError("--euler-steps must be specified when using the 'euler' solver.")
-        flow_kwargs = dict(
-            dynamic_mask=ParticleSystem.get_dynamic_mask(),
-            solver=dfx.Euler(),
-            augmented_solver=dfx.Euler(),
-            stepsize_controller=dfx.ConstantStepSize(),
-            augmented_stepsize_controller=dfx.ConstantStepSize(),
-            dt0=1.0 / euler_steps,
-        )
-    else:
-        if solver.lower() == "tsit5":
-            slv = dfx.Tsit5()
-        elif solver.lower() == "dopri5":
-            slv = dfx.Dopri5()
-        else:
-            raise ValueError(f"Unknown solver '{solver}'.")
-
-        flow_kwargs = dict(
-            dynamic_mask=ParticleSystem.get_dynamic_mask(),
-            solver=slv,
-            augmented_solver=slv,
-            stepsize_controller=dfx.PIDController(rtol=rtol, atol=atol),
-            augmented_stepsize_controller=dfx.PIDController(rtol=rtol, atol=atol),
-        )
-
-    # Load Boltzmann model from JSON if provided
+    # Target distribution
     boltzmann_model = None
     target_dist = None
     if model_file is not None:
         if temperature is None:
-            raise ValueError("--temperature is required when --model-file is provided.")
+            raise ValueError("data.temperature is required when data.model_file is set.")
         with open(model_file) as f:
             boltzmann_model = json.load(f)
         target_dist = BoltzmannDistribution(
@@ -177,17 +285,17 @@ def train_single_model(
             L=L,
             temperature=temperature,
             model=boltzmann_model,
-            composition=(0.5, 0.5),
+            composition=composition,
         )
 
-    # Loss and data source
+    # Loss and dataset
     if loss_type == "maximum_likelihood":
         loss_fn = MaximumLikelihoodLoss(base_distribution=base_dist, **flow_kwargs)
         dataset = source.to_dataset(batch_size=batch_size, shuffle=True, seed=seed).repeat()
 
     elif loss_type == "energy_based":
         if target_dist is None:
-            raise ValueError("--model-file is required for energy_based training.")
+            raise ValueError("data.model_file is required for energy_based training.")
         loss_fn = EnergyBasedLoss(
             base_distribution=base_dist,
             target_distribution=target_dist,
@@ -197,7 +305,7 @@ def train_single_model(
 
     elif loss_type == "hybrid":
         if target_dist is None:
-            raise ValueError("--model-file is required for hybrid training.")
+            raise ValueError("data.model_file is required for hybrid training.")
         loss_fn = KullbackLeiblerLoss(
             base_distribution=base_dist,
             target_distribution=target_dist,
@@ -206,70 +314,89 @@ def train_single_model(
         )
         dataset = source.to_dataset(batch_size=batch_size, shuffle=True, seed=seed).repeat()
 
+    elif loss_type == "stochastic_interpolant":
+
+        def interpolant(t, x0, x1):
+            return particle_geodesic_interpolant(t, x0, x1, L)
+
+        def gamma_fn(t):
+            return jnp.sqrt(2 * t * (1 - t))
+
+        gamma_fn_arg = gamma_fn if use_gamma else None
+        loss_fn = StochasticInterpolantLoss(interpolant=interpolant, gamma=gamma_fn_arg, **flow_kwargs)
+        dataset = (
+            source.to_dataset(batch_size=batch_size, shuffle=True, seed=seed)
+            .repeat()
+            .map_with_index(CoupleBaseSamples(base_dist, seed=seed))
+        )
+        if use_ot:
+            dataset = dataset.map(EquivariantOptimalTransport(use_box_symmetry=use_ot_box_symmetry))
     else:
-        raise ValueError(f"Unknown loss_type '{loss_type}'. " "Choose from: maximum_likelihood, energy_based, hybrid.")
+        raise ValueError(
+            f"Unknown loss_type '{loss_type}'. "
+            "Choose from: maximum_likelihood, energy_based, hybrid, stochastic_interpolant."
+        )
 
     # Model
     key, model_key = jax.random.split(key)
     n_species = len(jnp.unique(jnp.asarray(source[0].species)))
-    model = ParticlesMLPVelocity(N=N, d=d, n_species=n_species, width=width, depth=depth, key=model_key)
+    model = build_velocity(config, N, d, n_species, key=model_key)
     num_params = sum(x.size for x in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_inexact_array)))
 
     # Optimizer
     optimizer = optax.adam(lr)
 
-    # Validation: one batch from the same distribution as training
+    # Validation
     read_options_val = grain.ReadOptions(num_threads=1, prefetch_buffer_size=1)
     if loss_type == "energy_based":
         val_ds = grain.MapDataset.source(DistributionDataSource(base_dist, batch_size, seed=seed + 1))
+    elif loss_type == "stochastic_interpolant":
+        val_ds = source.to_dataset(batch_size=batch_size, shuffle=False, seed=seed + 1).map_with_index(
+            CoupleBaseSamples(base_dist, seed=seed + 1)
+        )
+        if use_ot:
+            val_ds = val_ds.map(EquivariantOptimalTransport(use_box_symmetry=use_ot_box_symmetry))
     else:
         val_ds = source.to_dataset(batch_size=batch_size, shuffle=False, seed=seed + 1)
     val_batch = next(iter(val_ds.to_iter_dataset(read_options_val)))
     val_data = [val_batch]
 
-    # Run name / paths
+    # Run name and paths
+    vtype = config["velocity"]["type"]
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{loss_type}_w{width}d{depth}_lr{lr}_b{batch_size}_s{seed}_{timestamp}"
+    run_name = f"{loss_type}_{vtype}_lr{lr}_b{batch_size}_s{seed}_{timestamp}"
     chkpt_run_path = ckpt_path / run_name
-    tb_run_dir = tensorboard_log_dir / run_name
 
-    hparams = {
-        "loss_type": loss_type,
-        "N": N,
-        "d": d,
-        "L": L,
-        "width": width,
-        "depth": depth,
-        "lr": lr,
-        "batch_size": batch_size,
-        "seed": seed,
-        "nsteps": nsteps,
-    }
+    # Archive the resolved config for reproducibility
+    chkpt_run_path.mkdir(parents=True, exist_ok=True)
+    with open(chkpt_run_path / "config.json", "w") as f:
+        json.dump(config, f, indent=4)
 
-    # Callbacks — metric producers first, then consumers
+    # Callbacks
+    ccfg = config["callbacks"]
     callbacks = []
 
-    if ess and target_dist is not None:
+    if ccfg["ess"]["enabled"] and target_dist is not None:
         callbacks.append(
             ESSCallback(
                 target_log_prob=target_dist.log_prob,
                 base_distribution=base_dist,
                 flow_kwargs=flow_kwargs,
-                n_samples=ess_samples,
-                eval_freq=ess_freq,
+                n_samples=ccfg["ess"]["samples"],
+                eval_freq=ccfg["ess"]["freq"],
             )
         )
 
-    if target_dist is not None:
-        ref_species = jnp.array(source[0].species)
+    pe_cfg = ccfg.get("potential_energy", {})
+    if target_dist is not None and pe_cfg.get("enabled", True):
         callbacks.append(
             PotentialEnergyCallback(
                 energy_fn=target_dist._energy_fn,
                 base_distribution=base_dist,
-                ref_species=ref_species,
+                ref_species=jnp.array(source[0].species),
                 flow_kwargs=flow_kwargs,
                 n_samples=batch_size,
-                eval_freq=log_freq,
+                eval_freq=pe_cfg.get("freq", log_freq),
             )
         )
 
@@ -281,17 +408,31 @@ def train_single_model(
         CheckpointCallback(ckpt_path=chkpt_run_path, save_freq=save_freq, overwrite=overwrite),
     ]
 
-    if profile:
+    if ccfg["profile"]["enabled"]:
         callbacks.append(
             ProfilingCallback(
-                log_dir=profile_log_dir,
-                warmup_steps=profile_warmup,
-                profile_steps=profile_steps,
+                log_dir=Path(ccfg["profile"]["log_dir"]),
+                warmup_steps=ccfg["profile"]["warmup"],
+                profile_steps=ccfg["profile"]["steps"],
             )
         )
 
-    if tensorboard:
-        callbacks.append(TensorBoardLogger(log_dir=tb_run_dir, log_freq=log_freq, hparams=hparams))
+    tb_cfg = ccfg["tensorboard"]
+    if tb_cfg["enabled"]:
+        tb_run_dir = Path(tb_cfg["log_dir"]) / run_name
+        hparams = {
+            "loss_type": loss_type,
+            "velocity_type": vtype,
+            "N": N,
+            "d": d,
+            "L": L,
+            "lr": lr,
+            "batch_size": batch_size,
+            "seed": seed,
+            "nsteps": nsteps,
+            **config["velocity"].get("kwargs", {}),
+        }
+        callbacks.append(TensorBoardLogger(log_dir=tb_run_dir, log_freq=tb_cfg.get("freq", log_freq), hparams=hparams))
 
     trainer = Trainer(
         model=model,
@@ -301,73 +442,53 @@ def train_single_model(
         callbacks=callbacks,
     )
 
+    # Banner
     model_label = model_file.name if model_file else "none"
+    vkwargs = config["velocity"].get("kwargs", {})
+    vkwargs_str = ", ".join(f"{k}={v}" for k, v in vkwargs.items())
     print(f"\n{'='*60}")
     print("Training CNF on particle trajectories")
-    print(f"    Data       : {data_path}")
-    print(f"  Potential    : {model_label}")
+    print(f"  Data       : {data_path}")
+    print(f"  Potential  : {model_label}")
     print(f"  N={N}, d={d}, L={L:.4f}")
-    print(f"  Dataset size : {len(source)}")
-    print(f"  Loss         : {loss_type}")
-    print(f"  MLP          : width={width}, depth={depth}")
-    print(f"  Parameters   : {num_params:,}")
-    print(f"  Run          : {run_name}")
-    print(f"  Ckpts        : {chkpt_run_path}")
+    print(f"  Dataset    : {len(source)}")
+    print(f"  Loss       : {loss_type}")
+    print(f"  Velocity   : {vtype} ({vkwargs_str})")
+    print(f"  Parameters : {num_params:,}")
+    print(f"  Run        : {run_name}")
+    print(f"  Ckpts      : {chkpt_run_path}")
     print(f"{'='*60}\n")
 
     t_start = time.time()
     read_options = grain.ReadOptions(num_threads=num_workers, prefetch_buffer_size=prefetch_buffer_size)
-    trainer.train(
-        dataset=dataset,
-        max_steps=nsteps,
-        read_options=read_options,
-    )
+    trainer.train(dataset=dataset, max_steps=nsteps, read_options=read_options)
     t_elapsed = time.time() - t_start
 
     print(f"\nDone in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)\n")
     return trainer
 
 
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+
 @app.command()
 def main(
-    data_path: Annotated[Path, typer.Option("--data-path", help="Path to trajectory directory or file")] = ...,
-    nsteps: Annotated[int, typer.Option("--nsteps", help="Number of training steps")] = ...,
-    model_file: Annotated[
-        Path | None, typer.Option("--model-file", help="JSON file describing the interatomic potential model")
+    config: Annotated[Path | None, typer.Option("--config", help="JSON config file")] = None,
+    data_path: Annotated[str | None, typer.Option("--data-path", help="Path to trajectory directory")] = None,
+    nsteps: Annotated[int | None, typer.Option("--nsteps", help="Number of training steps")] = None,
+    model_file: Annotated[str | None, typer.Option("--model-file", help="JSON potential model file")] = None,
+    loss_type: Annotated[str | None, typer.Option("--loss-type", help="Loss function type")] = None,
+    lr: Annotated[float | None, typer.Option("--lr", help="Learning rate")] = None,
+    batch_size: Annotated[int | None, typer.Option("--batch-size", help="Batch size")] = None,
+    seed: Annotated[int | None, typer.Option("--seed", help="Random seed")] = None,
+    temperature: Annotated[float | None, typer.Option("--temperature", help="Boltzmann temperature")] = None,
+    ess: Annotated[bool | None, typer.Option("--ess/--no-ess", help="Enable ESS monitoring")] = None,
+    tensorboard: Annotated[
+        bool | None, typer.Option("--tensorboard/--no-tensorboard", help="Enable TensorBoard")
     ] = None,
-    loss_type: Annotated[
-        str, typer.Option(help="Loss: maximum_likelihood | energy_based | hybrid")
-    ] = "maximum_likelihood",
-    width: Annotated[int, typer.Option(help="MLP hidden width")] = 64,
-    depth: Annotated[int, typer.Option(help="MLP depth")] = 3,
-    lr: Annotated[float, typer.Option(help="Learning rate")] = 1e-3,
-    batch_size: Annotated[int, typer.Option(help="Batch size")] = 32,
-    seed: Annotated[int, typer.Option(help="Random seed")] = 0,
-    log_freq: Annotated[int, typer.Option(help="Logging frequency")] = 100,
-    ckpt_path: Annotated[Path, typer.Option(help="Checkpoint root path")] = Path("tmp/ckpt_particles"),
-    overwrite: Annotated[bool, typer.Option(help="Overwrite existing checkpoints")] = True,
-    num_checkpoints: Annotated[int, typer.Option(help="Number of checkpoints to save during training")] = 1,
-    temperature: Annotated[
-        float | None, typer.Option(help="Boltzmann temperature — required with --model-file")
-    ] = None,
-    ess: Annotated[bool, typer.Option(help="Enable ESS monitoring (requires --model-file)")] = False,
-    ess_freq: Annotated[int, typer.Option(help="ESS evaluation frequency (steps)")] = 250,
-    ess_samples: Annotated[int, typer.Option(help="Number of samples for ESS")] = 512,
-    profile: Annotated[bool, typer.Option(help="Enable JAX profiling")] = False,
-    profile_log_dir: Annotated[Path, typer.Option(help="Profiling trace directory")] = Path("tmp/profiles"),
-    profile_warmup: Annotated[int, typer.Option(help="Warmup steps before profiling")] = 50,
-    profile_steps: Annotated[int, typer.Option(help="Steps to profile (0=until end)")] = 0,
-    tensorboard: Annotated[bool, typer.Option(help="Enable TensorBoard logging")] = False,
-    tensorboard_log_dir: Annotated[Path, typer.Option(help="TensorBoard log directory")] = Path("tmp/tb_logs"),
-    device: Annotated[str | None, typer.Option(help="JAX device: cpu | gpu | None")] = None,
-    num_workers: Annotated[int, typer.Option(help="Grain data loading threads")] = 1,
-    prefetch_buffer_size: Annotated[int, typer.Option(help="Grain prefetch buffer size")] = 2,
-    solver: Annotated[str, typer.Option(help="ODE solver (tsit5, dopri5, euler)")] = "tsit5",
-    atol: Annotated[float, typer.Option(help="Absolute tolerance for adaptive solvers")] = 1e-5,
-    rtol: Annotated[float, typer.Option(help="Relative tolerance for adaptive solvers")] = 1e-5,
-    euler_steps: Annotated[
-        int | None, typer.Option(help="Number of steps for Euler solver (required if solver=euler)")
-    ] = None,
+    profile: Annotated[bool | None, typer.Option("--profile/--no-profile", help="Enable JAX profiling")] = None,
+    ot: Annotated[bool | None, typer.Option("--ot/--no-ot", help="Enable optimal transport")] = None,
+    device: Annotated[str | None, typer.Option("--device", help="JAX device: cpu | gpu")] = None,
 ):
     """Train a CNF on MD particle trajectory data."""
     if device is not None:
@@ -375,37 +496,52 @@ def main(
         print(f"JAX process: {jax.process_index()}/{jax.process_count()}")
         print(f"JAX devices: {jax.devices()}")
 
-    train_single_model(
-        data_path=data_path,
-        model_file=model_file,
-        loss_type=loss_type,
-        width=width,
-        depth=depth,
-        lr=lr,
-        nsteps=nsteps,
-        batch_size=batch_size,
-        seed=seed,
-        log_freq=log_freq,
-        ckpt_path=ckpt_path,
-        overwrite=overwrite,
-        num_checkpoints=num_checkpoints,
-        temperature=temperature,
-        ess=ess,
-        ess_freq=ess_freq,
-        ess_samples=ess_samples,
-        profile=profile,
-        profile_log_dir=profile_log_dir,
-        profile_warmup=profile_warmup,
-        profile_steps=profile_steps or None,
-        tensorboard=tensorboard,
-        tensorboard_log_dir=tensorboard_log_dir,
-        num_workers=num_workers,
-        prefetch_buffer_size=prefetch_buffer_size,
-        solver=solver,
-        atol=atol,
-        rtol=rtol,
-        euler_steps=euler_steps,
-    )
+    # 1. Start from defaults
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+
+    # 2. Merge JSON config if provided
+    if config is not None:
+        with open(config) as f:
+            cfg = merge_config(cfg, json.load(f))
+
+    # 3. Apply CLI overrides (only when explicitly provided)
+    if data_path is not None:
+        cfg["data"]["data_path"] = data_path
+    if model_file is not None:
+        cfg["data"]["model_file"] = model_file
+    if temperature is not None:
+        cfg["data"]["temperature"] = temperature
+    if nsteps is not None:
+        cfg["training"]["nsteps"] = nsteps
+    if lr is not None:
+        cfg["training"]["lr"] = lr
+    if batch_size is not None:
+        cfg["training"]["batch_size"] = batch_size
+    if seed is not None:
+        cfg["training"]["seed"] = seed
+    if loss_type is not None:
+        cfg["training"]["loss_type"] = loss_type
+    if ess is not None:
+        cfg["callbacks"]["ess"]["enabled"] = ess
+    if tensorboard is not None:
+        cfg["callbacks"]["tensorboard"]["enabled"] = tensorboard
+    if profile is not None:
+        cfg["callbacks"]["profile"]["enabled"] = profile
+    if ot is not None:
+        cfg["ot"]["enabled"] = ot
+
+    # 4. Validate mandatory fields
+    missing = []
+    if cfg["data"]["data_path"] is None:
+        missing.append("data.data_path (--data-path)")
+    if cfg["training"]["nsteps"] is None:
+        missing.append("training.nsteps (--nsteps)")
+    if missing:
+        raise typer.BadParameter(
+            f"Missing required config: {', '.join(missing)}. " "Provide via --config JSON or CLI arguments."
+        )
+
+    train_single_model(cfg)
 
 
 if __name__ == "__main__":

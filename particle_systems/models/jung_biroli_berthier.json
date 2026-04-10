@@ -1,0 +1,75 @@
+{
+    "potential": [
+        {
+            "type": "lennard_jones",
+            "parameters": {
+                "exponent": 12,
+                "sigma": [
+                    [
+                        1.0,
+                        0.8,
+                        0.9
+                    ],
+                    [
+                        0.8,
+                        0.88,
+                        0.8
+                    ],
+                    [
+                        0.9,
+                        0.8,
+                        0.94
+                    ]
+                ],
+                "epsilon": [
+                    [
+                        1.0,
+                        1.5,
+                        0.75
+                    ],
+                    [
+                        1.5,
+                        0.5,
+                        1.5
+                    ],
+                    [
+                        0.75,
+                        1.5,
+                        0.75
+                    ]
+                ]
+            }
+        }
+    ],
+    "cutoff": [
+        {
+            "type": "smooth",
+            "parameters": {
+                "rcut": [
+                    [
+                        2.5,
+                        2.0,
+                        2.25
+                    ],
+                    [
+                        2.0,
+                        2.2,
+                        2.0
+                    ],
+                    [
+                        2.25,
+                        2.0,
+                        2.35
+                    ]
+                ]
+            }
+        }
+    ],
+    "metadata": {
+        "name": "jung_biroli_berthier",
+        "doi": "https://doi.org/10.48550/arXiv.2507.03590",
+        "reference": "",
+        "description": "Ternary version of Kob-Andersen model for efficient swap",
+        "notes": "Developed for 2D systems with composition (5/11, 3/11, 3/11)"
+    }
+}

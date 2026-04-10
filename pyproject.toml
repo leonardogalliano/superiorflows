@@ -50,6 +50,7 @@ dev = [
     "six>=1.16.0",
     "jax-md>=0.2.27",
     "atooms-pp>=4.2.1",
+    "scipy>=1.17.0",
 ]
 
 [tool.ruff]

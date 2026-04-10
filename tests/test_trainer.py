@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 import optax
 import pytest
-from superiorflows import DistributionDataSource, Flow
+from superiorflows import CoupledDataSource, DistributionDataSource, Flow
 from superiorflows.train import (
     Callback,
     CheckpointCallback,
@@ -23,6 +23,7 @@ from superiorflows.train import (
     MaximumLikelihoodLoss,
     ProfilingCallback,
     ProgressBarCallback,
+    StochasticInterpolantLoss,
     Trainer,
 )
 
@@ -1276,3 +1277,155 @@ class TestDatasetExhausted:
         # Should complete without error
         trainer.train(dataset, max_steps=10)
         assert trainer.step == 10
+
+
+# =============================================================================
+# Stochastic Interpolant Loss Tests
+# =============================================================================
+
+
+def _linear_interpolant(t, x0, x1):
+    """Standard linear interpolant: I(t,x0,x1) = (1-t)x0 + tx1."""
+    return (1 - t) * x0 + t * x1
+
+
+def _gamma_schedule(t):
+    """Classic noise schedule: gamma(t) = sqrt(2*t*(1-t))."""
+    return jnp.sqrt(2 * t * (1 - t))
+
+
+class TestStochasticInterpolantLoss:
+    """Tests for StochasticInterpolantLoss."""
+
+    def test_initialization_with_gamma(self):
+        """Test loss can be created with interpolant and gamma."""
+        loss = StochasticInterpolantLoss(_linear_interpolant, gamma=_gamma_schedule)
+        assert loss.interpolant is _linear_interpolant
+        assert loss.gamma is _gamma_schedule
+        assert loss.dt_interpolant is not None
+        assert loss.dt_gamma is not None
+
+    def test_initialization_without_gamma(self):
+        """Test loss can be created without gamma (deterministic)."""
+        loss = StochasticInterpolantLoss(_linear_interpolant)
+        assert loss.interpolant is _linear_interpolant
+        assert loss.gamma is None
+        assert loss.dt_interpolant is not None
+        assert loss.dt_gamma is None
+
+    def test_forward_pass_with_gamma(self, model):
+        """Test loss with gamma computes finite scalar."""
+        loss_fn = StochasticInterpolantLoss(_linear_interpolant, gamma=_gamma_schedule)
+        x0 = jnp.zeros((16, 2))
+        x1 = jnp.ones((16, 2))
+        loss = loss_fn(model, (x0, x1), key=jax.random.key(0))
+        assert loss.shape == ()
+        assert jnp.isfinite(loss)
+
+    def test_forward_pass_without_gamma(self, model):
+        """Test loss without gamma (deterministic) computes finite scalar."""
+        loss_fn = StochasticInterpolantLoss(_linear_interpolant)
+        x0 = jnp.zeros((16, 2))
+        x1 = jnp.ones((16, 2))
+        loss = loss_fn(model, (x0, x1), key=jax.random.key(0))
+        assert loss.shape == ()
+        assert jnp.isfinite(loss)
+
+    def test_has_gradient_with_gamma(self, model):
+        """Test loss with gamma is differentiable."""
+        loss_fn = StochasticInterpolantLoss(_linear_interpolant, gamma=_gamma_schedule)
+        x0 = jnp.zeros((16, 2))
+        x1 = jnp.ones((16, 2))
+        batch = (x0, x1)
+
+        @eqx.filter_jit
+        def loss_and_grad(m):
+            return eqx.filter_value_and_grad(loss_fn)(m, batch, jax.random.key(1))
+
+        loss, grads = loss_and_grad(model)
+        assert jnp.isfinite(loss)
+        grad_norms = jax.tree.map(lambda x: jnp.linalg.norm(x), eqx.filter(grads, eqx.is_array))
+        total_grad_norm = sum(jax.tree.leaves(grad_norms))
+        assert total_grad_norm > 0
+
+    def test_has_gradient_without_gamma(self, model):
+        """Test loss without gamma is differentiable."""
+        loss_fn = StochasticInterpolantLoss(_linear_interpolant)
+        x0 = jnp.zeros((16, 2))
+        x1 = jnp.ones((16, 2))
+        batch = (x0, x1)
+
+        @eqx.filter_jit
+        def loss_and_grad(m):
+            return eqx.filter_value_and_grad(loss_fn)(m, batch, jax.random.key(1))
+
+        loss, grads = loss_and_grad(model)
+        assert jnp.isfinite(loss)
+        grad_norms = jax.tree.map(lambda x: jnp.linalg.norm(x), eqx.filter(grads, eqx.is_array))
+        total_grad_norm = sum(jax.tree.leaves(grad_norms))
+        assert total_grad_norm > 0
+
+    def test_training_integration_with_gamma(self, base_dist, target_dist, model):
+        """Test full training loop with stochastic interpolant (noisy)."""
+        loss_fn = StochasticInterpolantLoss(_linear_interpolant, gamma=_gamma_schedule)
+        optimizer = optax.adam(1e-3)
+        trainer = Trainer(model, optimizer, loss_fn, seed=0)
+
+        source = CoupledDataSource(
+            DistributionDataSource(base_dist, batch_size=16, seed=0),
+            DistributionDataSource(target_dist, batch_size=16, seed=1),
+        )
+        dataset = grain.MapDataset.source(source).repeat()
+        trained_model = trainer.train(dataset, max_steps=20)
+
+        assert trainer.step == 20
+        assert trained_model is not None
+
+    def test_training_integration_without_gamma(self, base_dist, target_dist, model):
+        """Test full training loop with stochastic interpolant (deterministic)."""
+        loss_fn = StochasticInterpolantLoss(_linear_interpolant)
+        optimizer = optax.adam(1e-3)
+        trainer = Trainer(model, optimizer, loss_fn, seed=0)
+
+        source = CoupledDataSource(
+            DistributionDataSource(base_dist, batch_size=16, seed=0),
+            DistributionDataSource(target_dist, batch_size=16, seed=1),
+        )
+        dataset = grain.MapDataset.source(source).repeat()
+        trained_model = trainer.train(dataset, max_steps=20)
+
+        assert trainer.step == 20
+        assert trained_model is not None
+
+    def test_no_recompilation(self, base_dist, target_dist, model):
+        """Test that training steps do not trigger recompilation."""
+        loss_fn = StochasticInterpolantLoss(_linear_interpolant, gamma=_gamma_schedule)
+        optimizer = optax.adam(1e-3)
+        trainer = Trainer(model, optimizer, loss_fn, seed=0)
+
+        source = CoupledDataSource(
+            DistributionDataSource(base_dist, batch_size=32, seed=0),
+            DistributionDataSource(target_dist, batch_size=32, seed=1),
+        )
+        dataset = grain.MapDataset.source(source).repeat()
+
+        times = []
+
+        start = time.perf_counter()
+        trainer.train(dataset, max_steps=1)
+        jax.block_until_ready(trainer.model)
+        times.append(time.perf_counter() - start)
+
+        for i in range(1, 5):
+            start = time.perf_counter()
+            trainer.train(dataset, max_steps=i + 1)
+            jax.block_until_ready(trainer.model)
+            times.append(time.perf_counter() - start)
+
+        compilation_time = times[0]
+        avg_execution_time = sum(times[1:]) / len(times[1:])
+
+        print(f"SI Compilation: {compilation_time*1000:.2f}ms, " f"Avg Exec: {avg_execution_time*1000:.2f}ms")
+
+        if avg_execution_time > 0.001:
+            assert compilation_time > 2.0 * avg_execution_time, "Recompilation likely occurred!"
