@@ -204,8 +204,12 @@ class PotentialEnergyCallback(Callback):
         self.n_samples = n_samples
         self.eval_freq = eval_freq
 
+    def on_train_start(self, trainer, **kwargs):
+        self.total_steps = kwargs.get("total_steps", -1)
+
     def on_step_end(self, trainer, step: int, logs: Dict[str, Any], **kwargs):
-        if step % self.eval_freq != 0:
+        is_last = hasattr(self, "total_steps") and step == self.total_steps
+        if step % self.eval_freq != 0 and step != 1 and not is_last:
             return
 
         flow = Flow(
@@ -430,7 +434,14 @@ def train_single_model(config: dict):
             "batch_size": batch_size,
             "seed": seed,
             "nsteps": nsteps,
-            **config["velocity"].get("kwargs", {}),
+            "num_workers": num_workers,
+            "prefetch": prefetch_buffer_size,
+            "ot": use_ot,
+            "box_sym": use_ot_box_symmetry,
+            "temp": temperature if temperature is not None else -1.0,
+            "v_kwargs": str(config["velocity"].get("kwargs", {})),
+            "solver": config["solver"]["type"],
+            "ess_enabled": ccfg["ess"]["enabled"],
         }
         callbacks.append(TensorBoardLogger(log_dir=tb_run_dir, log_freq=tb_cfg.get("freq", log_freq), hparams=hparams))
 

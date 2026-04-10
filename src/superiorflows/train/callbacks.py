@@ -93,8 +93,12 @@ class LoggerCallback(Callback):
                 log_str += f" | {k}: {v}"
         tqdm.write(log_str)
 
+    def on_train_start(self, trainer, **kwargs):
+        self.total_steps = kwargs.get("total_steps", -1)
+
     def on_step_end(self, trainer, step: int, logs: Dict[str, Any], **kwargs):
-        if step % self.log_freq == 0:
+        is_last = hasattr(self, "total_steps") and step == self.total_steps
+        if step % self.log_freq == 0 or step == 1 or is_last:
             print_logs = logs.copy()
 
             if "grads" in print_logs:
@@ -129,8 +133,12 @@ class ValidationCallback(Callback):
         self.loss_module = loss_module
         self.val_freq = val_freq
 
+    def on_train_start(self, trainer, **kwargs):
+        self.total_steps = kwargs.get("total_steps", -1)
+
     def on_step_end(self, trainer, step: int, logs: Dict[str, Any], **kwargs):
-        if step % self.val_freq != 0:
+        is_last = hasattr(self, "total_steps") and step == self.total_steps
+        if step % self.val_freq != 0 and step != 1 and not is_last:
             return
 
         val_losses = []
@@ -363,8 +371,15 @@ class TensorBoardLogger(Callback):
 
     def on_train_start(self, trainer, **kwargs):
         """Log hyperparameters at the start of training."""
+        self.total_steps = kwargs.get("total_steps", -1)
         if self.hparams:
-            self._writer.add_hparams(self.hparams, metric_dict={}, name=".", global_step=0)
+            from tensorboardX.summary import hparams as _make_hparams
+
+            exp, ssi, sei = _make_hparams(self.hparams, metric_dict={"train/loss": 0.0})
+            self._writer.file_writer.add_summary(exp)
+            self._writer.file_writer.add_summary(ssi)
+            self._writer.file_writer.add_summary(sei)
+            self._writer.flush()
 
     def _write_scalars(self, step: int, metrics: Dict[str, Any], prefix: str = ""):
         """Write scalar metrics to TensorBoard."""
@@ -381,7 +396,8 @@ class TensorBoardLogger(Callback):
                 self._writer.add_scalar(f"{prefix}{k}", v.item(), step)
 
     def on_step_end(self, trainer, step: int, logs: Dict[str, Any], **kwargs):
-        if step % self.log_freq == 0:
+        is_last = hasattr(self, "total_steps") and step == self.total_steps
+        if step % self.log_freq == 0 or step == 1 or is_last:
             self._write_scalars(step, logs, prefix="train/")
             self._writer.flush()
 
@@ -427,8 +443,12 @@ class ESSCallback(Callback):
         self.n_samples = n_samples
         self.eval_freq = eval_freq
 
+    def on_train_start(self, trainer, **kwargs):
+        self.total_steps = kwargs.get("total_steps", -1)
+
     def on_step_end(self, trainer, step: int, logs: Dict[str, Any], **kwargs):
-        if step % self.eval_freq != 0:
+        is_last = hasattr(self, "total_steps") and step == self.total_steps
+        if step % self.eval_freq != 0 and step != 1 and not is_last:
             return
 
         import jax
