@@ -376,7 +376,7 @@ def apply_box_symmetry(positions, g, L):
     return ((positions - center) @ g.T + center) % L
 
 
-def _solve_ot_single(pos_0, pos_1, species_1, box):
+def _solve_ot_single(pos_0, pos_1, species_0, species_1, box):
     """Solve species-wise OT for a single sample pair.
 
     Returns ``(aligned_positions, total_cost)``.
@@ -386,21 +386,22 @@ def _solve_ot_single(pos_0, pos_1, species_1, box):
     total_cost = 0.0
 
     for s in np.unique(species_1):
-        mask = species_1 == s
-        N_s = np.count_nonzero(mask)
-        if N_s == 0:
-            continue
+        idx_0 = np.where(species_0 == s)[0]
+        idx_1 = np.where(species_1 == s)[0]
 
-        p0_s = pos_0[mask]
-        p1_s = pos_1[mask]
+        if len(idx_0) == 0 or len(idx_1) == 0:
+            continue
+        assert len(idx_0) == len(idx_1), f"Species counts mismatch for species {s}"
+
+        p0_s = pos_0[idx_0]
+        p1_s = pos_1[idx_1]
 
         delta = p0_s[:, None, :] - p1_s[None, :, :]
         delta -= box * np.round(delta / box)
         cost_matrix = np.sum(delta**2, axis=-1)
 
         row_ind, col_ind = linear_sum_assignment(cost_matrix)
-        idx = np.where(mask)[0]
-        aligned[idx[col_ind]] = p0_s[row_ind]
+        aligned[idx_1[col_ind]] = p0_s[row_ind]
         total_cost += cost_matrix[row_ind, col_ind].sum()
 
     return aligned, total_cost
@@ -430,6 +431,7 @@ class EquivariantOptimalTransport:
 
         pos_0 = np.asarray(x0.positions)
         pos_1 = np.asarray(x1.positions)
+        species_0 = np.asarray(x0.species)
         species_1 = np.asarray(x1.species)
         box = np.asarray(x1.box)
 
@@ -453,6 +455,7 @@ class EquivariantOptimalTransport:
                 aligned_i, cost_i = _solve_ot_single(
                     p0_g,
                     pos_1[i],
+                    species_0[i],
                     species_1[i],
                     box[i],
                 )
@@ -468,3 +471,37 @@ class EquivariantOptimalTransport:
             box=box,
         )
         return (x0_aligned, x1)
+
+
+def batch_to_trajectory(particle_systems: ParticleSystem):
+    """Convert a batched ParticleSystem into an in-memory atooms trajectory.
+
+    Args:
+        particle_systems: A batched ParticleSystem object (B, N, d).
+
+    Returns:
+        atooms.trajectory.TrajectoryRam holding an iterable list of Systems natively mapped.
+    """
+    from atooms.system import System
+    from atooms.system.cell import Cell
+    from atooms.system.particle import Particle
+    from atooms.trajectory import TrajectoryRam
+
+    pos = np.asarray(particle_systems.positions)
+    species = np.asarray(particle_systems.species)
+    boxes = np.asarray(particle_systems.box)
+
+    if pos.ndim != 3:
+        raise ValueError(f"Expected batched ParticleSystem (B, N, d), got shape {pos.shape}")
+
+    B, N, d = pos.shape
+    trj = TrajectoryRam()
+
+    for i in range(B):
+        sys = System()
+        b = boxes if boxes.ndim == 1 else boxes[i]
+        sys.cell = Cell(side=b)
+        sys.particle = [Particle(position=p, species=int(s)) for p, s in zip(pos[i], species[i])]
+        trj.append(sys)
+
+    return trj

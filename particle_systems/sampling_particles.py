@@ -14,6 +14,7 @@ from superiorflows import Flow
 from particle_systems.particle_system import (
     TrajectoryDataSource,
     UniformParticles,
+    batch_to_trajectory,
 )
 from particle_systems.training_particles import build_solver, build_velocity
 
@@ -132,12 +133,19 @@ def main(
         trajectory_dir = run_output_dir / str(i)
         trajectory_dir.mkdir(parents=True, exist_ok=True)
 
-        # samples is a ParticleSystem object
-        positions = np.asarray(samples.positions)
-        lps = np.asarray(log_probs)
+        trj = batch_to_trajectory(samples)
+        trj.metadata = {"generated_by": ckpt_path.name}
 
-        np.save(trajectory_dir / "samples.npy", positions)
-        np.save(trajectory_dir / "log_probs.npy", lps)
+        import atooms.trajectory
+
+        out_path = trajectory_dir / "samples.xyz"
+        with atooms.trajectory.TrajectoryXYZ(str(out_path), "w") as out:
+            out.metadata = trj.metadata
+            for sys in trj:
+                out.write(sys)
+
+        lps = np.asarray(log_probs)
+        np.savetxt(trajectory_dir / "log_probs.dat", lps, fmt="%.6e")
 
     print(f"\nAll done! Generated {batch_size * num_trajectories} samples in {total_time:.1f}s.")
     print(f"Saved to {run_output_dir.resolve()}")

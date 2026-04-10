@@ -92,14 +92,14 @@ def test_ot_cost_reduction():
         species = np.array([0] * 10 + [1] * 10)
 
         # Permutation-only
-        _, cost_perm = _solve_ot_single(pos_0, pos_1, species, L)
+        _, cost_perm = _solve_ot_single(pos_0, pos_1, species, species, L)
 
         # Best over hyperoctahedral group
         G = generate_hyperoctahedral_group(2)
         best_cost = np.inf
         for g in G:
             p0_g = apply_box_symmetry(pos_0, g, L)
-            _, cost_g = _solve_ot_single(p0_g, pos_1, species, L)
+            _, cost_g = _solve_ot_single(p0_g, pos_1, species, species, L)
             best_cost = min(best_cost, cost_g)
 
         assert best_cost <= cost_perm + 1e-10, f"Box symmetry cost {best_cost:.4f} > perm-only cost {cost_perm:.4f}"
@@ -145,7 +145,7 @@ def test_exhaustive_optimality():
         best_cost = np.inf
         for g in G:
             p0_g = apply_box_symmetry(pos_0[i], g, L)
-            _, cost_g = _solve_ot_single(p0_g, pos_1[i], species[i], L)
+            _, cost_g = _solve_ot_single(p0_g, pos_1[i], species[i], species[i], L)
             best_cost = min(best_cost, cost_g)
 
         assert np.isclose(
@@ -175,7 +175,7 @@ def test_backward_compatibility():
 
     # Manually run identity-only
     for i in range(B):
-        aligned_i, _ = _solve_ot_single(pos_0[i], pos_1[i], species[i], L)
+        aligned_i, _ = _solve_ot_single(pos_0[i], pos_1[i], species[i], species[i], L)
         assert np.allclose(np.asarray(x0_a.positions[i]), aligned_i, atol=1e-6), f"Batch {i}: backward compat mismatch"
 
     print("  [PASS] use_box_symmetry=False matches manual identity-only OT")
@@ -206,6 +206,53 @@ def test_species_preserved():
     print("  [PASS] Species preserved after OT (both modes)")
 
 
+def test_different_species_order():
+    """Verify that OT correctly handles base and target datasets with different species permutations."""
+    rng = np.random.default_rng(88)
+    L = np.array([5.0, 5.0])
+    N = 20
+    B = 2
+
+    pos_0 = rng.uniform(0, L[0], (B, N, 2)).astype(np.float32)
+    pos_1 = rng.uniform(0, L[0], (B, N, 2)).astype(np.float32)
+
+    base_species = np.array([0] * 10 + [1] * 10, dtype=np.int32)
+    species_0_list = []
+    species_1_list = []
+    for _ in range(B):
+        species_0_list.append(rng.permutation(base_species))
+        species_1_list.append(rng.permutation(base_species))
+
+    species_0 = np.array(species_0_list)
+    species_1 = np.array(species_1_list)
+    box = np.tile(L.astype(np.float32), (B, 1))
+
+    x0 = ParticleSystem(positions=pos_0, species=species_0, box=box)
+    x1 = ParticleSystem(positions=pos_1, species=species_1, box=box)
+
+    for sym in [False, True]:
+        ot = EquivariantOptimalTransport(use_box_symmetry=sym)
+        (x0_a, _) = ot((x0, x1))
+
+        # Output species must be species_1 to easily interpolate
+        assert np.array_equal(np.asarray(x0_a.species), species_1), f"Species matching failed for sym={sym}"
+
+        # Ensure the spatial elements tracked for each species exactly match the input
+        for i in range(B):
+            for s in [0, 1]:
+                orig_p0_s = pos_0[i][species_0[i] == s]
+                aligned_p0_s = np.asarray(x0_a.positions)[i][species_1[i] == s]
+
+                unique_orig = np.unique(orig_p0_s, axis=0)
+                unique_aligned = np.unique(aligned_p0_s, axis=0)
+
+                assert (
+                    np.allclose(unique_orig, unique_aligned, atol=1e-6) or sym
+                ), f"Set of coordinates changed during pure assignment for species {s} and sym={sym}"
+
+    print("  [PASS] Explicit species indexing logic matched differently ordered datasets successfully")
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Verification: EquivariantOptimalTransport")
@@ -233,6 +280,9 @@ if __name__ == "__main__":
 
     print("\n7. Species preservation")
     test_species_preserved()
+
+    print("\n8. Different species ordering")
+    test_different_species_order()
 
     print("\n" + "=" * 60)
     print("ALL TESTS PASSED")
