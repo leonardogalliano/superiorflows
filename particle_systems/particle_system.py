@@ -329,10 +329,11 @@ class TrajectoryDataSource(grain.sources.RandomAccessDataSource):
         return self._box[0]
 
 
-def particle_geodesic_interpolant(t, x0, x1, L):
+def particle_geodesic_interpolant(t, x0, x1, L, s_fn=None):
     """Geodesic interpolation from x0 to x1 at time t in [0, 1]."""
     v = log_map(x0.positions, x1.positions, L)
-    xt = exp_map(x0.positions, t * v, L)
+    s_t = t if s_fn is None else s_fn(t)
+    xt = exp_map(x0.positions, s_t * v, L)
     return type(x0)(positions=xt, species=x0.species, box=x0.box)
 
 

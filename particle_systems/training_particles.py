@@ -84,11 +84,12 @@ DEFAULT_CONFIG = {
         "solver_steps": None,
     },
     "stochastic_interpolant": {
-        "use_gamma": False,
-    },
-    "ot": {
-        "enabled": True,
-        "box_symmetry": False,
+        "interpolant_scheduler": "t",
+        "noise_scheduler": "None",
+        "ot": {
+            "enabled": True,
+            "box_symmetry": False,
+        },
     },
     "callbacks": {
         "ess": {
@@ -182,6 +183,19 @@ def build_solver(config: dict) -> dict:
     return flow_kwargs
 
 
+def build_schedule_fn(expr: str):
+    """Compiles a mathematical string into a JAX-compatible lambda."""
+    if not expr or expr.lower() in ("none", "null"):
+        return None
+
+    env = {"jnp": jnp}
+
+    def schedule(t):
+        return eval(expr, env, {"t": t})
+
+    return schedule
+
+
 # ── Callbacks ─────────────────────────────────────────────────────────────────
 
 
@@ -264,9 +278,10 @@ def train_single_model(config: dict):
     overwrite = tcfg["overwrite"]
     num_checkpoints = tcfg["num_checkpoints"]
 
-    use_gamma = config["stochastic_interpolant"]["use_gamma"]
-    use_ot = config["ot"]["enabled"]
-    use_ot_box_symmetry = config["ot"]["box_symmetry"]
+    s_expr = config["stochastic_interpolant"]["interpolant_scheduler"]
+    gamma_expr = config["stochastic_interpolant"]["noise_scheduler"]
+    use_ot = config["stochastic_interpolant"]["ot"]["enabled"]
+    use_ot_box_symmetry = config["stochastic_interpolant"]["ot"]["box_symmetry"]
 
     key = jax.random.key(seed)
 
@@ -325,15 +340,13 @@ def train_single_model(config: dict):
         dataset = source.to_dataset(batch_size=batch_size, shuffle=True, seed=seed).repeat()
 
     elif loss_type == "stochastic_interpolant":
+        s_fn = build_schedule_fn(s_expr)
+        gamma_fn = build_schedule_fn(gamma_expr)
 
         def interpolant(t, x0, x1):
-            return particle_geodesic_interpolant(t, x0, x1, L)
+            return particle_geodesic_interpolant(t, x0, x1, L, s_fn=s_fn)
 
-        def gamma_fn(t):
-            return jnp.sqrt(2 * t * (1 - t))
-
-        gamma_fn_arg = gamma_fn if use_gamma else None
-        loss_fn = StochasticInterpolantLoss(interpolant=interpolant, gamma=gamma_fn_arg, **flow_kwargs)
+        loss_fn = StochasticInterpolantLoss(interpolant=interpolant, gamma=gamma_fn, **flow_kwargs)
         dataset = (
             source.to_dataset(batch_size=batch_size, shuffle=True, seed=seed)
             .repeat()
@@ -465,15 +478,18 @@ def train_single_model(config: dict):
     vkwargs_str = ", ".join(f"{k}={v}" for k, v in vkwargs.items())
     print(f"\n{'='*60}")
     print("Training CNF on particle trajectories")
-    print(f"  Data       : {data_path}")
-    print(f"  Potential  : {model_label}")
+    print(f"  Data          : {data_path}")
+    print(f"  Potential     : {model_label}")
     print(f"  N={N}, d={d}, L={L:.4f}")
-    print(f"  Dataset    : {len(source)}")
-    print(f"  Loss       : {loss_type}")
-    print(f"  Velocity   : {vtype} ({vkwargs_str})")
-    print(f"  Parameters : {num_params:,}")
-    print(f"  Run        : {run_name}")
-    print(f"  Ckpts      : {chkpt_run_path}")
+    print(f"  Dataset size  : {len(source)}")
+    print(f"  Batch size    : {batch_size}")
+    print(f"  Loss          : {loss_type}")
+    print(f"  Velocity      : {vtype} ({vkwargs_str})")
+    print(f"  Parameters    : {num_params:,}")
+    print(f"  Run           : {run_name}")
+    print(f"  Ckpts         : {chkpt_run_path}")
+    print(f"  JAX process   : {jax.process_index()}/{jax.process_count()}")
+    print(f"  JAX devices   : {jax.devices()}")
     print(f"{'='*60}\n")
 
     t_start = time.time()
@@ -504,14 +520,11 @@ def main(
         bool | None, typer.Option("--tensorboard/--no-tensorboard", help="Enable TensorBoard")
     ] = None,
     profile: Annotated[bool | None, typer.Option("--profile/--no-profile", help="Enable JAX profiling")] = None,
-    ot: Annotated[bool | None, typer.Option("--ot/--no-ot", help="Enable optimal transport")] = None,
     device: Annotated[str | None, typer.Option("--device", help="JAX device: cpu | gpu")] = None,
 ):
     """Train a CNF on MD particle trajectory data."""
     if device is not None:
         jax.config.update("jax_platform_name", device)
-        print(f"JAX process: {jax.process_index()}/{jax.process_count()}")
-        print(f"JAX devices: {jax.devices()}")
 
     # 1. Start from defaults
     cfg = copy.deepcopy(DEFAULT_CONFIG)
@@ -544,8 +557,6 @@ def main(
         cfg["callbacks"]["tensorboard"]["enabled"] = tensorboard
     if profile is not None:
         cfg["callbacks"]["profile"]["enabled"] = profile
-    if ot is not None:
-        cfg["ot"]["enabled"] = ot
 
     # 4. Validate mandatory fields
     missing = []
