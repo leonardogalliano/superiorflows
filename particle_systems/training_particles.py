@@ -81,7 +81,7 @@ DEFAULT_CONFIG = {
         "type": "tsit5",
         "atol": 1e-5,
         "rtol": 1e-5,
-        "euler_steps": None,
+        "solver_steps": None,
     },
     "stochastic_interpolant": {
         "use_gamma": False,
@@ -149,31 +149,37 @@ def build_solver(config: dict) -> dict:
     """Build ``flow_kwargs`` from the ``solver`` config block."""
     scfg = config["solver"]
     stype = scfg["type"].lower()
+    solver_steps = scfg.get("solver_steps")
 
-    if stype == "euler":
-        euler_steps = scfg.get("euler_steps")
-        if euler_steps is None:
-            raise ValueError("solver.euler_steps is required when solver.type='euler'.")
-        return dict(
-            dynamic_mask=ParticleSystem.get_dynamic_mask(),
-            solver=dfx.Euler(),
-            augmented_solver=dfx.Euler(),
-            stepsize_controller=dfx.ConstantStepSize(),
-            augmented_stepsize_controller=dfx.ConstantStepSize(),
-            dt0=1.0 / euler_steps,
-        )
+    solvers = {"euler": dfx.Euler, "tsit5": dfx.Tsit5, "dopri5": dfx.Dopri5}
 
-    solvers = {"tsit5": dfx.Tsit5, "dopri5": dfx.Dopri5}
     if stype not in solvers:
         raise ValueError(f"Unknown solver '{stype}'. Available: {list(solvers)}")
+
+    if stype == "euler" and solver_steps is None:
+        raise ValueError("solver.solver_steps is required when solver.type='euler'.")
+
     slv = solvers[stype]()
-    return dict(
+
+    flow_kwargs = dict(
         dynamic_mask=ParticleSystem.get_dynamic_mask(),
         solver=slv,
         augmented_solver=slv,
-        stepsize_controller=dfx.PIDController(rtol=scfg["rtol"], atol=scfg["atol"]),
-        augmented_stepsize_controller=dfx.PIDController(rtol=scfg["rtol"], atol=scfg["atol"]),
     )
+
+    if solver_steps is not None:
+        flow_kwargs.update(
+            stepsize_controller=dfx.ConstantStepSize(),
+            augmented_stepsize_controller=dfx.ConstantStepSize(),
+            dt0=1.0 / solver_steps,
+        )
+    else:
+        flow_kwargs.update(
+            stepsize_controller=dfx.PIDController(rtol=scfg["rtol"], atol=scfg["atol"]),
+            augmented_stepsize_controller=dfx.PIDController(rtol=scfg["rtol"], atol=scfg["atol"]),
+        )
+
+    return flow_kwargs
 
 
 # ── Callbacks ─────────────────────────────────────────────────────────────────
