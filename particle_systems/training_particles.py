@@ -9,8 +9,8 @@ import copy
 import datetime
 import json
 import time
+import warnings
 from pathlib import Path
-from typing import Any, Dict
 
 import diffrax as dfx
 import equinox as eqx
@@ -20,9 +20,8 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import typer
-from superiorflows import DistributionDataSource, Flow
+from superiorflows import DistributionDataSource
 from superiorflows.train import (
-    Callback,
     CheckpointCallback,
     EnergyBasedLoss,
     ESSCallback,
@@ -38,6 +37,7 @@ from superiorflows.train import (
 )
 from typing_extensions import Annotated
 
+from particle_systems.callbacks_particles import BoltzmannCallback
 from particle_systems.particle_system import (
     BoltzmannDistribution,
     CoupleBaseSamples,
@@ -61,6 +61,7 @@ DEFAULT_CONFIG = {
         "temperature": None,
         "num_workers": 1,
         "prefetch_buffer_size": 2,
+        "max_dataset_length": None,
     },
     "training": {
         "nsteps": None,
@@ -72,6 +73,7 @@ DEFAULT_CONFIG = {
         "ckpt_path": "tmp/ckpt_particles",
         "overwrite": True,
         "num_checkpoints": 1,
+        "load_from_checkpoint": None,
     },
     "velocity": {
         "type": "mlp",
@@ -97,13 +99,16 @@ DEFAULT_CONFIG = {
             "freq": 250,
             "samples": 512,
         },
-        "potential_energy": {
+        "boltzmann": {
             "enabled": False,
-            "freq": 100,
+            "freq": 250,
+            "samples": 20,
+            "n_target_samples": 256,
+            "n_show": 10,
         },
         "tensorboard": {
             "enabled": False,
-            "freq": 100,
+            "freq": 10,
             "log_dir": "tmp/tb_logs",
         },
         "profile": {
@@ -196,64 +201,6 @@ def build_schedule_fn(expr: str):
     return schedule
 
 
-# ── Callbacks ─────────────────────────────────────────────────────────────────
-
-
-class PotentialEnergyCallback(Callback):
-    """Periodically samples from the current flow and logs mean potential energy.
-
-    Draws ``n_samples`` configurations from the flow's pushforward distribution,
-    evaluates the interatomic potential on each, and injects ``energy``
-    into the logs dict so that ``LoggerCallback`` and ``TensorBoardLogger`` pick
-    it up automatically.
-    """
-
-    def __init__(
-        self,
-        energy_fn,
-        base_distribution,
-        ref_species,
-        flow_kwargs: dict | None = None,
-        n_samples: int = 256,
-        eval_freq: int = 250,
-    ):
-        self.energy_fn = energy_fn
-        self.base_distribution = base_distribution
-        self.ref_species = ref_species
-        self.flow_kwargs = flow_kwargs or {}
-        self.n_samples = n_samples
-        self.eval_freq = eval_freq
-
-    def on_train_start(self, trainer, **kwargs):
-        self.total_steps = kwargs.get("total_steps", -1)
-
-    def on_step_end(self, trainer, step: int, logs: Dict[str, Any], **kwargs):
-        is_last = hasattr(self, "total_steps") and step == self.total_steps
-        if step % self.eval_freq != 0 and step != 1 and not is_last:
-            return
-
-        flow = Flow(
-            velocity_field=trainer.model,
-            base_distribution=self.base_distribution,
-            **self.flow_kwargs,
-        )
-
-        try:
-            key, subkey = jax.random.split(trainer.key)
-            samples = flow.sample(seed=subkey, sample_shape=(self.n_samples,))
-
-            energy_fn = self.energy_fn
-            ref_species = self.ref_species
-
-            def single_energy(sample: ParticleSystem):
-                return energy_fn(sample.positions, ref_species)
-
-            mean_energy = jnp.mean(jax.vmap(single_energy)(samples))
-        except Exception:
-            mean_energy = float("nan")
-        logs["energy"] = mean_energy
-
-
 # ── Core training logic ──────────────────────────────────────────────────────
 
 
@@ -287,6 +234,12 @@ def train_single_model(config: dict):
 
     # Data
     source = TrajectoryDataSource(data_path)
+    if (maxlen := dcfg.get("max_dataset_length")) is not None:
+        source._positions = source._positions[:maxlen]
+        source._species = source._species[:maxlen]
+        source._box = source._box[:maxlen]
+        source._n_frames = len(source._positions)
+
     N, d = source.N, source.d
     L = float(source.box_size[0])
     ref_species = source[0].species
@@ -410,37 +363,10 @@ def train_single_model(config: dict):
             )
         )
 
-    pe_cfg = ccfg.get("potential_energy", {})
-    if target_dist is not None and pe_cfg.get("enabled", True):
-        callbacks.append(
-            PotentialEnergyCallback(
-                energy_fn=target_dist._energy_fn,
-                base_distribution=base_dist,
-                ref_species=jnp.array(source[0].species),
-                flow_kwargs=flow_kwargs,
-                n_samples=batch_size,
-                eval_freq=pe_cfg.get("freq", log_freq),
-            )
-        )
-
-    save_freq = max(1, nsteps // num_checkpoints) if num_checkpoints > 0 else nsteps + 1
-    callbacks += [
-        ValidationCallback(val_data=val_data, loss_module=loss_fn, val_freq=log_freq),
-        LoggerCallback(log_freq=log_freq),
-        ProgressBarCallback(refresh_rate=max(1, nsteps // 100)),
-        CheckpointCallback(ckpt_path=chkpt_run_path, save_freq=save_freq, overwrite=overwrite),
-    ]
-
-    if ccfg["profile"]["enabled"]:
-        callbacks.append(
-            ProfilingCallback(
-                log_dir=Path(ccfg["profile"]["log_dir"]),
-                warmup_steps=ccfg["profile"]["warmup"],
-                profile_steps=ccfg["profile"]["steps"],
-            )
-        )
-
+    # TensorBoard
     tb_cfg = ccfg["tensorboard"]
+    tb_writer = None
+    tb_logger = None
     if tb_cfg["enabled"]:
         tb_run_dir = Path(tb_cfg["log_dir"]) / run_name
         hparams = {
@@ -462,7 +388,62 @@ def train_single_model(config: dict):
             "solver": config["solver"]["type"],
             "ess_enabled": ccfg["ess"]["enabled"],
         }
-        callbacks.append(TensorBoardLogger(log_dir=tb_run_dir, log_freq=tb_cfg.get("freq", log_freq), hparams=hparams))
+        tb_logger = TensorBoardLogger(log_dir=tb_run_dir, log_freq=tb_cfg.get("freq", log_freq), hparams=hparams)
+        tb_writer = tb_logger._writer
+
+    bz_cfg = ccfg.get("boltzmann", {})
+    if target_dist is not None and bz_cfg.get("enabled", False):
+        # Species radii for visualization (cosmetic only)
+        species_radii = None
+        if boltzmann_model is not None:
+            try:
+                sigma_matrix = np.asarray(boltzmann_model["potential"][0]["parameters"]["sigma"])
+                species_radii = np.diagonal(sigma_matrix).astype(float) / 2 * 0.8
+            except (KeyError, IndexError):
+                pass
+        if species_radii is None:
+            species_radii = np.full(len(composition), 0.3 * L / np.sqrt(N))
+            warnings.warn(
+                "[BoltzmannCallback] No sigma found in model — using estimated radii " "for sample visualization.",
+                stacklevel=2,
+            )
+
+        callbacks.append(
+            BoltzmannCallback(
+                energy_fn=target_dist._energy_fn,
+                base_distribution=base_dist,
+                ref_species=jnp.array(source[0].species),
+                target_source=source,
+                flow_kwargs=flow_kwargs,
+                n_samples=bz_cfg.get("samples", 20),
+                n_target_samples=bz_cfg.get("n_target_samples", 256),
+                eval_freq=bz_cfg.get("freq", log_freq),
+                tb_writer=tb_writer,
+                species_radii=species_radii,
+                n_show=bz_cfg.get("n_show", 10),
+            )
+        )
+
+    save_freq = max(1, nsteps // num_checkpoints) if num_checkpoints > 0 else nsteps + 1
+    callbacks += [
+        ValidationCallback(val_data=val_data, loss_module=loss_fn, val_freq=log_freq),
+        LoggerCallback(log_freq=log_freq),
+        ProgressBarCallback(refresh_rate=max(1, nsteps // 100)),
+        CheckpointCallback(ckpt_path=chkpt_run_path, save_freq=save_freq, overwrite=overwrite),
+    ]
+
+    if ccfg["profile"]["enabled"]:
+        callbacks.append(
+            ProfilingCallback(
+                log_dir=Path(ccfg["profile"]["log_dir"]),
+                warmup_steps=ccfg["profile"]["warmup"],
+                profile_steps=ccfg["profile"]["steps"],
+            )
+        )
+
+    # TensorBoard logger goes last to pick up all scalar metrics from other callbacks
+    if tb_logger is not None:
+        callbacks.append(tb_logger)
 
     trainer = Trainer(
         model=model,
@@ -471,6 +452,18 @@ def train_single_model(config: dict):
         seed=seed,
         callbacks=callbacks,
     )
+
+    # Load from checkpoint if requested
+    load_from_ckpt = tcfg.get("load_from_checkpoint")
+    if load_from_ckpt is not None:
+        ckpt_load_path = Path(load_from_ckpt)
+        if not ckpt_load_path.exists():
+            raise FileNotFoundError(f"Checkpoint path not found: {ckpt_load_path}")
+        success = trainer.load_checkpoint(str(ckpt_load_path))
+        if not success:
+            raise RuntimeError(f"Failed to load checkpoint from {ckpt_load_path}")
+        # Clear data iterator state (may be incompatible with new config)
+        trainer._restored_data_state = None
 
     # Banner
     model_label = model_file.name if model_file else "none"
@@ -488,6 +481,9 @@ def train_single_model(config: dict):
     print(f"  Parameters    : {num_params:,}")
     print(f"  Run           : {run_name}")
     print(f"  Ckpts         : {chkpt_run_path}")
+    if load_from_ckpt is not None:
+        print(f"  Resumed from  : {load_from_ckpt} (step {trainer.step})")
+        print(f"  Training      : step {trainer.step} \u2192 {nsteps}")
     print(f"  JAX process   : {jax.process_index()}/{jax.process_count()}")
     print(f"  JAX devices   : {jax.devices()}")
     print(f"{'='*60}\n")
@@ -521,6 +517,9 @@ def main(
     ] = None,
     profile: Annotated[bool | None, typer.Option("--profile/--no-profile", help="Enable JAX profiling")] = None,
     device: Annotated[str | None, typer.Option("--device", help="JAX device: cpu | gpu")] = None,
+    load_from_checkpoint: Annotated[
+        str | None, typer.Option("--load-from-checkpoint", help="Checkpoint directory to resume from")
+    ] = None,
 ):
     """Train a CNF on MD particle trajectory data."""
     if device is not None:
@@ -557,6 +556,8 @@ def main(
         cfg["callbacks"]["tensorboard"]["enabled"] = tensorboard
     if profile is not None:
         cfg["callbacks"]["profile"]["enabled"] = profile
+    if load_from_checkpoint is not None:
+        cfg["training"]["load_from_checkpoint"] = load_from_checkpoint
 
     # 4. Validate mandatory fields
     missing = []
