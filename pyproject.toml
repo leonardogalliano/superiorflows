@@ -44,6 +44,7 @@ dev = [
     "matplotlib>=3.10.8",
     "notebook>=7.5.1",
     "pytest>=9.0.2",
+    "pytest-cov>=6.0.0",
     "pytest-benchmark>=5.2.3",
     "ruff>=0.14.10",
     "pre-commit>=4.0.1",

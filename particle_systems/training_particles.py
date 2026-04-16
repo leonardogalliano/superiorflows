@@ -27,6 +27,7 @@ from superiorflows.train import (
     ESSCallback,
     KullbackLeiblerLoss,
     LoggerCallback,
+    LRSchedulerCallback,
     MaximumLikelihoodLoss,
     ProfilingCallback,
     ProgressBarCallback,
@@ -65,7 +66,6 @@ DEFAULT_CONFIG = {
     },
     "training": {
         "nsteps": None,
-        "lr": 1e-3,
         "batch_size": 32,
         "seed": 0,
         "loss_type": "maximum_likelihood",
@@ -74,6 +74,10 @@ DEFAULT_CONFIG = {
         "overwrite": True,
         "num_checkpoints": 1,
         "load_from_checkpoint": None,
+    },
+    "optimizer": {
+        "type": "adam",
+        "lr_schedule": "1e-3",
     },
     "velocity": {
         "type": "mlp",
@@ -201,6 +205,41 @@ def build_schedule_fn(expr: str):
     return schedule
 
 
+def build_optimizer(config: dict) -> tuple:
+    """Build an Optax optimizer and its matching schedule from the ``optimizer`` config block.
+
+    The ``lr_schedule`` field accepts either:
+
+    - A **plain float string** (e.g. ``"1e-3"``) → wrapped in
+      ``optax.constant_schedule``.
+    - An **optax expression string** evaluated as Python with ``optax`` in
+      scope (e.g. ``"optax.cosine_decay_schedule(1e-3, decay_steps=5000)"``).
+
+    Returns:
+        A ``(optimizer, schedule)`` tuple where ``schedule`` is the raw optax
+        schedule callable (``int -> float``) used by ``LRSchedulerCallback``.
+    """
+    ocfg = config["optimizer"]
+    lr_expr = ocfg["lr_schedule"]
+    otype = ocfg["type"]
+
+    env = {"optax": optax}
+    try:
+        schedule = optax.constant_schedule(float(lr_expr))
+    except (ValueError, TypeError):
+        schedule = eval(lr_expr, env)
+
+    optimizers = {
+        "adam": optax.adam,
+        "adamw": optax.adamw,
+        "sgd": optax.sgd,
+    }
+    if otype not in optimizers:
+        raise ValueError(f"Unknown optimizer type '{otype}'. Available: {list(optimizers)}")
+
+    return optimizers[otype](learning_rate=schedule), schedule
+
+
 # ── Core training logic ──────────────────────────────────────────────────────
 
 
@@ -216,7 +255,6 @@ def train_single_model(config: dict):
     prefetch_buffer_size = dcfg["prefetch_buffer_size"]
 
     nsteps = tcfg["nsteps"]
-    lr = tcfg["lr"]
     batch_size = tcfg["batch_size"]
     seed = tcfg["seed"]
     loss_type = tcfg["loss_type"]
@@ -320,7 +358,7 @@ def train_single_model(config: dict):
     num_params = sum(x.size for x in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_inexact_array)))
 
     # Optimizer
-    optimizer = optax.adam(lr)
+    optimizer, lr_schedule = build_optimizer(config)
 
     # Validation
     read_options_val = grain.ReadOptions(num_threads=1, prefetch_buffer_size=1)
@@ -339,8 +377,9 @@ def train_single_model(config: dict):
 
     # Run name and paths
     vtype = config["velocity"]["type"]
+    lr_schedule_str = config["optimizer"]["lr_schedule"]
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{loss_type}_{vtype}_lr{lr}_b{batch_size}_s{seed}_{timestamp}"
+    run_name = f"{loss_type}_{vtype}_b{batch_size}_s{seed}_{timestamp}"
     chkpt_run_path = ckpt_path / run_name
 
     # Archive the resolved config for reproducibility
@@ -375,7 +414,7 @@ def train_single_model(config: dict):
             "N": N,
             "d": d,
             "L": L,
-            "lr": lr,
+            "lr_schedule": lr_schedule_str,
             "batch_size": batch_size,
             "seed": seed,
             "nsteps": nsteps,
@@ -426,6 +465,7 @@ def train_single_model(config: dict):
 
     save_freq = max(1, nsteps // num_checkpoints) if num_checkpoints > 0 else nsteps + 1
     callbacks += [
+        LRSchedulerCallback(lr_schedule),
         ValidationCallback(val_data=val_data, loss_module=loss_fn, val_freq=log_freq),
         LoggerCallback(log_freq=log_freq),
         ProgressBarCallback(refresh_rate=max(1, nsteps // 100)),
@@ -479,6 +519,7 @@ def train_single_model(config: dict):
     print(f"  Loss          : {loss_type}")
     print(f"  Velocity      : {vtype} ({vkwargs_str})")
     print(f"  Parameters    : {num_params:,}")
+    print(f"  Optimizer     : {config['optimizer']['type']} | lr_schedule = {lr_schedule_str}")
     print(f"  Run           : {run_name}")
     print(f"  Ckpts         : {chkpt_run_path}")
     if load_from_ckpt is not None:
@@ -507,7 +548,9 @@ def main(
     nsteps: Annotated[int | None, typer.Option("--nsteps", help="Number of training steps")] = None,
     model_file: Annotated[str | None, typer.Option("--model-file", help="JSON potential model file")] = None,
     loss_type: Annotated[str | None, typer.Option("--loss-type", help="Loss function type")] = None,
-    lr: Annotated[float | None, typer.Option("--lr", help="Learning rate")] = None,
+    lr: Annotated[
+        float | None, typer.Option("--lr", help="Constant learning rate (sets optimizer.lr_schedule)")
+    ] = None,
     batch_size: Annotated[int | None, typer.Option("--batch-size", help="Batch size")] = None,
     seed: Annotated[int | None, typer.Option("--seed", help="Random seed")] = None,
     temperature: Annotated[float | None, typer.Option("--temperature", help="Boltzmann temperature")] = None,
@@ -543,7 +586,7 @@ def main(
     if nsteps is not None:
         cfg["training"]["nsteps"] = nsteps
     if lr is not None:
-        cfg["training"]["lr"] = lr
+        cfg["optimizer"]["lr_schedule"] = str(lr)
     if batch_size is not None:
         cfg["training"]["batch_size"] = batch_size
     if seed is not None:

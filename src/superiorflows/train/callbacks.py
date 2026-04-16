@@ -17,6 +17,7 @@ from tqdm.auto import tqdm
 __all__ = [
     "Callback",
     "LoggerCallback",
+    "LRSchedulerCallback",
     "ValidationCallback",
     "ProgressBarCallback",
     "CheckpointCallback",
@@ -404,6 +405,24 @@ class TensorBoardLogger(Callback):
     def on_train_end(self, trainer, **kwargs):
         self._writer.flush()
         self._writer.close()
+
+
+class LRSchedulerCallback(Callback):
+    """Logs the current learning rate to the trainer logs at each step.
+
+    Evaluates the optax schedule at the current step and injects ``"lr"``
+    into the ``logs`` dict.
+
+    Args:
+        schedule: An optax schedule object (callable ``int -> float``),
+            e.g. the result of ``optax.cosine_decay_schedule(...)``.
+    """
+
+    def __init__(self, schedule):
+        self._schedule = schedule
+
+    def on_step_end(self, trainer, step: int, logs: Dict[str, Any], **kwargs):
+        logs["lr"] = float(self._schedule(step))
 
 
 class ESSCallback(Callback):
