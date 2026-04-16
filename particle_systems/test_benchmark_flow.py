@@ -13,7 +13,7 @@ from particle_systems.velocities import ParticlesMLPVelocity
 # Disable logging from grain/TrajectoryDataSource for cleaner benchmark output
 logging.getLogger("particle_systems.particle_system").setLevel(logging.WARNING)
 
-DATA_PATH = "/Users/Leonardo/Documents/PhD/Projects/ParticlesMC/data/datasets/SS142D/T0.1/N10/M100/steps10000000/"
+DATA_PATH = "particle_systems/data/ss14_T0.1.xyz"
 
 # Need to load the data source once to get N, d, L, composition
 try:

@@ -31,13 +31,8 @@ logging.getLogger("particle_systems.particle_system").setLevel(logging.WARNING)
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 
-TRJ_PATH = (
-    "/Users/Leonardo/Documents/PhD/Projects/ParticlesMC/data/datasets/"
-    "JBB25/T1.0/N44/M100/steps1000000/seed42/trajectories/2/trajectory.xyz"
-)
-POTENTIAL_FILE = (
-    "/Users/Leonardo/Documents/Postdoc/Projects/superiorflows/" "particle_systems/models/jung_biroli_berthier.json"
-)
+TRJ_PATH = "particle_systems/data/ss14_T0.1.xyz"
+POTENTIAL_FILE = "particle_systems/models/soft_spheres_14.json"
 
 try:
     target_source = TrajectoryDataSource(TRJ_PATH)

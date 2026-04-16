@@ -9,7 +9,7 @@ from superiorflows import Flow
 from particle_systems.particle_system import ParticleSystem, TrajectoryDataSource, UniformParticles
 from particle_systems.velocities import ParticlesMLPVelocity
 
-DATA_PATH = "/Users/Leonardo/Documents/PhD/Projects/ParticlesMC/data/datasets" "/SS142D/T0.1/N10/M100/steps10000000"
+DATA_PATH = "particle_systems/data/ss14_T0.1.xyz"
 
 N, d = 10, 2
 
