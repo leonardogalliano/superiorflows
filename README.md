@@ -1,5 +1,8 @@
 # Superiorflows
 
+[![CI](https://github.com/leonardogalliano/superiorflows/actions/workflows/ci.yml/badge.svg)](https://github.com/leonardogalliano/superiorflows/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/leonardogalliano/superiorflows/branch/main/graph/badge.svg)](https://codecov.io/gh/leonardogalliano/superiorflows)
+
 **Superiorflows** is a JAX-based library for sampling physical systems using continuous normalising flows.
 
 The project is developed at the Centre des Sciences des Données at the École Normale Supérieure (Paris), and is largely inspired by the PyTorch implementation [learndiffeq](https://github.com/h2o64/learndiffeq).
