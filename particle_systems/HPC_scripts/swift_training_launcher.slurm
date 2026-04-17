@@ -14,7 +14,8 @@ mkdir -p log_output log_error
 EXPERIMENT_SCRIPT="/home/lgallian/superiorflows/particle_systems/training_particles.py"
 export PYTHONPATH="$PWD:$PYTHONPATH"
 
-echo "\nStarting training job on $HOSTNAME"
+echo
+echo "Starting training job on $HOSTNAME"
 echo "Executing: $EXPERIMENT_SCRIPT"
 echo "Passed arguments: $@"
 
@@ -22,4 +23,5 @@ echo "Training started at: $(date)"
 
 srun uv run python $EXPERIMENT_SCRIPT "$@"
     
-echo "Training finished at: $(date)\n"
+echo "Training finished at: $(date)"
+echo
