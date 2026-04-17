@@ -1,0 +1,47 @@
+{
+    "data": {
+        "data_path": "particle_systems/data/jbb_T1.0.xyz",
+        "model_file": "particle_systems/models/jung_biroli_berthier.json",
+        "temperature": 1.0
+    },
+    "training": {
+        "nsteps": 2,
+        "batch_size": 8,
+        "seed": 42,
+        "loss_type": "maximum_likelihood",
+        "log_freq": 10,
+        "ckpt_path": "tmp/ckpt_particles_test"
+    },
+    "optimizer": {
+        "type": "adam",
+        "lr_schedule": "1e-3"
+    },
+    "velocity": {
+        "type": "egnn",
+        "kwargs": {
+            "hidden_nf": 16,
+            "n_layers": 2,
+            "recurrent": true
+        }
+    },
+    "solver": {
+        "type": "tsit5",
+        "solver_steps": 10
+    },
+    "callbacks": {
+        "ess": {
+            "enabled": false
+        },
+        "boltzmann": {
+            "enabled": true,
+            "freq": 10,
+            "samples": 100,
+            "n_target_samples": 100
+        },
+        "tensorboard": {
+            "enabled": true,
+            "freq": 1,
+            "log_dir": "tmp/tb_logs_test"
+        }
+    }
+}
