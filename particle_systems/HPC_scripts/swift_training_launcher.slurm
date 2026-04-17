@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --time=20:00:00
 #SBATCH --qos=normal
-#SBATCH --output=log_output/train_%j.out
-#SBATCH --error=log_error/train_%j.err
+#SBATCH --output=log_output/training_%j.out
+#SBATCH --error=log_error/training_%j.err
 
 mkdir -p log_output log_error
 
