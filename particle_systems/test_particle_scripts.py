@@ -104,6 +104,39 @@ def test_sampling_with_density(trained_model_dir, tmp_path):
     assert len(samples_files) > 0, "samples.xyz not found in sampling output"
 
 
+def test_sampling_with_density_hutchinson(trained_model_dir, tmp_path):
+    output_path = tmp_path / "sampled_out_density_hutchinson"
+    result = runner.invoke(
+        sampling_app,
+        [
+            str(trained_model_dir),
+            "--batch-size",
+            "2",
+            "--num-trajectories",
+            "1",
+            "--output-path",
+            str(output_path),
+            "--solver-steps",
+            "2",
+            "--hutchinson-samples",
+            "10",
+        ],
+    )
+
+    if result.exit_code != 0:
+        if result.exception:
+            raise result.exception
+        assert result.exit_code == 0, f"Sampling (with hutchinson) failed: {result.stdout}"
+
+    out_dir = output_path / trained_model_dir.name
+    assert out_dir.exists(), f"Expected sampling output dir {out_dir} does not exist"
+
+    log_probs_files = list(out_dir.glob("**/log_probs.dat"))
+    samples_files = list(out_dir.glob("**/samples.xyz"))
+    assert len(log_probs_files) > 0, "log_probs.dat not found in sampling output"
+    assert len(samples_files) > 0, "samples.xyz not found in sampling output"
+
+
 def test_sampling_ignore_density(trained_model_dir, tmp_path):
     output_path = tmp_path / "sampled_out_ignore_density"
     result = runner.invoke(
