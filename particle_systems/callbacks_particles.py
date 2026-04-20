@@ -129,7 +129,7 @@ class BoltzmannCallback(Callback):
         n_target_samples: int = 256,
         eval_freq: int = 250,
         tb_writer=None,
-        energy_filter_sigma: float = 4.0,
+        energy_filter_sigma: float = 10.0,
         species_radii: np.ndarray | None = None,
         n_show: int = 10,
     ):
@@ -175,11 +175,12 @@ class BoltzmannCallback(Callback):
         box = np.stack([s.box for s in target_samples])
 
         target_positions = jnp.asarray(positions)
+        target_species = jnp.asarray(species)
 
-        def energy_single(pos):
-            return self.energy_fn(pos, self.ref_species)
+        def energy_single(pos, spec):
+            return self.energy_fn(pos, spec)
 
-        self._target_energies = np.asarray(jax.vmap(energy_single)(target_positions))
+        self._target_energies = np.asarray(jax.vmap(energy_single)(target_positions, target_species))
         self._target_energy_mean = float(np.mean(self._target_energies))
         self._target_energy_std = float(np.std(self._target_energies))
 
@@ -230,7 +231,7 @@ class BoltzmannCallback(Callback):
             samples = flow.sample(seed=subkey, sample_shape=(self.n_samples,))
 
             def single_energy(sample: ParticleSystem):
-                return self.energy_fn(sample.positions, self.ref_species)
+                return self.energy_fn(sample.positions, sample.species)
 
             model_energies = np.asarray(jax.vmap(single_energy)(samples))
 
