@@ -25,9 +25,7 @@ app = typer.Typer(pretty_exceptions_show_locals=False)
 
 def load_trained_flow(
     ckpt_path: Path,
-    solver_type: str = None,
-    tolerance: float = None,
-    solver_steps: int = None,
+    **flow_kwargs,
 ):
     """Load a Flow and metadata from a given checkpoint directory."""
     config_file = ckpt_path / "config.json"
@@ -36,15 +34,6 @@ def load_trained_flow(
 
     with open(config_file, "r") as f:
         config = json.load(f)
-
-    # Overwrite solver config with CLI arguments
-    if solver_type is not None:
-        config["solver"]["type"] = solver_type
-    if tolerance is not None:
-        config["solver"]["atol"] = tolerance
-        config["solver"]["rtol"] = tolerance
-    if solver_steps is not None:
-        config["solver"]["solver_steps"] = solver_steps
 
     # Target metadata from TrajectoryDataSource
     data_path = Path(config["data"]["data_path"])
@@ -78,8 +67,9 @@ def load_trained_flow(
     trained_velocity_field = eqx.combine(restored.model, static_model)
 
     # Bind into Flow
-    flow_kwargs = build_solver(config)
-    flow = Flow(velocity_field=trained_velocity_field, base_distribution=base_dist, **flow_kwargs)
+    base_flow_kwargs = build_solver(config)
+    base_flow_kwargs.update(flow_kwargs)
+    flow = Flow(velocity_field=trained_velocity_field, base_distribution=base_dist, **base_flow_kwargs)
 
     return flow, N, d, L, composition
 
@@ -100,6 +90,7 @@ def main(
     solver: str = typer.Option(None, help="Solver type (euler, tsit5, dopri5)"),
     tolerance: float = typer.Option(None, help="Solver tolerance (sets both atol and rtol)"),
     solver_steps: int = typer.Option(None, help="Number of steps for fixed-step solvers"),
+    hutchinson_samples: int = typer.Option(None, help="Number of Hutchinson samples for divergence estimation."),
     ignore_density: bool = typer.Option(
         False, "--ignore-density", help="If True, only sample configurations, skipping log-probability computation."
     ),
@@ -121,6 +112,8 @@ def main(
         print(f"  Tolerance      : {tolerance}")
     if solver_steps:
         print(f"  Solver steps   : {solver_steps}")
+    if hutchinson_samples:
+        print(f"  Hutchinson     : {hutchinson_samples}")
     print(f"  Ignore density : {ignore_density}")
     print(f"  JAX process    : {jax.process_index()}/{jax.process_count()}")
     print(f"  JAX devices    : {jax.devices()}")
@@ -128,9 +121,26 @@ def main(
 
     print("Loading trained model...")
     t0 = time.time()
-    flow, N, d, L, composition = load_trained_flow(
-        ckpt_path, solver_type=solver, tolerance=tolerance, solver_steps=solver_steps
-    )
+
+    flow_kwargs = {}
+    if solver:
+        solvers = {"euler": dfx.Euler, "tsit5": dfx.Tsit5, "dopri5": dfx.Dopri5}
+        if solver.lower() not in solvers:
+            raise ValueError(f"Unknown solver '{solver}'. Available: {list(solvers)}")
+        slv = solvers[solver.lower()]()
+        flow_kwargs["solver"] = slv
+        flow_kwargs["augmented_solver"] = slv
+    if solver_steps is not None:
+        flow_kwargs["stepsize_controller"] = dfx.ConstantStepSize()
+        flow_kwargs["augmented_stepsize_controller"] = dfx.ConstantStepSize()
+        flow_kwargs["dt0"] = 1.0 / solver_steps
+    elif tolerance is not None:
+        flow_kwargs["stepsize_controller"] = dfx.PIDController(rtol=tolerance, atol=tolerance)
+        flow_kwargs["augmented_stepsize_controller"] = dfx.PIDController(rtol=tolerance, atol=tolerance)
+    if hutchinson_samples is not None:
+        flow_kwargs["hutchinson_samples"] = hutchinson_samples
+
+    flow, N, d, L, composition = load_trained_flow(ckpt_path, **flow_kwargs)
     t1 = time.time()
     print(f"Loaded successfully in {t1 - t0:.1f}s. Model handles N={N}, d={d}, L={L:.4f}")
 
@@ -149,10 +159,15 @@ def main(
         suffix = "custom"
 
     solver_tag = f"{s_name}_{suffix}"
+    hutch_tag = f"_hutch{hutchinson_samples}" if hutchinson_samples is not None else ""
+    density_tag = "_no_density" if ignore_density else ""
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_output_dir = (
-        output_path / ckpt_path.name / f"{solver_tag}_M{num_trajectories}_b{batch_size}" / f"seed{seed}_{timestamp}"
+        output_path
+        / ckpt_path.name
+        / f"{solver_tag}{hutch_tag}_M{num_trajectories}_b{batch_size}{density_tag}"
+        / f"seed{seed}_{timestamp}"
     )
     run_output_dir.mkdir(parents=True, exist_ok=True)
 
