@@ -20,6 +20,9 @@ shell.nix
 # Visual Studio Code
 .vscode/
 
+# Folders
+notebooks/
+
 # Output files
 .benchmarks/
 tmp/
