@@ -30,7 +30,7 @@ uv sync --extra cuda
 While a primary focus is on particle-based systems, the core abstractions are intentionally fully general and not tied to a specific domain. The library provides flexible building blocks rather than fixed pipelines.
 
 Users are expected to define:
-- custom input structures (e.g. particle systems, graphs, fields),
+- custom input structures (e.g. arrays, particle systems, graphs, fields),
 - velocity / vector field architectures,
 - and data pipelines tailored to their problem.
 
@@ -52,4 +52,4 @@ The project is currently under active development, and the API may change freque
 
 ## Disclaimer
 
-Large Language Models (LLMs) were used for code checks, documentation, and test writing. Project contributors remain fully responsible for the codebase and its correctness.
+Large Language Models (LLMs) are used for code checks, documentation, and test writing. Project contributors remain fully responsible for the codebase and its correctness.
