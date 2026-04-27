@@ -20,6 +20,9 @@ shell.nix
 # Visual Studio Code
 .vscode/
 
+# Antigravity
+.agents/
+
 # Folders
 notebooks/
 
