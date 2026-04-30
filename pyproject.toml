@@ -16,7 +16,7 @@ dependencies = [
     "orbax-checkpoint>=0.11.36",
     "tqdm>=4.67.1",
     "optax>=0.2.6",
-    "typer>=0.21.1",
+    "typer>=0.25.0",
     "grain>=0.2.15",
 ]
 
