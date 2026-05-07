@@ -28,6 +28,7 @@ paths = ["src/superiorflows", "particle_systems"]
 
 [project.scripts]
 training-particles = "particle_systems.training_particles:app"
+evaluate-log-prob = "particle_systems.evaluate_log_prob:app"
 
 [project.optional-dependencies]
 monitoring = [
