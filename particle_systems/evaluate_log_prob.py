@@ -192,24 +192,6 @@ def main(
     compiled_eval = eval_log_prob.lower(systems[0], key).compile()
     print(f"Compiled in {time.time() - t_comp:.1f}s")
 
-    # ── Evaluate ──────────────────────────────────────────────────────
-    print("Starting log-prob evaluation...")
-    all_log_probs = []
-    total_time = 0.0
-
-    for i in range(n_batches):
-        key, subkey = jax.random.split(key)
-        print(f"[{i + 1}/{n_batches}] Evaluating batch... ", end="", flush=True)
-        t_start = time.time()
-        lp = compiled_eval(systems[i], subkey)
-        lp.block_until_ready()
-        t_batch = time.time() - t_start
-        total_time += t_batch
-        all_log_probs.append(np.asarray(lp))
-        print(f"Done in {t_batch:.2f}s")
-
-    log_probs = np.concatenate(all_log_probs)[:n_keep]
-
     # ── Build output directory ────────────────────────────────────────
     s_name = type(flow.solver).__name__.lower()
     if isinstance(flow.stepsize_controller, dfx.PIDController):
@@ -234,18 +216,28 @@ def main(
     )
     run_output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Write output trajectories ─────────────────────────────────────
+    # ── Evaluate and write on the fly ─────────────────────────────────
     import atooms.trajectory
 
     pos_out = np.asarray(filtered.positions)
     spec_out = np.asarray(filtered.species)
     box_out = np.asarray(filtered.box)
 
-    n_output_batches = math.ceil(n_keep / batch_size)
+    print("Starting log-prob evaluation...")
+    total_time = 0.0
 
-    for i in range(n_output_batches):
+    for i in range(n_batches):
+        key, subkey = jax.random.split(key)
+        print(f"[{i + 1}/{n_batches}] Evaluating batch... ", end="", flush=True)
+        t_start = time.time()
+        lp = compiled_eval(systems[i], subkey)
+        lp.block_until_ready()
+        t_batch = time.time() - t_start
+        total_time += t_batch
+
         start = i * batch_size
         end = min(start + batch_size, n_keep)
+        log_probs = np.asarray(lp)[: end - start]
 
         trajectory_dir = run_output_dir / str(i + 1)
         trajectory_dir.mkdir(parents=True, exist_ok=True)
@@ -264,8 +256,8 @@ def main(
             for sys in trj:
                 out.write(sys)
 
-        lps = log_probs[start:end]
-        np.savetxt(trajectory_dir / "log_probs.dat", lps, fmt="%.6e")
+        np.savetxt(trajectory_dir / "log_probs.dat", log_probs, fmt="%.6e")
+        print(f"Done in {t_batch:.2f}s")
 
     print(f"\nAll done! Evaluated {n_keep} log-probs in {total_time:.1f}s.")
     print(f"Saved to {run_output_dir.resolve()}")
