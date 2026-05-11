@@ -53,6 +53,9 @@ def main(
     solver_steps: int = typer.Option(None, help="Number of steps for fixed-step solvers"),
     hutchinson_samples: int = typer.Option(None, help="Number of Hutchinson samples for divergence estimation"),
     temperature: float = typer.Option(None, help="Temperature for energy filtering (overrides config)"),
+    forward_ode: bool = typer.Option(
+        False, "--forward-ode", help="Evaluate density from base_samples.xyz (forward pass)"
+    ),
 ):
     """Evaluate log-probabilities of pre-generated CNF particle samples."""
     if device is not None:
@@ -76,6 +79,8 @@ def main(
         print(f"  Hutchinson      : {hutchinson_samples}")
     if temperature:
         print(f"  Temperature     : {temperature}")
+    if forward_ode:
+        print(f"  Forward ODE     : {forward_ode}")
     print(f"  JAX process     : {jax.process_index()}/{jax.process_count()}")
     print(f"  JAX devices     : {jax.devices()}")
     print(f"{'='*60}\n")
@@ -110,6 +115,10 @@ def main(
     print("Loading samples...")
     source = TrajectoryDataSource(samples_path, filename="samples.xyz")
     n_total = len(source)
+    if forward_ode:
+        base_source = TrajectoryDataSource(samples_path, filename="base_samples.xyz")
+        if len(base_source) != n_total:
+            raise ValueError(f"base_samples.xyz ({len(base_source)}) does not match samples.xyz ({n_total})")
     print(f"Found {n_total} samples")
 
     # ── Optional energy-based filtering ───────────────────────────────
@@ -147,9 +156,13 @@ def main(
         _, ids = jax.lax.top_k(-energies, n_keep)
         ids = jnp.sort(ids)
         filtered = source[np.asarray(ids)]
+        if forward_ode:
+            filtered_base = base_source[np.asarray(ids)]
         print(f"Filtered {n_total} → {n_keep} samples in {time.time() - t_energy:.1f}s")
     else:
         filtered = source[:]
+        if forward_ode:
+            filtered_base = base_source[:]
         n_keep = n_total
 
     # ── Prepare batches ───────────────────────────────────────────────
@@ -161,6 +174,11 @@ def main(
     spec = np.asarray(filtered.species)
     box = np.asarray(filtered.box)
 
+    if forward_ode:
+        pos_base = np.asarray(filtered_base.positions)
+        spec_base = np.asarray(filtered_base.species)
+        box_base = np.asarray(filtered_base.box)
+
     if n_pad > 0:
         pad_pos = np.repeat(pos[:1], n_pad, axis=0)
         pad_spec = np.repeat(spec[:1], n_pad, axis=0)
@@ -168,6 +186,13 @@ def main(
         pos = np.concatenate([pos, pad_pos], axis=0)
         spec = np.concatenate([spec, pad_spec], axis=0)
         box = np.concatenate([box, pad_box], axis=0)
+        if forward_ode:
+            pad_pos_base = np.repeat(pos_base[:1], n_pad, axis=0)
+            pad_spec_base = np.repeat(spec_base[:1], n_pad, axis=0)
+            pad_box_base = np.repeat(box_base[:1], n_pad, axis=0)
+            pos_base = np.concatenate([pos_base, pad_pos_base], axis=0)
+            spec_base = np.concatenate([spec_base, pad_spec_base], axis=0)
+            box_base = np.concatenate([box_base, pad_box_base], axis=0)
 
     pos_b = pos.reshape(n_batches, batch_size, N, d)
     spec_b = spec.reshape(n_batches, batch_size, N)
@@ -176,6 +201,14 @@ def main(
     systems = [
         ParticleSystem(jnp.asarray(pos_b[i]), jnp.asarray(spec_b[i]), jnp.asarray(box_b[i])) for i in range(n_batches)
     ]
+    if forward_ode:
+        pos_b_base = pos_base.reshape(n_batches, batch_size, N, d)
+        spec_b_base = spec_base.reshape(n_batches, batch_size, N)
+        box_b_base = box_base.reshape(n_batches, batch_size, d)
+        systems_base = [
+            ParticleSystem(jnp.asarray(pos_b_base[i]), jnp.asarray(spec_b_base[i]), jnp.asarray(box_b_base[i]))
+            for i in range(n_batches)
+        ]
 
     # ── JIT-compile log_prob ──────────────────────────────────────────
     key = jax.random.PRNGKey(seed)
@@ -185,11 +218,18 @@ def main(
 
     @jax.jit
     def eval_log_prob(batch, rng):
-        if hutchinson_samples is not None:
-            return flow.log_prob(batch, key=rng)
-        return flow.log_prob(batch)
+        if forward_ode:
+            if hutchinson_samples is not None:
+                keys = jax.random.split(rng, batch_size)
+                return jax.vmap(lambda x, k: flow.apply_map_and_log_prob(x, key=k))(batch, keys)
+            return jax.vmap(flow.apply_map_and_log_prob)(batch)
+        else:
+            if hutchinson_samples is not None:
+                return batch, flow.log_prob(batch, key=rng)
+            return batch, flow.log_prob(batch)
 
-    compiled_eval = eval_log_prob.lower(systems[0], key).compile()
+    comp_sys = systems_base[0] if forward_ode else systems[0]
+    compiled_eval = eval_log_prob.lower(comp_sys, key).compile()
     print(f"Compiled in {time.time() - t_comp:.1f}s")
 
     # ── Build output directory ────────────────────────────────────────
@@ -209,19 +249,19 @@ def main(
     solver_tag = f"{s_name}_{suffix}"
     hutch_tag = f"_hutch{hutchinson_samples}" if hutchinson_samples is not None else ""
     frac_tag = f"_frac{energy_fraction}" if energy_fraction is not None else ""
+    fwd_tag = "_fwd" if forward_ode else ""
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_output_dir = (
-        output_path / ckpt_path.name / f"{solver_tag}{hutch_tag}{frac_tag}_b{batch_size}" / f"seed{seed}_{timestamp}"
+        output_path
+        / ckpt_path.name
+        / f"{solver_tag}{hutch_tag}{frac_tag}{fwd_tag}_b{batch_size}"
+        / f"seed{seed}_{timestamp}"
     )
     run_output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Evaluate and write on the fly ─────────────────────────────────
     import atooms.trajectory
-
-    pos_out = np.asarray(filtered.positions)
-    spec_out = np.asarray(filtered.species)
-    box_out = np.asarray(filtered.box)
 
     print("Starting log-prob evaluation...")
     total_time = 0.0
@@ -230,7 +270,8 @@ def main(
         key, subkey = jax.random.split(key)
         print(f"[{i + 1}/{n_batches}] Evaluating batch... ", end="", flush=True)
         t_start = time.time()
-        lp = compiled_eval(systems[i], subkey)
+        batch_in = systems_base[i] if forward_ode else systems[i]
+        batch_out, lp = compiled_eval(batch_in, subkey)
         lp.block_until_ready()
         t_batch = time.time() - t_start
         total_time += t_batch
@@ -242,10 +283,14 @@ def main(
         trajectory_dir = run_output_dir / str(i + 1)
         trajectory_dir.mkdir(parents=True, exist_ok=True)
 
+        pos_reconst = np.asarray(batch_out.positions)
+        spec_reconst = np.asarray(batch_out.species)
+        box_reconst = np.asarray(batch_out.box)
+
         batch_sys = ParticleSystem(
-            positions=pos_out[start:end],
-            species=spec_out[start:end],
-            box=box_out[start:end],
+            positions=pos_reconst[: end - start],
+            species=spec_reconst[: end - start],
+            box=box_reconst[: end - start],
         )
         trj = batch_to_trajectory(batch_sys)
         trj.metadata = {"generated_by": ckpt_path.name}
