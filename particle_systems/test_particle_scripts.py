@@ -255,6 +255,51 @@ def test_evaluate_log_prob(sampled_with_density, tmp_path):
     np.testing.assert_allclose(eval_lps, ref_lps, atol=0.1, err_msg="Reverse-pass log-probs deviate from forward-pass")
 
 
+def test_evaluate_log_prob_forward(sampled_with_density, tmp_path):
+    """Evaluate log-prob with forward integration and compare with original values."""
+    ckpt_dir, samples_dir = sampled_with_density
+    eval_output = tmp_path / "eval_out_fwd_only"
+
+    result = runner.invoke(
+        evaluate_app,
+        [
+            str(ckpt_dir),
+            str(samples_dir),
+            "--batch-size",
+            "2",
+            "--output-path",
+            str(eval_output),
+            "--solver-steps",
+            "2",
+            "--forward-ode",
+        ],
+    )
+
+    if result.exit_code != 0:
+        if result.exception:
+            raise result.exception
+        assert result.exit_code == 0, f"evaluate_log_prob (forward) failed: {result.stdout}"
+
+    eval_dir = eval_output / ckpt_dir.name
+    assert eval_dir.exists(), f"Expected output dir {eval_dir} does not exist"
+
+    eval_lp_files = sorted(eval_dir.glob("**/log_probs.dat"))
+    eval_sample_files = sorted(eval_dir.glob("**/samples.xyz"))
+    assert len(eval_lp_files) > 0, "log_probs.dat not found in evaluate output"
+    assert len(eval_sample_files) > 0, "samples.xyz not found in evaluate output"
+
+    ref_lp_files = sorted(samples_dir.glob("**/log_probs.dat"))
+    ref_lps = np.concatenate([np.loadtxt(f) for f in ref_lp_files])
+    eval_lps = np.concatenate([np.loadtxt(f) for f in eval_lp_files])
+
+    assert (
+        ref_lps.shape == eval_lps.shape
+    ), f"Log-prob shape mismatch: reference {ref_lps.shape} vs evaluated {eval_lps.shape}"
+    np.testing.assert_allclose(
+        eval_lps, ref_lps, atol=1e-4, err_msg="Forward-pass log-probs deviate from original generated ones"
+    )
+
+
 def test_evaluate_log_prob_hutchinson(sampled_with_density, tmp_path):
     """Evaluate log-prob with Hutchinson estimator and compare with original values."""
     ckpt_dir, samples_dir = sampled_with_density
@@ -339,3 +384,66 @@ def test_evaluate_log_prob_with_filtering(sampled_with_density, tmp_path):
 
     assert n_eval <= n_ref, f"Filtered output ({n_eval}) should have fewer samples than original ({n_ref})"
     assert n_eval > 0, "Filtered output should not be empty"
+
+
+def test_evaluate_log_prob_forward_vs_backward(sampled_with_density, tmp_path):
+    """Evaluate log-prob with both forward and backward integration and compare."""
+    ckpt_dir, samples_dir = sampled_with_density
+    eval_output_bwd = tmp_path / "eval_out_bwd"
+    eval_output_fwd = tmp_path / "eval_out_fwd"
+
+    result_bwd = runner.invoke(
+        evaluate_app,
+        [
+            str(ckpt_dir),
+            str(samples_dir),
+            "--batch-size",
+            "2",
+            "--output-path",
+            str(eval_output_bwd),
+            "--solver-steps",
+            "2",
+        ],
+    )
+
+    if result_bwd.exit_code != 0:
+        if result_bwd.exception:
+            raise result_bwd.exception
+        assert result_bwd.exit_code == 0, f"evaluate_log_prob (backward) failed: {result_bwd.stdout}"
+
+    result_fwd = runner.invoke(
+        evaluate_app,
+        [
+            str(ckpt_dir),
+            str(samples_dir),
+            "--batch-size",
+            "2",
+            "--output-path",
+            str(eval_output_fwd),
+            "--solver-steps",
+            "2",
+            "--forward-ode",
+        ],
+    )
+
+    if result_fwd.exit_code != 0:
+        if result_fwd.exception:
+            raise result_fwd.exception
+        assert result_fwd.exit_code == 0, f"evaluate_log_prob (forward) failed: {result_fwd.stdout}"
+
+    bwd_dir = eval_output_bwd / ckpt_dir.name
+    fwd_dir = eval_output_fwd / ckpt_dir.name
+
+    bwd_lp_files = sorted(bwd_dir.glob("**/log_probs.dat"))
+    fwd_lp_files = sorted(fwd_dir.glob("**/log_probs.dat"))
+
+    assert len(bwd_lp_files) > 0, "log_probs.dat not found in backward evaluate output"
+    assert len(fwd_lp_files) > 0, "log_probs.dat not found in forward evaluate output"
+
+    bwd_lps = np.concatenate([np.loadtxt(f) for f in bwd_lp_files])
+    fwd_lps = np.concatenate([np.loadtxt(f) for f in fwd_lp_files])
+
+    assert (
+        bwd_lps.shape == fwd_lps.shape
+    ), f"Log-prob shape mismatch: backward {bwd_lps.shape} vs forward {fwd_lps.shape}"
+    np.testing.assert_allclose(fwd_lps, bwd_lps, atol=0.1, err_msg="Forward-pass log-probs deviate from backward-pass")
