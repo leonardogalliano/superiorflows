@@ -179,8 +179,19 @@ def main(
     @jax.jit
     def sample_batch(rng):
         if ignore_density:
-            return flow.sample(seed=rng, sample_shape=(batch_size,))
-        return flow.sample_and_log_prob(seed=rng, sample_shape=(batch_size,))
+            x0 = flow.base_distribution.sample(seed=rng, sample_shape=(batch_size,))
+            x1 = jax.vmap(flow.apply_map)(x0)
+            return x0, x1
+
+        if flow.hutchinson_samples is not None:
+            key1, key2 = jax.random.split(rng)
+            x0 = flow.base_distribution.sample(seed=key1, sample_shape=(batch_size,))
+            keys = jax.random.split(key2, batch_size)
+            x1, log_probs = jax.vmap(lambda x, k: flow.apply_map_and_log_prob(x, key=k))(x0, keys)
+        else:
+            x0 = flow.base_distribution.sample(seed=rng, sample_shape=(batch_size,))
+            x1, log_probs = jax.vmap(flow.apply_map_and_log_prob)(x0)
+        return x0, x1, log_probs
 
     compiled_sample = sample_batch.lower(key).compile()
     print(f"Compiled in {time.time() - t_comp:.1f}s")
@@ -193,9 +204,9 @@ def main(
         print(f"[{i}/{num_trajectories}] Generating batch... ", end="", flush=True)
         t_start = time.time()
         if ignore_density:
-            samples = compiled_sample(subkey)
+            base_samples, samples = compiled_sample(subkey)
         else:
-            samples, log_probs = compiled_sample(subkey)
+            base_samples, samples, log_probs = compiled_sample(subkey)
         t_batch = time.time() - t_start
         total_time += t_batch
         print(f"Done in {t_batch:.2f}s")
@@ -206,12 +217,21 @@ def main(
         trj = batch_to_trajectory(samples)
         trj.metadata = {"generated_by": ckpt_path.name}
 
+        base_trj = batch_to_trajectory(base_samples)
+        base_trj.metadata = {"generated_by": ckpt_path.name, "type": "base_distribution"}
+
         import atooms.trajectory
 
         out_path = trajectory_dir / "samples.xyz"
         with atooms.trajectory.TrajectoryXYZ(str(out_path), "w") as out:
             out.metadata = trj.metadata
             for sys in trj:
+                out.write(sys)
+
+        base_out_path = trajectory_dir / "base_samples.xyz"
+        with atooms.trajectory.TrajectoryXYZ(str(base_out_path), "w") as out:
+            out.metadata = base_trj.metadata
+            for sys in base_trj:
                 out.write(sys)
 
         if not ignore_density:

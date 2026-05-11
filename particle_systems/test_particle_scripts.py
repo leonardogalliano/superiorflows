@@ -102,8 +102,10 @@ def test_sampling_with_density(trained_model_dir, tmp_path):
 
     log_probs_files = list(out_dir.glob("**/log_probs.dat"))
     samples_files = list(out_dir.glob("**/samples.xyz"))
+    base_samples_files = list(out_dir.glob("**/base_samples.xyz"))
     assert len(log_probs_files) > 0, "log_probs.dat not found in sampling output"
     assert len(samples_files) > 0, "samples.xyz not found in sampling output"
+    assert len(base_samples_files) > 0, "base_samples.xyz not found in sampling output"
 
 
 def test_sampling_with_density_hutchinson(trained_model_dir, tmp_path):
@@ -135,8 +137,10 @@ def test_sampling_with_density_hutchinson(trained_model_dir, tmp_path):
 
     log_probs_files = list(out_dir.glob("**/log_probs.dat"))
     samples_files = list(out_dir.glob("**/samples.xyz"))
+    base_samples_files = list(out_dir.glob("**/base_samples.xyz"))
     assert len(log_probs_files) > 0, "log_probs.dat not found in sampling output"
     assert len(samples_files) > 0, "samples.xyz not found in sampling output"
+    assert len(base_samples_files) > 0, "base_samples.xyz not found in sampling output"
 
 
 def test_sampling_ignore_density(trained_model_dir, tmp_path):
@@ -167,8 +171,10 @@ def test_sampling_ignore_density(trained_model_dir, tmp_path):
 
     log_probs_files = list(out_dir.glob("**/log_probs.dat"))
     samples_files = list(out_dir.glob("**/samples.xyz"))
+    base_samples_files = list(out_dir.glob("**/base_samples.xyz"))
     assert len(log_probs_files) == 0, "log_probs.dat should not exist when --ignore-density is used"
     assert len(samples_files) > 0, "samples.xyz not found in sampling output"
+    assert len(base_samples_files) > 0, "base_samples.xyz not found in sampling output"
 
 
 # ── evaluate_log_prob tests ──────────────────────────────────────────────────
