@@ -53,14 +53,15 @@ class MaximumLikelihoodLoss(eqx.Module):
             key: Optional PRNG key for Hutchinson estimator.
 
         Returns:
-            Scalar loss value.
+            Tuple of ``(loss, aux)`` where ``loss`` is a scalar and
+            ``aux`` is a dict of per-component metrics (empty here).
         """
         flow = Flow(
             velocity_field=velocity_field,
             base_distribution=self.base_distribution,
             **self.flow_kwargs,
         )
-        return -jnp.mean(flow.log_prob(batch, key=key))
+        return -jnp.mean(flow.log_prob(batch, key=key)), {}
 
 
 class EnergyBasedLoss(eqx.Module):
@@ -126,7 +127,7 @@ class EnergyBasedLoss(eqx.Module):
             x1, logq = jax.vmap(flow.apply_map_and_log_prob)(x0)
 
         logp = jax.vmap(self.target_distribution.log_prob)(x1)
-        return jnp.mean(logq - logp)
+        return jnp.mean(logq - logp), {}
 
 
 class KullbackLeiblerLoss(eqx.Module):
@@ -189,9 +190,9 @@ class KullbackLeiblerLoss(eqx.Module):
         batch_size = jax.tree.leaves(batch)[0].shape[0]
         key1, key2, key3 = jax.random.split(key, 3)
         x0 = self.base_distribution.sample(seed=key1, sample_shape=(batch_size,))
-        mle_term = self.mle_loss(velocity_field, x1, key=key2)
-        energy_term = self.energy_loss(velocity_field, x0, key=key3)
-        return self.alpha * mle_term + (1 - self.alpha) * energy_term
+        mle_term, _ = self.mle_loss(velocity_field, x1, key=key2)
+        energy_term, _ = self.energy_loss(velocity_field, x0, key=key3)
+        return self.alpha * mle_term + (1 - self.alpha) * energy_term, {}
 
 
 class StochasticInterpolantLoss(eqx.Module):
@@ -204,7 +205,15 @@ class StochasticInterpolantLoss(eqx.Module):
 
     and trains the velocity field to match the optimal transport velocity:
 
-        ``L = E_{t, x0, x1, z}[||v(t, xt) - (∂_t I(t, x0, x1) + ∂_t γ(t) · z)||²]``
+        ``L_vel = E_{t, x0, x1, z}[||v(t, xt) - (∂_t I(t, x0, x1) + ∂_t γ(t) · z)||²]``
+
+    Optionally, a **denoiser** ``η(t, x)`` can be trained jointly via:
+
+        ``L_den = E_{t, x0, x1, z}[||η(t, xt) - z||²]``
+
+    The total loss is ``L_vel + denoiser_weight · L_den``. The denoiser
+    approximates the score via ``s(t, x) ≈ −η(t, x) / γ(t)`` (Albergo,
+    Boffi & Vanden-Eijnden, 2303.08797).
 
     The interpolation function ``I`` must satisfy ``I(0, x0, x1) = x0`` and
     ``I(1, x0, x1) = x1``. The optional noise schedule ``γ(t)`` must satisfy
@@ -219,6 +228,10 @@ class StochasticInterpolantLoss(eqx.Module):
     ``jax.vmap``-ed over the batch, making it robust to arbitrary pytree
     data structures.
 
+    When ``get_denoiser`` is ``None`` (the default), only the velocity
+    loss is computed and the ``__call__`` method traces exactly the same
+    code path as the velocity-only case — no overhead.
+
     Attributes:
         interpolant: Function ``I(t, x0, x1)`` mapping scalar ``t`` and
             single samples ``x0``, ``x1`` to the interpolated point.
@@ -229,12 +242,28 @@ class StochasticInterpolantLoss(eqx.Module):
         velocity_kwargs: Keyword arguments passed to the velocity field.
         dt_interpolant: Time derivative ``∂_t I(t, x0, x1)`` (via autodiff).
         dt_gamma: Time derivative ``∂_t γ(t)`` (via autodiff), or ``None``.
+        denoiser_weight: Relative weight ``λ`` of the denoiser loss in
+            ``L_total = L_vel + λ · L_den``. Only used when ``get_denoiser``
+            is not ``None``.
+        _get_velocity: Callable that extracts the velocity field from the
+            model pytree passed to ``__call__``. Default: identity.
+        _get_denoiser: Optional callable that extracts the denoiser from the
+            model pytree. ``None`` disables denoiser learning.
 
-    Example:
+    Example (velocity only — current default):
         >>> interpolant = lambda t, x0, x1: (1 - t) * x0 + t * x1
         >>> gamma = lambda t: jnp.sqrt(2 * t * (1 - t))
         >>> loss_fn = StochasticInterpolantLoss(interpolant, gamma=gamma)
-        >>> loss = loss_fn(velocity_field, (x0_batch, x1_batch), key=jax.random.key(0))
+        >>> loss, aux = loss_fn(velocity_field, (x0_batch, x1_batch), key=jax.random.key(0))
+
+    Example (velocity + denoiser):
+        >>> loss_fn = StochasticInterpolantLoss(
+        ...     interpolant, gamma=gamma,
+        ...     get_velocity=lambda m: m.velocity_field,
+        ...     get_denoiser=lambda m: m.denoiser,
+        ... )
+        >>> loss, aux = loss_fn(model_pair, (x0_batch, x1_batch), key=jax.random.key(0))
+        >>> # aux == {"velocity_loss": ..., "denoiser_loss": ...}
     """
 
     interpolant: Callable = eqx.field(static=True)
@@ -246,12 +275,18 @@ class StochasticInterpolantLoss(eqx.Module):
     velocity_kwargs: dict = eqx.field(static=True)
     dt_interpolant: Callable = eqx.field(static=True)
     dt_gamma: Optional[Callable] = eqx.field(static=True)
+    denoiser_weight: float = eqx.field(static=True)
+    _get_velocity: Callable = eqx.field(static=True)
+    _get_denoiser: Optional[Callable] = eqx.field(static=True)
 
     def __init__(
         self,
         interpolant: Callable,
         gamma: Optional[Callable] = None,
         dynamic_mask: Optional[Callable] = None,
+        get_velocity: Optional[Callable] = None,
+        get_denoiser: Optional[Callable] = None,
+        denoiser_weight: float = 1.0,
         **velocity_kwargs,
     ):
         """Initialize the Stochastic Interpolant loss.
@@ -266,6 +301,17 @@ class StochasticInterpolantLoss(eqx.Module):
             gamma: Optional noise schedule ``γ(t)`` operating on scalar ``t``.
                 Must satisfy ``γ(0) = γ(1) = 0`` and ``γ(t) > 0`` for
                 ``t ∈ (0, 1)``. If ``None``, uses the deterministic interpolant.
+            dynamic_mask: Optional callable ``mask(x)`` that returns a pytree
+                of booleans. Defaults to ``eqx.is_inexact_array``.
+            get_velocity: Callable ``model -> velocity_field`` to extract the
+                velocity field from the model. Defaults to identity (the model
+                *is* the velocity field).
+            get_denoiser: Optional callable ``model -> denoiser`` to extract
+                the denoiser from the model. ``None`` disables denoiser learning.
+                Requires ``gamma`` to be set.
+            denoiser_weight: Relative weight of the denoiser loss.
+            **velocity_kwargs: Extra keyword arguments forwarded to the
+                velocity field (e.g., ``args``).
         """
         self.interpolant = interpolant
         self.gamma = gamma
@@ -274,6 +320,9 @@ class StochasticInterpolantLoss(eqx.Module):
         else:
             self.dynamic_mask = lambda x: jax.tree.map(eqx.is_inexact_array, x)
         self.velocity_kwargs = velocity_kwargs
+        self.denoiser_weight = denoiser_weight
+        self._get_velocity = get_velocity if get_velocity is not None else lambda m: m
+        self._get_denoiser = get_denoiser
 
         # --- Time derivatives via JVP (precomputed as closures) ---
         def _dt_interpolant(t, x0, x1):
@@ -296,18 +345,29 @@ class StochasticInterpolantLoss(eqx.Module):
         else:
             self.dt_gamma = None
 
+    def __check_init__(self):
+        if self._get_denoiser is not None and self.gamma is None:
+            raise ValueError(
+                "Denoiser learning requires a noise schedule gamma(t). " "Pass gamma= to StochasticInterpolantLoss."
+            )
+
     @eqx.filter_jit
-    def __call__(self, velocity_field, batch, key):
+    def __call__(self, model, batch, key):
         """Compute the Stochastic Interpolant loss.
 
         Args:
-            velocity_field: The velocity field module (trainable).
+            model: The trainable model pytree. When ``get_denoiser`` is
+                ``None``, this is the velocity field itself. When a denoiser
+                is configured, the velocity and denoiser are extracted via
+                the accessor callables provided at init.
             batch: A tuple ``(x0, x1)`` of paired samples. Each element
                 is a pytree whose leaves have a leading batch dimension.
             key: PRNG key for sampling ``t`` and (optionally) ``z``.
 
         Returns:
-            Scalar loss value.
+            Tuple ``(loss, aux)`` where ``loss`` is a scalar and ``aux``
+            is a dict. When a denoiser is active, ``aux`` contains
+            ``{"velocity_loss": ..., "denoiser_loss": ...}``.
         """
         x0, x1 = batch
         batch_size = jax.tree.leaves(x0)[0].shape[0]
@@ -320,8 +380,9 @@ class StochasticInterpolantLoss(eqx.Module):
         y1, _ = eqx.partition(x1, self.dynamic_mask)
 
         user_args = self.velocity_kwargs.get("args")
+        velocity_field = self._get_velocity(model)
 
-        # Branch resolved at trace time (gamma is static).
+        # All branches resolved at trace time (gamma and _get_denoiser are static).
         if self.gamma is not None:
             # Generate noise matching the dynamic pytree structure of y0
             y0_leaves, y0_treedef = jax.tree.flatten(y0)
@@ -331,22 +392,53 @@ class StochasticInterpolantLoss(eqx.Module):
                 [jax.random.normal(k, leaf.shape) for k, leaf in zip(noise_keys, y0_leaves)],
             )
 
-            def _sample_loss(ti, y0i, y1i, ctxi, zi):
-                interp = self.interpolant(ti, y0i, y1i)
-                gamma_t = self.gamma(ti)
-                yt = jax.tree.map(lambda i, zp: i + gamma_t * zp, interp, zi)
+            if self._get_denoiser is not None:
+                denoiser = self._get_denoiser(model)
 
-                dt_interp = self.dt_interpolant(ti, y0i, y1i)
-                dt_gamma_t = self.dt_gamma(ti)
-                target = jax.tree.map(lambda d, zp: d + dt_gamma_t * zp, dt_interp, zi)
+                def _sample_loss(ti, y0i, y1i, ctxi, zi):
+                    interp = self.interpolant(ti, y0i, y1i)
+                    gamma_t = self.gamma(ti)
+                    yt = jax.tree.map(lambda i, zp: i + gamma_t * zp, interp, zi)
 
-                args_i = (ctxi, user_args) if user_args is not None else ctxi
+                    dt_interp = self.dt_interpolant(ti, y0i, y1i)
+                    dt_gamma_t = self.dt_gamma(ti)
+                    vel_target = jax.tree.map(lambda d, zp: d + dt_gamma_t * zp, dt_interp, zi)
 
-                pred = velocity_field(ti, yt, args_i)
-                sq_res = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), pred, target))
-                return sum(sq_res)
+                    args_i = (ctxi, user_args) if user_args is not None else ctxi
 
-            per_sample = jax.vmap(_sample_loss)(t, y0, y1, ctx, z)
+                    v_pred = velocity_field(ti, yt, args_i)
+                    vel_sq = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), v_pred, vel_target))
+
+                    eta_pred = denoiser(ti, yt, args_i)
+                    den_sq = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), eta_pred, zi))
+
+                    return sum(vel_sq), sum(den_sq)
+
+                vel_per_sample, den_per_sample = jax.vmap(_sample_loss)(t, y0, y1, ctx, z)
+                vel_loss = jnp.mean(vel_per_sample)
+                den_loss = jnp.mean(den_per_sample)
+                total = vel_loss + self.denoiser_weight * den_loss
+                return total, {"velocity_loss": vel_loss, "denoiser_loss": den_loss}
+
+            else:
+
+                def _sample_loss(ti, y0i, y1i, ctxi, zi):
+                    interp = self.interpolant(ti, y0i, y1i)
+                    gamma_t = self.gamma(ti)
+                    yt = jax.tree.map(lambda i, zp: i + gamma_t * zp, interp, zi)
+
+                    dt_interp = self.dt_interpolant(ti, y0i, y1i)
+                    dt_gamma_t = self.dt_gamma(ti)
+                    target = jax.tree.map(lambda d, zp: d + dt_gamma_t * zp, dt_interp, zi)
+
+                    args_i = (ctxi, user_args) if user_args is not None else ctxi
+
+                    pred = velocity_field(ti, yt, args_i)
+                    sq_res = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), pred, target))
+                    return sum(sq_res)
+
+                per_sample = jax.vmap(_sample_loss)(t, y0, y1, ctx, z)
+                return jnp.mean(per_sample), {}
         else:
 
             def _sample_loss(ti, y0i, y1i, ctxi):
@@ -360,5 +452,4 @@ class StochasticInterpolantLoss(eqx.Module):
                 return sum(sq_res)
 
             per_sample = jax.vmap(_sample_loss)(t, y0, y1, ctx)
-
-        return jnp.mean(per_sample)
+            return jnp.mean(per_sample), {}

@@ -146,7 +146,7 @@ class ValidationCallback(Callback):
         for batch in self.val_data:
             key, subkey = jax.random.split(trainer.key)
             trainer.key = key
-            loss = self.loss_module(trainer.model, batch, subkey)
+            loss, _aux = self.loss_module(trainer.model, batch, subkey)
             val_losses.append(loss)
 
         if val_losses:

@@ -50,6 +50,13 @@ class MLPVelocity(eqx.Module):
         return self.mlp(jnp.concatenate([x, t_feat], axis=-1))
 
 
+class VelocityDenoiserPair(eqx.Module):
+    """Container holding a velocity field and a denoiser for joint training."""
+
+    velocity_field: eqx.Module
+    denoiser: eqx.Module
+
+
 def train_single_model(
     loss_type: str,
     width: int,
@@ -61,6 +68,8 @@ def train_single_model(
     log_freq: int,
     ckpt_path: Path,
     overwrite: bool,
+    denoiser: bool = False,
+    denoiser_weight: float = 1.0,
     profile: bool = False,
     profile_log_dir: Path = Path("tmp/profiles"),
     profile_warmup: int = 50,
@@ -112,7 +121,16 @@ def train_single_model(
         def gamma_fn(t):
             return jnp.sqrt(2 * t * (1 - t))
 
-        loss_fn = StochasticInterpolantLoss(interpolant=interpolant, gamma=gamma_fn)
+        if denoiser:
+            loss_fn = StochasticInterpolantLoss(
+                interpolant=interpolant,
+                gamma=gamma_fn,
+                get_velocity=lambda m: m.velocity_field,
+                get_denoiser=lambda m: m.denoiser,
+                denoiser_weight=denoiser_weight,
+            )
+        else:
+            loss_fn = StochasticInterpolantLoss(interpolant=interpolant, gamma=gamma_fn)
         dataset = grain.MapDataset.source(
             CoupledDataSource(
                 DistributionDataSource(base_dist, batch_size, seed=seed),
@@ -124,7 +142,15 @@ def train_single_model(
 
     # Model
     key, model_key = jax.random.split(key)
-    model = MLPVelocity(input_dim=d, width=width, depth=depth, key=model_key)
+    if denoiser and loss_type == "stochastic_interpolant":
+        vel_key, den_key = jax.random.split(model_key)
+        vel = MLPVelocity(input_dim=d, width=width, depth=depth, key=vel_key)
+        den = MLPVelocity(input_dim=d, width=width, depth=depth, key=den_key)
+        model = VelocityDenoiserPair(velocity_field=vel, denoiser=den)
+    else:
+        if denoiser:
+            print("Warning: denoiser=True is only supported for loss_type='stochastic_interpolant'. Ignoring.")
+        model = MLPVelocity(input_dim=d, width=width, depth=depth, key=model_key)
 
     # Optimizer
     optimizer = optax.adam(lr)
@@ -147,7 +173,10 @@ def train_single_model(
     import datetime
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{loss_type}_" f"w{width}d{depth}_" f"lr{lr}_" f"b{batch_size}_" f"s{seed}_" f"{timestamp}"
+    run_name = f"{loss_type}_" f"w{width}d{depth}_" f"lr{lr}_" f"b{batch_size}_" f"s{seed}_"
+    if denoiser and loss_type == "stochastic_interpolant":
+        run_name += "denoiser_"
+    run_name += f"{timestamp}"
     chkpt_run_path = ckpt_path / run_name
     tb_run_dir = tensorboard_log_dir / run_name
 
@@ -237,6 +266,8 @@ def main(
     log_freq: Annotated[int, typer.Option(help="Logging frequency")] = 500,
     ckpt_path: Annotated[Path, typer.Option(help="Checkpoint path")] = Path("tmp/ckpt_8gaussians"),
     overwrite: Annotated[bool, typer.Option(help="Overwrite existing checkpoints")] = True,
+    denoiser: Annotated[bool, typer.Option(help="Learn denoiser (only for SI loss)")] = False,
+    denoiser_weight: Annotated[float, typer.Option(help="Weight of denoiser loss")] = 1.0,
     profile: Annotated[bool, typer.Option(help="Enable JAX profiling")] = False,
     profile_log_dir: Annotated[Path, typer.Option(help="Directory to save profiling traces")] = Path("tmp/tb_logs"),
     profile_warmup: Annotated[int, typer.Option(help="Steps to wait before starting profiling")] = 50,
@@ -269,6 +300,8 @@ def main(
         log_freq=log_freq,
         ckpt_path=ckpt_path,
         overwrite=overwrite,
+        denoiser=denoiser,
+        denoiser_weight=denoiser_weight,
         profile=profile,
         profile_log_dir=profile_log_dir,
         profile_warmup=profile_warmup,
