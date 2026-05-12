@@ -40,16 +40,17 @@ def train_step(model, opt_state, batch, key, loss_module, optimizer):
         opt_state: Current optimizer state.
         batch: A batch of training data.
         key: PRNG key for stochasticity in the loss function.
-        loss_module: A callable `(model, batch, key) -> loss`.
+        loss_module: A callable ``(model, batch, key) -> (loss, aux)``.
         optimizer: An Optax optimizer.
 
     Returns:
-        A tuple `(updated_model, updated_opt_state, loss, grads)`.
+        A tuple ``(updated_model, updated_opt_state, loss, grads, aux)``
+        where ``aux`` is a dict of per-component metrics from the loss.
     """
-    loss, grads = eqx.filter_value_and_grad(loss_module)(model, batch, key)
+    (loss, aux), grads = eqx.filter_value_and_grad(loss_module, has_aux=True)(model, batch, key)
     updates, opt_state = optimizer.update(grads, opt_state, model)
     model = eqx.apply_updates(model, updates)
-    return model, opt_state, loss, grads
+    return model, opt_state, loss, grads, aux
 
 
 class Trainer:
@@ -172,7 +173,7 @@ class Trainer:
 
             self.key, subkey = jax.random.split(self.key)
 
-            self.model, self.opt_state, loss, grads = train_step(
+            self.model, self.opt_state, loss, grads, aux = train_step(
                 self.model,
                 self.opt_state,
                 batch,
@@ -181,7 +182,7 @@ class Trainer:
                 self.optimizer,
             )
 
-            self.logs.update({"loss": loss, "grads": grads})
+            self.logs.update({"loss": loss, "grads": grads, **aux})
             self._run_callbacks("on_step_end", step=self.step, logs=self.logs)
 
         self._run_callbacks("on_train_end")

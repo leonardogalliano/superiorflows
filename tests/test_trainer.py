@@ -112,7 +112,7 @@ class TestMaximumLikelihoodLoss:
         """Test loss computes and returns scalar."""
         loss_fn = MaximumLikelihoodLoss(base_dist)
         batch = target_dist.sample(seed=jax.random.key(0), sample_shape=(16,))
-        loss = loss_fn(model, batch, key=jax.random.key(1))
+        loss, _aux = loss_fn(model, batch, key=jax.random.key(1))
         assert loss.shape == ()
         assert jnp.isfinite(loss)
 
@@ -123,9 +123,9 @@ class TestMaximumLikelihoodLoss:
 
         @eqx.filter_jit
         def loss_and_grad(m):
-            return eqx.filter_value_and_grad(loss_fn)(m, batch, jax.random.key(1))
+            return eqx.filter_value_and_grad(loss_fn, has_aux=True)(m, batch, jax.random.key(1))
 
-        loss, grads = loss_and_grad(model)
+        (loss, _aux), grads = loss_and_grad(model)
         assert jnp.isfinite(loss)
         grad_norms = jax.tree.map(lambda x: jnp.linalg.norm(x), eqx.filter(grads, eqx.is_array))
         total_grad_norm = sum(jax.tree.leaves(grad_norms))
@@ -165,7 +165,7 @@ class TestEnergyBasedLoss:
         """Test loss computes and returns scalar."""
         loss_fn = EnergyBasedLoss(base_dist, target_dist)
         batch = base_dist.sample(seed=jax.random.key(0), sample_shape=(16,))
-        loss = loss_fn(model, batch, key=jax.random.key(1))
+        loss, _aux = loss_fn(model, batch, key=jax.random.key(1))
         assert loss.shape == ()
         assert jnp.isfinite(loss)
 
@@ -176,9 +176,9 @@ class TestEnergyBasedLoss:
 
         @eqx.filter_jit
         def loss_and_grad(m):
-            return eqx.filter_value_and_grad(loss_fn)(m, batch, jax.random.key(1))
+            return eqx.filter_value_and_grad(loss_fn, has_aux=True)(m, batch, jax.random.key(1))
 
-        loss, grads = loss_and_grad(model)
+        (loss, _aux), grads = loss_and_grad(model)
         assert jnp.isfinite(loss)
         grad_norms = jax.tree.map(lambda x: jnp.linalg.norm(x), eqx.filter(grads, eqx.is_array))
         total_grad_norm = sum(jax.tree.leaves(grad_norms))
@@ -201,8 +201,8 @@ class TestKullbackLeiblerLoss:
         loss_mle = MaximumLikelihoodLoss(base_dist)
         loss_hybrid_alpha1 = KullbackLeiblerLoss(base_dist, target_dist, alpha=1.0)
 
-        l_mle = loss_mle(model, batch, key=jax.random.key(1))
-        l_hybrid = loss_hybrid_alpha1(model, batch, key=jax.random.key(1))
+        l_mle, _ = loss_mle(model, batch, key=jax.random.key(1))
+        l_hybrid, _ = loss_hybrid_alpha1(model, batch, key=jax.random.key(1))
         assert jnp.isfinite(l_mle)
         assert jnp.isfinite(l_hybrid)
 
@@ -210,7 +210,7 @@ class TestKullbackLeiblerLoss:
         """Test loss computes and returns scalar."""
         loss_fn = KullbackLeiblerLoss(base_dist, target_dist, alpha=0.5)
         batch = target_dist.sample(seed=jax.random.key(0), sample_shape=(16,))
-        loss = loss_fn(model, batch, key=jax.random.key(1))
+        loss, _aux = loss_fn(model, batch, key=jax.random.key(1))
         assert loss.shape == ()
         assert jnp.isfinite(loss)
 
@@ -221,9 +221,9 @@ class TestKullbackLeiblerLoss:
 
         @eqx.filter_jit
         def loss_and_grad(m):
-            return eqx.filter_value_and_grad(loss_fn)(m, batch, jax.random.key(1))
+            return eqx.filter_value_and_grad(loss_fn, has_aux=True)(m, batch, jax.random.key(1))
 
-        loss, grads = loss_and_grad(model)
+        (loss, _aux), grads = loss_and_grad(model)
         assert jnp.isfinite(loss)
         grad_norms = jax.tree.map(lambda x: jnp.linalg.norm(x), eqx.filter(grads, eqx.is_array))
         total_grad_norm = sum(jax.tree.leaves(grad_norms))
@@ -592,14 +592,14 @@ class TestTrainerTraining:
         loss_fn = MaximumLikelihoodLoss(base_dist)
 
         test_batch = target_dist.sample(seed=jax.random.key(99), sample_shape=(64,))
-        initial_loss = loss_fn(model, test_batch, key=jax.random.key(100))
+        initial_loss, _ = loss_fn(model, test_batch, key=jax.random.key(100))
 
         trainer = Trainer(model, optimizer, loss_fn, seed=0)
         source = DistributionDataSource(target_dist, batch_size=64, seed=0)
         dataset = grain.MapDataset.source(source).repeat()
         trained_model = trainer.train(dataset, max_steps=50)
 
-        final_loss = loss_fn(trained_model, test_batch, key=jax.random.key(100))
+        final_loss, _ = loss_fn(trained_model, test_batch, key=jax.random.key(100))
 
         assert final_loss < initial_loss + 1.0
 
@@ -1238,8 +1238,8 @@ class TestAnalyticalDivergenceTraining:
         loss_exact = MaximumLikelihoodLoss(base_dist)
         loss_analytical = MaximumLikelihoodLoss(base_dist, divergence_fn=_linear_divergence_fn)
 
-        l_exact = loss_exact(model, batch)
-        l_analytical = loss_analytical(model, batch)
+        l_exact, _ = loss_exact(model, batch)
+        l_analytical, _ = loss_analytical(model, batch)
 
         assert jnp.allclose(l_exact, l_analytical, atol=1e-4)
 
@@ -1318,7 +1318,7 @@ class TestStochasticInterpolantLoss:
         loss_fn = StochasticInterpolantLoss(_linear_interpolant, gamma=_gamma_schedule)
         x0 = jnp.zeros((16, 2))
         x1 = jnp.ones((16, 2))
-        loss = loss_fn(model, (x0, x1), key=jax.random.key(0))
+        loss, _aux = loss_fn(model, (x0, x1), key=jax.random.key(0))
         assert loss.shape == ()
         assert jnp.isfinite(loss)
 
@@ -1327,7 +1327,7 @@ class TestStochasticInterpolantLoss:
         loss_fn = StochasticInterpolantLoss(_linear_interpolant)
         x0 = jnp.zeros((16, 2))
         x1 = jnp.ones((16, 2))
-        loss = loss_fn(model, (x0, x1), key=jax.random.key(0))
+        loss, _aux = loss_fn(model, (x0, x1), key=jax.random.key(0))
         assert loss.shape == ()
         assert jnp.isfinite(loss)
 
@@ -1340,9 +1340,9 @@ class TestStochasticInterpolantLoss:
 
         @eqx.filter_jit
         def loss_and_grad(m):
-            return eqx.filter_value_and_grad(loss_fn)(m, batch, jax.random.key(1))
+            return eqx.filter_value_and_grad(loss_fn, has_aux=True)(m, batch, jax.random.key(1))
 
-        loss, grads = loss_and_grad(model)
+        (loss, _aux), grads = loss_and_grad(model)
         assert jnp.isfinite(loss)
         grad_norms = jax.tree.map(lambda x: jnp.linalg.norm(x), eqx.filter(grads, eqx.is_array))
         total_grad_norm = sum(jax.tree.leaves(grad_norms))
@@ -1357,9 +1357,9 @@ class TestStochasticInterpolantLoss:
 
         @eqx.filter_jit
         def loss_and_grad(m):
-            return eqx.filter_value_and_grad(loss_fn)(m, batch, jax.random.key(1))
+            return eqx.filter_value_and_grad(loss_fn, has_aux=True)(m, batch, jax.random.key(1))
 
-        loss, grads = loss_and_grad(model)
+        (loss, _aux), grads = loss_and_grad(model)
         assert jnp.isfinite(loss)
         grad_norms = jax.tree.map(lambda x: jnp.linalg.norm(x), eqx.filter(grads, eqx.is_array))
         total_grad_norm = sum(jax.tree.leaves(grad_norms))
@@ -1429,3 +1429,280 @@ class TestStochasticInterpolantLoss:
 
         if avg_execution_time > 0.001:
             assert compilation_time > 2.0 * avg_execution_time, "Recompilation likely occurred!"
+
+
+# =============================================================================
+# Denoiser (Score) Learning Tests
+# =============================================================================
+
+
+class VelocityDenoiserPair(eqx.Module):
+    """Container holding a velocity field and a denoiser for joint training."""
+
+    velocity_field: eqx.Module
+    denoiser: eqx.Module
+
+
+class TestDenoiserLearning:
+    """Tests for joint velocity + denoiser training via StochasticInterpolantLoss."""
+
+    @pytest.fixture
+    def model_pair(self, base_dist):
+        """Create a velocity + denoiser pair."""
+        vel = MLPVelocity(input_dim=2, width=16, depth=2, key=jax.random.key(42))
+        den = MLPVelocity(input_dim=2, width=16, depth=2, key=jax.random.key(99))
+        return VelocityDenoiserPair(velocity_field=vel, denoiser=den)
+
+    def test_denoiser_requires_gamma(self):
+        """Denoiser without gamma must raise ValueError."""
+        with pytest.raises(ValueError, match="noise schedule gamma"):
+            StochasticInterpolantLoss(
+                _linear_interpolant,
+                get_velocity=lambda m: m.velocity_field,
+                get_denoiser=lambda m: m.denoiser,
+            )
+
+    def test_denoiser_init_with_gamma(self):
+        """Denoiser with gamma must succeed."""
+        loss = StochasticInterpolantLoss(
+            _linear_interpolant,
+            gamma=_gamma_schedule,
+            get_velocity=lambda m: m.velocity_field,
+            get_denoiser=lambda m: m.denoiser,
+        )
+        assert loss._get_denoiser is not None
+        assert loss._get_velocity is not None
+        assert loss.denoiser_weight == 1.0
+
+    def test_denoiser_weight_custom(self):
+        """Custom denoiser_weight is stored correctly."""
+        loss = StochasticInterpolantLoss(
+            _linear_interpolant,
+            gamma=_gamma_schedule,
+            get_velocity=lambda m: m.velocity_field,
+            get_denoiser=lambda m: m.denoiser,
+            denoiser_weight=0.5,
+        )
+        assert loss.denoiser_weight == 0.5
+
+    def test_forward_pass_with_denoiser(self, model_pair):
+        """Denoiser loss returns finite scalar + populated aux."""
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            gamma=_gamma_schedule,
+            get_velocity=lambda m: m.velocity_field,
+            get_denoiser=lambda m: m.denoiser,
+        )
+        x0 = jnp.zeros((16, 2))
+        x1 = jnp.ones((16, 2))
+        loss, aux = loss_fn(model_pair, (x0, x1), key=jax.random.key(0))
+
+        assert loss.shape == ()
+        assert jnp.isfinite(loss)
+        assert "velocity_loss" in aux
+        assert "denoiser_loss" in aux
+        assert jnp.isfinite(aux["velocity_loss"])
+        assert jnp.isfinite(aux["denoiser_loss"])
+
+    def test_total_loss_equals_weighted_sum(self, model_pair):
+        """Total loss = velocity_loss + denoiser_weight * denoiser_loss."""
+        weight = 2.0
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            gamma=_gamma_schedule,
+            get_velocity=lambda m: m.velocity_field,
+            get_denoiser=lambda m: m.denoiser,
+            denoiser_weight=weight,
+        )
+        x0 = jnp.zeros((8, 2))
+        x1 = jnp.ones((8, 2))
+        loss, aux = loss_fn(model_pair, (x0, x1), key=jax.random.key(0))
+
+        expected = aux["velocity_loss"] + weight * aux["denoiser_loss"]
+        assert jnp.allclose(loss, expected, atol=1e-6)
+
+    def test_gradients_flow_through_both_models(self, model_pair):
+        """Gradients must be non-zero for both velocity and denoiser params."""
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            gamma=_gamma_schedule,
+            get_velocity=lambda m: m.velocity_field,
+            get_denoiser=lambda m: m.denoiser,
+        )
+        x0 = jnp.zeros((16, 2))
+        x1 = jnp.ones((16, 2))
+        batch = (x0, x1)
+
+        @eqx.filter_jit
+        def loss_and_grad(m):
+            return eqx.filter_value_and_grad(loss_fn, has_aux=True)(m, batch, jax.random.key(1))
+
+        (loss, aux), grads = loss_and_grad(model_pair)
+
+        assert jnp.isfinite(loss)
+
+        vel_grads = eqx.filter(grads.velocity_field, eqx.is_array)
+        vel_norm = sum(jnp.linalg.norm(g) for g in jax.tree.leaves(vel_grads))
+        assert vel_norm > 0
+
+        den_grads = eqx.filter(grads.denoiser, eqx.is_array)
+        den_norm = sum(jnp.linalg.norm(g) for g in jax.tree.leaves(den_grads))
+        assert den_norm > 0
+
+    def test_aux_in_trainer_logs(self, base_dist, target_dist, model_pair):
+        """Trainer logs must contain velocity_loss and denoiser_loss."""
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            gamma=_gamma_schedule,
+            get_velocity=lambda m: m.velocity_field,
+            get_denoiser=lambda m: m.denoiser,
+        )
+        optimizer = optax.adam(1e-3)
+        trainer = Trainer(model_pair, optimizer, loss_fn, seed=0)
+
+        source = CoupledDataSource(
+            DistributionDataSource(base_dist, batch_size=16, seed=0),
+            DistributionDataSource(target_dist, batch_size=16, seed=1),
+        )
+        dataset = grain.MapDataset.source(source).repeat()
+        trainer.train(dataset, max_steps=1)
+
+        assert "velocity_loss" in trainer.logs
+        assert "denoiser_loss" in trainer.logs
+        assert jnp.isfinite(trainer.logs["velocity_loss"])
+        assert jnp.isfinite(trainer.logs["denoiser_loss"])
+
+    def test_velocity_only_aux_is_empty(self, model):
+        """Velocity-only SI loss returns empty aux."""
+        loss_fn = StochasticInterpolantLoss(_linear_interpolant, gamma=_gamma_schedule)
+        x0 = jnp.zeros((8, 2))
+        x1 = jnp.ones((8, 2))
+        _, aux = loss_fn(model, (x0, x1), key=jax.random.key(0))
+        assert aux == {}
+
+    def test_training_integration_with_denoiser(self, base_dist, target_dist, model_pair):
+        """Full training loop with denoiser must complete and reduce loss."""
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            gamma=_gamma_schedule,
+            get_velocity=lambda m: m.velocity_field,
+            get_denoiser=lambda m: m.denoiser,
+        )
+        optimizer = optax.adam(1e-3)
+        trainer = Trainer(model_pair, optimizer, loss_fn, seed=0)
+
+        source = CoupledDataSource(
+            DistributionDataSource(base_dist, batch_size=32, seed=0),
+            DistributionDataSource(target_dist, batch_size=32, seed=1),
+        )
+        dataset = grain.MapDataset.source(source).repeat()
+        trained_model = trainer.train(dataset, max_steps=20)
+
+        assert trainer.step == 20
+        assert trained_model is not None
+        assert isinstance(trained_model, VelocityDenoiserPair)
+
+    def test_checkpoint_roundtrip_with_denoiser(self, base_dist, target_dist, model_pair, tmp_path):
+        """Checkpoint save/restore must preserve both velocity and denoiser params."""
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            gamma=_gamma_schedule,
+            get_velocity=lambda m: m.velocity_field,
+            get_denoiser=lambda m: m.denoiser,
+        )
+        optimizer = optax.adam(1e-3)
+
+        ckpt_path = tmp_path / "denoiser_ckpt"
+        cb = CheckpointCallback(ckpt_path=str(ckpt_path), save_freq=5)
+        trainer = Trainer(model_pair, optimizer, loss_fn, callbacks=[cb], seed=0)
+
+        source = CoupledDataSource(
+            DistributionDataSource(base_dist, batch_size=16, seed=0),
+            DistributionDataSource(target_dist, batch_size=16, seed=1),
+        )
+        dataset = grain.MapDataset.source(source).repeat()
+        trained_model = trainer.train(dataset, max_steps=10)
+        cb.checkpointer.wait_until_finished()
+
+        vel_params_before = eqx.filter(trained_model.velocity_field, eqx.is_array)
+        den_params_before = eqx.filter(trained_model.denoiser, eqx.is_array)
+
+        new_trainer = Trainer(model_pair, optimizer, loss_fn, seed=99)
+        success = new_trainer.load_checkpoint(str(ckpt_path))
+
+        assert success
+        assert new_trainer.step == 10
+
+        restored_model = new_trainer.model
+        vel_params_after = eqx.filter(restored_model.velocity_field, eqx.is_array)
+        den_params_after = eqx.filter(restored_model.denoiser, eqx.is_array)
+
+        vel_leaves_before = jax.tree.leaves(vel_params_before)
+        vel_leaves_after = jax.tree.leaves(vel_params_after)
+        for before, after in zip(vel_leaves_before, vel_leaves_after):
+            assert jnp.allclose(before, after), "Velocity field params not restored correctly"
+
+        den_leaves_before = jax.tree.leaves(den_params_before)
+        den_leaves_after = jax.tree.leaves(den_params_after)
+        for before, after in zip(den_leaves_before, den_leaves_after):
+            assert jnp.allclose(before, after), "Denoiser params not restored correctly"
+
+    def test_no_recompilation_with_denoiser(self, base_dist, target_dist, model_pair):
+        """Training steps must not trigger recompilation."""
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            gamma=_gamma_schedule,
+            get_velocity=lambda m: m.velocity_field,
+            get_denoiser=lambda m: m.denoiser,
+        )
+        optimizer = optax.adam(1e-3)
+        trainer = Trainer(model_pair, optimizer, loss_fn, seed=0)
+
+        source = CoupledDataSource(
+            DistributionDataSource(base_dist, batch_size=32, seed=0),
+            DistributionDataSource(target_dist, batch_size=32, seed=1),
+        )
+        dataset = grain.MapDataset.source(source).repeat()
+
+        times = []
+
+        start = time.perf_counter()
+        trainer.train(dataset, max_steps=1)
+        jax.block_until_ready(trainer.model)
+        times.append(time.perf_counter() - start)
+
+        for i in range(1, 5):
+            start = time.perf_counter()
+            trainer.train(dataset, max_steps=i + 1)
+            jax.block_until_ready(trainer.model)
+            times.append(time.perf_counter() - start)
+
+        compilation_time = times[0]
+        avg_execution_time = sum(times[1:]) / len(times[1:])
+
+        print(f"SI+Denoiser Compilation: {compilation_time*1000:.2f}ms, " f"Avg Exec: {avg_execution_time*1000:.2f}ms")
+
+        if avg_execution_time > 0.001:
+            assert compilation_time > 2.0 * avg_execution_time, "Recompilation likely occurred!"
+
+    def test_denoiser_loss_independent_of_velocity(self, model_pair):
+        """Denoiser loss should not change when velocity field params change."""
+        x0 = jnp.zeros((16, 2))
+        x1 = jnp.ones((16, 2))
+        key = jax.random.key(42)
+
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            gamma=_gamma_schedule,
+            get_velocity=lambda m: m.velocity_field,
+            get_denoiser=lambda m: m.denoiser,
+        )
+
+        _, aux1 = loss_fn(model_pair, (x0, x1), key=key)
+
+        perturbed_vel = jax.tree.map(lambda x: x + 10.0 if eqx.is_array(x) else x, model_pair.velocity_field)
+        perturbed_pair = VelocityDenoiserPair(velocity_field=perturbed_vel, denoiser=model_pair.denoiser)
+        _, aux2 = loss_fn(perturbed_pair, (x0, x1), key=key)
+
+        assert jnp.allclose(aux1["denoiser_loss"], aux2["denoiser_loss"], atol=1e-6)
+        assert not jnp.allclose(aux1["velocity_loss"], aux2["velocity_loss"], atol=1e-2)
