@@ -335,10 +335,9 @@ class TensorBoardLogger(Callback):
     Writes scalar metrics from the ``logs`` dict every ``log_freq`` steps.
     Works alongside ``LoggerCallback`` — both consume the same ``logs``.
 
-    Requires ``tensorboard`` to be installed::
+    Requires ``tensorboardX`` to be installed (included in dev dependencies)::
 
-        pip install tensorboard
-        # or: pip install superiorflows[monitoring]
+        pip install tensorboardX
 
     View logs remotely with::
 
@@ -361,7 +360,7 @@ class TensorBoardLogger(Callback):
             raise ImportError(
                 "TensorBoard logging requires the `tensorboardX` package. "
                 "Install it with: pip install tensorboardX  "
-                "or: pip install superiorflows[monitoring]"
+                "or ensure you have installed the development dependencies."
             ) from None
 
         self.log_dir = Path(log_dir)
