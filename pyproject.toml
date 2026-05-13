@@ -31,10 +31,6 @@ training-particles = "particle_systems.training_particles:app"
 evaluate-log-prob = "particle_systems.evaluate_log_prob:app"
 
 [project.optional-dependencies]
-monitoring = [
-    "tensorboardX",
-    "tb-nightly",
-]
 cuda = [
     "jax[cuda12]",
 ]
@@ -53,6 +49,8 @@ dev = [
     "jax-md>=0.2.27",
     "atooms-pp>=4.2.1",
     "scipy>=1.17.0",
+    "tensorboardX>=2.6.5",
+    "tb-nightly>=2.21.0a20251023",
 ]
 
 [tool.ruff]
