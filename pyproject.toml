@@ -74,4 +74,7 @@ omit = [
     "tests/*",
 ]
 
+[tool.pytest.ini_options]
+addopts = "--benchmark-autosave"
+
 

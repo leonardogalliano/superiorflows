@@ -16,7 +16,13 @@ __all__ = ["Flow"]
 
 
 def _divergence_exact(velocity_field, t, x, args):
-    """Compute exact divergence using full Jacobian (O(d²) complexity)."""
+    """Compute exact divergence via diagonal JVP extraction.
+
+    Uses jax.linearize to obtain the JVP map, then extracts only the diagonal
+    elements J_ii via unit-vector probes. This avoids materialising the full
+    d×d Jacobian (O(d) memory instead of O(d²)), while the FLOP count remains
+    O(d²) — each of the d probes costs O(d).
+    """
     x_flat, unravel = jax.flatten_util.ravel_pytree(x)
 
     def v_flat(x_flat_):
@@ -25,10 +31,14 @@ def _divergence_exact(velocity_field, t, x, args):
         v_flattened, _ = jax.flatten_util.ravel_pytree(v)
         return v_flattened
 
-    y_flat = v_flat(x_flat)
+    y_flat, jvp_fn = jax.linearize(v_flat, x_flat)
     v = unravel(y_flat)
-    jac = jax.jacfwd(v_flat)(x_flat)
-    divergence = jnp.trace(jac)
+
+    def diag_element(i):
+        e = jnp.zeros_like(x_flat).at[i].set(1.0)
+        return jvp_fn(e)[i]
+
+    divergence = jnp.sum(jax.vmap(diag_element)(jnp.arange(x_flat.size)))
     return v, divergence
 
 
