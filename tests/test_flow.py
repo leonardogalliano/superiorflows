@@ -92,7 +92,8 @@ def test_flow(flow_setup):
     x1 = flow.apply_map(x0)
     assert jnp.allclose(flow.apply_inverse_map(x1), x0, atol=1e-5, rtol=1e-5)
     x1, logq1 = flow.apply_map_and_log_prob(x0)
-    flow.log_prob(x1)
+    logq_inv = flow.log_prob(x1)
+    assert jnp.allclose(logq_inv, logq1, atol=1e-4, rtol=1e-4)
     assert jnp.allclose(flow.apply_inverse_map(x1), x0, atol=1e-5, rtol=1e-5)
 
 
@@ -109,7 +110,9 @@ def test_flow_batched(flow_setup):
     X1, logq1 = jax.vmap(flow.apply_map_and_log_prob)(X0)
     assert X1.shape == (M,) + X0.shape[1:]
     assert logq1.shape == (M,)
-    assert jax.vmap(flow.log_prob)(X1).shape == (M,)
+    logq_inv = jax.vmap(flow.log_prob)(X1)
+    assert logq_inv.shape == (M,)
+    assert jnp.allclose(logq_inv, logq1, atol=1e-4, rtol=1e-4)
     assert jnp.allclose(flow.apply_inverse_map(X1), X0, atol=1e-4, rtol=1e-4)
 
 

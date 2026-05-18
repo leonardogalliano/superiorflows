@@ -174,7 +174,8 @@ def test_particles_flow(particles_flow_setup):
         x0,
     )
     x1, logq1 = flow.apply_map_and_log_prob(x0)
-    flow.log_prob(x1)
+    logq_inv = flow.log_prob(x1)
+    assert jnp.allclose(logq_inv, logq1, atol=1e-4, rtol=1e-4)
     assert jax.tree.map(
         lambda x, y: jnp.allclose(x, y, atol=1e-5, rtol=1e-5),
         flow.apply_inverse_map(x1),
@@ -199,7 +200,9 @@ def test_particles_flow_batched(particles_flow_setup):
     X1, logq1 = jax.vmap(flow.apply_map_and_log_prob)(X0)
     assert X1.positions.shape == (M,) + X0.positions.shape[1:]
     assert logq1.shape == (M,)
-    assert jax.vmap(flow.log_prob)(X1).shape == (M,)
+    logq_inv = jax.vmap(flow.log_prob)(X1)
+    assert logq_inv.shape == (M,)
+    assert jnp.allclose(logq_inv, logq1, atol=1e-4, rtol=1e-4)
     assert jax.tree.map(
         lambda x, y: jnp.allclose(x, y, atol=1e-5, rtol=1e-5),
         jax.vmap(flow.apply_inverse_map)(X1),

@@ -43,7 +43,7 @@ def main():
     def loss_fn(vf_arrays, X):
         vf = eqx.combine(vf_arrays, eqx.filter(velocity_field, lambda x: not eqx.is_array(x)))
         flow = Flow(velocity_field=vf, base_distribution=base_dist)
-        return -jnp.mean(flow.log_prob(X))
+        return -jnp.mean(jax.vmap(flow.log_prob)(X))
 
     vf_arrays = eqx.filter(velocity_field, eqx.is_array)
     jaxpr = jax.make_jaxpr(loss_fn)(vf_arrays, X)

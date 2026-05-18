@@ -91,21 +91,21 @@ class ToyParticlesDistribution(eqx.Module):
         return ToyParticles(positions=positions, species=species, box=box)
 
     def log_prob(self, value: ToyParticles):
-        # 1. Parse Inputs (Handle potential batching implicitly via JAX logic)
-        X = value.positions  # (..., N, 2)
-        a = value.species  # (..., N)
+        # 1. Parse Inputs (Single event, batching is handled externally via vmap)
+        X = value.positions  # (N, 2)
+        a = value.species  # (N,)
 
         # 2. Sort X based on species `a` to ensure [C0, S0, C1, S1] ordering
         idx_sort = jnp.argsort(a, axis=-1)
         X_sorted = jnp.take_along_axis(X, idx_sort[..., None], axis=-2)
 
-        # 3. Reshape into Pairs: (..., n_species, 2_particles, 2_coords)
+        # 3. Reshape into Pairs: (n_species, 2_particles, 2_coords)
         # axis -2 is the pair index: 0=Center, 1=Satellite
         batch_shape = X.shape[:-2]
         X_pairs = X_sorted.reshape(*batch_shape, self.n_species, 2, 2)
 
-        x_centers = X_pairs[..., 0, :]  # (..., n_species, 2)
-        x_satellites = X_pairs[..., 1, :]  # (..., n_species, 2)
+        x_centers = X_pairs[..., 0, :]  # (n_species, 2)
+        x_satellites = X_pairs[..., 1, :]  # (n_species, 2)
 
         # 4. Compute Log Probs
 

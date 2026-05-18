@@ -76,5 +76,7 @@ omit = [
 
 [tool.pytest.ini_options]
 addopts = "--benchmark-autosave"
+testpaths = ["tests", "particle_systems"]
+norecursedirs = ["tmp", ".git", ".venv", "experiments", "notebooks", "build", "dist"]
 
 
