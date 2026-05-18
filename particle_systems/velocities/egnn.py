@@ -387,7 +387,7 @@ class ParticlesEGNNVelocity(eqx.Module):
         tanh:         Tanh + scale for coordinate updates (default False).
         coords_range: Total coordinate displacement scale when tanh=True
                       (default 15.0, split evenly across layers).
-        key:          JAX PRNGKey for parameter initialisation.
+        key:          JAX PRNG key for parameter initialisation.
     """
 
     egnn: EGNN

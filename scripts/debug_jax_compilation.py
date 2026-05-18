@@ -52,10 +52,10 @@ class SimpleVelocity(eqx.Module):
 # =============================================================================
 
 
-def test_distrax_pytree_issue():
-    """Investigate distrax distribution pytree stability."""
+def test_distreqx_pytree_issue():
+    """Investigate distreqx distribution pytree stability."""
     print("\n" + "=" * 60)
-    print("TEST 1: Distrax Distribution PyTree Analysis")
+    print("TEST 1: Distreqx Distribution PyTree Analysis")
     print("=" * 60)
 
     dim = 2
@@ -71,7 +71,7 @@ def test_distrax_pytree_issue():
 
     if tree1 != tree2:
         print("\n  ⚠️ CRITICAL ISSUE: Same object gives different tree structures!")
-        print("  This means distrax distributions are NOT stable for JAX tracing.")
+        print("  This means distreqx distributions are NOT stable for JAX tracing.")
     else:
         print("  ✓ Tree structure is stable for the same object")
 
@@ -218,7 +218,7 @@ def test_static_fields():
 
     fields_info = [
         ("velocity_field", "Contains model weights (traced)"),
-        ("base_distribution", "distrax Distribution (traced arrays)"),
+        ("base_distribution", "distreqx Distribution (traced arrays)"),
         ("dynamic_mask", "Lambda function (static=True)"),
         ("hutchinson_samples", "Optional[int] (static=True)"),
         ("solver", "diffrax Solver (static=True)"),
@@ -348,7 +348,7 @@ Expected: ONE compilation on first call, then fast cached execution.
 """
     )
 
-    test_distrax_pytree_issue()
+    test_distreqx_pytree_issue()
     test_actual_training_pattern()
     test_flow_direct()
     test_static_fields()

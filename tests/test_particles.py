@@ -85,7 +85,7 @@ def uniform_box_distribution_setup():
     d = 2
     L = 5.0
     box = jnp.ones(d) * L
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     ref_species = jax.random.uniform(subkey, shape=(N,), minval=0.5, maxval=2.0)
     return UniformSystem(box=box, ref_species=ref_species, temperature=1.0)
@@ -94,7 +94,7 @@ def uniform_box_distribution_setup():
 def test_uniform_box_distribution(uniform_box_distribution_setup):
     dist = uniform_box_distribution_setup
     N, d = dist.event_shape.positions
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     M = 10
     keys = jax.random.split(subkey, M)
@@ -110,7 +110,7 @@ def test_uniform_box_distribution(uniform_box_distribution_setup):
 def particles_velocity_field_setup(uniform_box_distribution_setup):
     dist = uniform_box_distribution_setup
     N, d = dist.event_shape.positions
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     params = jax.random.normal(subkey, (d, d))
     velocity_field = ParticlesVelocityField(params=params)
@@ -120,7 +120,7 @@ def particles_velocity_field_setup(uniform_box_distribution_setup):
 def test_particles_velocity_field(uniform_box_distribution_setup, particles_velocity_field_setup):
     velocity_field = particles_velocity_field_setup
     t = 1.0
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     x = uniform_box_distribution_setup.sample(key=subkey)
 
@@ -148,7 +148,7 @@ def test_particles_velocity_field(uniform_box_distribution_setup, particles_velo
 def particles_flow_setup(uniform_box_distribution_setup, particles_velocity_field_setup):
     dist = uniform_box_distribution_setup
     velocity_field = particles_velocity_field_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     dynamic_mask = eqx.tree_at(
         lambda x: (x.positions, x.species, x.box), dist.sample(key=subkey), replace=(True, True, False)
@@ -164,7 +164,7 @@ def particles_flow_setup(uniform_box_distribution_setup, particles_velocity_fiel
 
 def test_particles_flow(particles_flow_setup):
     flow = particles_flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     x0 = particles_flow_setup.base_distribution.sample(key=subkey)
     x1 = flow.apply_map(x0)
@@ -185,7 +185,7 @@ def test_particles_flow(particles_flow_setup):
 
 def test_particles_flow_batched(particles_flow_setup):
     flow = particles_flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     M = 10
     keys = jax.random.split(subkey, M)
@@ -215,7 +215,7 @@ def test_array_of_systems(particles_flow_setup):
     N, d = flow.base_distribution.event_shape.positions
     box = flow.base_distribution.box
     ref_species = flow.base_distribution.ref_species
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, *subkeys = jax.random.split(key, num=2 * 3 + 1)
     x1 = System(
         positions=jax.random.uniform(subkeys[0], shape=(N, d)),
@@ -250,7 +250,7 @@ def test_array_of_systems(particles_flow_setup):
 
 def test_particle_flow_performance(benchmark, particles_flow_setup):
     flow = particles_flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     x0 = flow.base_distribution.sample(key=subkey)
 
@@ -265,7 +265,7 @@ def test_particle_flow_performance(benchmark, particles_flow_setup):
 
 def test_particle_flow_batched_performance(benchmark, particles_flow_setup):
     flow = particles_flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     M = 128
     keys = jax.random.split(subkey, M)
@@ -288,7 +288,7 @@ def foo_loss(flow, X):
 
 def test_particle_ad_performance(benchmark, particles_flow_setup):
     flow = particles_flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     M = 128
     keys = jax.random.split(subkey, M)
@@ -311,7 +311,7 @@ def hutchinson_particles_flow_setup(uniform_box_distribution_setup, particles_ve
     """Particle flow with Hutchinson estimator enabled."""
     dist = uniform_box_distribution_setup
     velocity_field = particles_velocity_field_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     dynamic_mask = eqx.tree_at(
         lambda x: (x.positions, x.species, x.box), dist.sample(key=subkey), replace=(True, True, False)
@@ -330,7 +330,7 @@ def test_hutchinson_particles_flow(hutchinson_particles_flow_setup, particles_fl
     """Test Hutchinson estimator on particle systems."""
     hutchinson_flow = hutchinson_particles_flow_setup
     exact_flow = particles_flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey1, subkey2 = jax.random.split(key, 3)
 
     x0 = exact_flow.base_distribution.sample(key=subkey1)
@@ -352,7 +352,7 @@ def test_hutchinson_particles_flow_batched(hutchinson_particles_flow_setup, part
     """Test batched Hutchinson estimator on particle systems."""
     hutchinson_flow = hutchinson_particles_flow_setup
     exact_flow = particles_flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey1, subkey2 = jax.random.split(key, 3)
     M = 10
     keys = jax.random.split(subkey1, M)
@@ -373,7 +373,7 @@ def test_hutchinson_particles_flow_batched(hutchinson_particles_flow_setup, part
 def test_hutchinson_particles_performance(benchmark, hutchinson_particles_flow_setup):
     """Benchmark Hutchinson estimator on particle systems."""
     flow = hutchinson_particles_flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey1, subkey2 = jax.random.split(key, 3)
     x0 = flow.base_distribution.sample(key=subkey1)
 

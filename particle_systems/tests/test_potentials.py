@@ -259,7 +259,7 @@ def test_build_energy_fn_single_potential():
     box = jnp.array([L, L])
     energy_fn = build_energy_fn(HIWATARI_MODEL, box, n_species=2)
 
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     positions = jax.random.uniform(key, (4, 2)) * L
     species = jnp.array([0, 0, 1, 1])
 
@@ -274,7 +274,7 @@ def test_build_energy_fn_multi_potential():
     box = jnp.array([L, L])
     energy_fn = build_energy_fn(ROY_MODEL, box, n_species=2)
 
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     positions = jax.random.uniform(key, (4, 2)) * L
     species = jnp.array([0, 0, 1, 1])
 
@@ -288,7 +288,7 @@ def test_build_energy_fn_smooth_jbb():
     box = jnp.array([L, L])
     energy_fn = build_energy_fn(JBB_MODEL, box, n_species=3)
 
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     positions = jax.random.uniform(key, (44, 2)) * L
     species = jnp.array([0] * 20 + [1] * 12 + [2] * 12)
 
@@ -302,7 +302,7 @@ def test_energy_fn_jit_compatible():
     box = jnp.array([L, L])
     energy_fn = build_energy_fn(HIWATARI_MODEL, box, n_species=2)
 
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     positions = jax.random.uniform(key, (4, 2)) * L
     species = jnp.array([0, 0, 1, 1])
 
@@ -317,7 +317,7 @@ def test_energy_fn_grad_compatible():
     box = jnp.array([L, L])
     energy_fn = build_energy_fn(HIWATARI_MODEL, box, n_species=2)
 
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     positions = jax.random.uniform(key, (4, 2)) * L
     species = jnp.array([0, 0, 1, 1])
 
@@ -371,7 +371,7 @@ def test_boltzmann_log_prob(boltzmann_setup):
     """log_prob should return -U/T, finite scalar."""
     dist = boltzmann_setup
     ps = ParticleSystem(
-        positions=jax.random.uniform(jax.random.PRNGKey(42), (4, 2)) * 5.0,
+        positions=jax.random.uniform(jax.random.key(42), (4, 2)) * 5.0,
         species=jnp.array([0, 0, 1, 1]),
         box=jnp.array([5.0, 5.0]),
     )
@@ -394,7 +394,7 @@ def test_boltzmann_log_prob_is_minus_energy_over_T():
     energy_fn = build_energy_fn(HIWATARI_MODEL, jnp.array([5.0, 5.0]), n_species=2)
 
     ps = ParticleSystem(
-        positions=jax.random.uniform(jax.random.PRNGKey(123), (4, 2)) * 5.0,
+        positions=jax.random.uniform(jax.random.key(123), (4, 2)) * 5.0,
         species=jnp.array([0, 0, 1, 1]),
         box=jnp.array([5.0, 5.0]),
     )
@@ -406,7 +406,7 @@ def test_boltzmann_log_prob_is_minus_energy_over_T():
 def test_boltzmann_unsampleable(boltzmann_setup):
     """Sampling should raise NotImplementedError."""
     with pytest.raises(NotImplementedError):
-        boltzmann_setup.sample(jax.random.PRNGKey(0))
+        boltzmann_setup.sample(jax.random.key(0))
 
 
 def test_boltzmann_event_shape(boltzmann_setup):
@@ -421,7 +421,7 @@ def test_boltzmann_batched(boltzmann_setup):
     """log_prob via vmap should match individual calls."""
     dist = boltzmann_setup
     M = 8
-    positions = jax.random.uniform(jax.random.PRNGKey(42), (M, 4, 2)) * 5.0
+    positions = jax.random.uniform(jax.random.key(42), (M, 4, 2)) * 5.0
     species = jnp.tile(jnp.array([0, 0, 1, 1]), (M, 1))
     boxes = jnp.tile(jnp.array([5.0, 5.0]), (M, 1))
 

@@ -33,7 +33,7 @@ def debug_setup():
     base_dist = dsx.MultivariateNormalDiag(loc=jnp.zeros(d), scale_diag=jnp.ones(d))
 
     # Velocity field parameters
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     k1, k2, k3 = jax.random.split(key, 3)
 
     A = jax.random.normal(k1, (d, d)) * 0.5

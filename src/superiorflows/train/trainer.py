@@ -93,7 +93,7 @@ class Trainer:
             model: The Equinox model to train.
             optimizer: An Optax optimizer (e.g., `optax.adam(1e-3)`).
             loss_module: Loss callable with signature `(model, batch, key) -> loss`.
-            seed: Integer seed or `jax.random.PRNGKey` for initialization.
+            seed: Integer seed or ``jax.random.key`` for initialization.
             callbacks: Optional list of `Callback` instances.
         """
         self.model = model

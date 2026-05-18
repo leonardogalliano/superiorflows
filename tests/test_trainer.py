@@ -546,7 +546,7 @@ class TestTrainerInitialization:
         assert trainer.step == 0
 
     def test_init_with_prng_key(self, base_dist, model):
-        """Test trainer init with explicit PRNGKey."""
+        """Test trainer init with explicit PRNG key."""
         optimizer = optax.adam(1e-3)
         loss_fn = MaximumLikelihoodLoss(base_dist)
         key = jax.random.key(123)

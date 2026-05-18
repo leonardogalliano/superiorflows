@@ -41,7 +41,7 @@ def flow_setup(uniform_distribution_setup):
 
 def test_flow(flow_setup):
     flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     M = 10
     X0 = jax.vmap(flow.base_distribution.sample)(jax.random.split(subkey, M))
@@ -90,7 +90,7 @@ def analytical_flow_setup(uniform_distribution_setup):
 def test_flow_analytical(analytical_flow_setup):
     """Test that analytical divergence matches the true closed-form density."""
     flow = analytical_flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     M = 10
     X0 = jax.vmap(flow.base_distribution.sample)(jax.random.split(subkey, M))

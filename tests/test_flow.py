@@ -15,7 +15,7 @@ def uniform_distribution_setup():
 
 def test_uniform_base(uniform_distribution_setup):
     dist = uniform_distribution_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     M = 3
     keys = jax.random.split(subkey, M)
@@ -34,7 +34,7 @@ class VelocityField(eqx.Module):
 
 @pytest.fixture
 def velocity_field_setup(uniform_distribution_setup):
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     dim = 8
     key, subkey = jax.random.split(key)
     params = jax.random.normal(subkey, (dim, dim))
@@ -46,7 +46,7 @@ def test_velocity_field(uniform_distribution_setup, velocity_field_setup):
     uniform_dist = uniform_distribution_setup
     velocity_field = velocity_field_setup
     t = 1.0
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     x = uniform_dist.sample(key=subkey)
     v = velocity_field(t, x, None)
@@ -62,7 +62,7 @@ def test_flow_extra_args(uniform_distribution_setup, velocity_field_setup):
         dt0=0.1,
         extra_args={"max_steps": 1000},
     )
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     x = uniform_dist.sample(key=subkey)
     x1 = flow.integrate(x, dt0=0.01).ys[-1]
@@ -86,7 +86,7 @@ def flow_setup(uniform_distribution_setup, velocity_field_setup):
 
 def test_flow(flow_setup):
     flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     x0 = flow.base_distribution.sample(key=subkey)
     x1 = flow.apply_map(x0)
@@ -99,7 +99,7 @@ def test_flow(flow_setup):
 
 def test_flow_batched(flow_setup):
     flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     M = 3
     keys = jax.random.split(subkey, M)
@@ -118,7 +118,7 @@ def test_flow_batched(flow_setup):
 
 def test_flow_performance(benchmark, flow_setup):
     flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     x0 = flow.base_distribution.sample(key=subkey)
 
@@ -133,7 +133,7 @@ def test_flow_performance(benchmark, flow_setup):
 
 def test_batched_performance(benchmark, flow_setup):
     flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     M = 128
     keys = jax.random.split(subkey, M)
@@ -156,7 +156,7 @@ def foo_loss(flow, X):
 
 def test_ad_performance(benchmark, flow_setup):
     flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     M = 128
     keys = jax.random.split(subkey, M)
@@ -177,7 +177,7 @@ def test_flow_interface(flow_setup):
 
 def test_flow_sample_n(flow_setup):
     flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     keys = jax.random.split(key, 10)
     samples = jax.vmap(flow.sample)(keys)
     assert samples.shape == (10,) + flow.event_shape
@@ -190,7 +190,7 @@ def test_flow_sample_n(flow_setup):
 
 def test_flow_log_prob_batched(flow_setup):
     flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     keys = jax.random.split(key, 10)
     samples = jax.vmap(flow.sample)(keys)
     log_probs = jax.vmap(flow.log_prob)(samples)
@@ -205,7 +205,7 @@ def test_flow_log_prob_batched(flow_setup):
 
 def test_sample_n_performance(benchmark, flow_setup):
     flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
 
     def run_sample_n():
         keys = jax.random.split(key, 128)
@@ -218,7 +218,7 @@ def test_sample_n_performance(benchmark, flow_setup):
 
 def test_sample_n_and_log_prob_performance(benchmark, flow_setup):
     flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
 
     def run_sample_n_and_log_prob():
         keys = jax.random.split(key, 128)
@@ -253,7 +253,7 @@ def test_hutchinson_flow(hutchinson_flow_setup, flow_setup):
     """Test that Hutchinson estimator gives close results to exact computation."""
     hutchinson_flow = hutchinson_flow_setup
     exact_flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey1, subkey2 = jax.random.split(key, 3)
 
     x0 = exact_flow.base_distribution.sample(key=subkey1)
@@ -274,7 +274,7 @@ def test_hutchinson_flow_batched(hutchinson_flow_setup, flow_setup):
     """Test Hutchinson estimator with batched inputs."""
     hutchinson_flow = hutchinson_flow_setup
     exact_flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey1, subkey2 = jax.random.split(key, 3)
     M = 10
 
@@ -297,7 +297,7 @@ def test_hutchinson_log_prob(hutchinson_flow_setup, flow_setup):
     """Test Hutchinson log_prob method."""
     hutchinson_flow = hutchinson_flow_setup
     exact_flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey1, subkey2 = jax.random.split(key, 3)
 
     x0 = exact_flow.base_distribution.sample(key=subkey1)
@@ -316,7 +316,7 @@ def test_hutchinson_log_prob(hutchinson_flow_setup, flow_setup):
 def test_hutchinson_distreqx_interface(hutchinson_flow_setup):
     """Test that Hutchinson flow works with distreqx sampling interface."""
     flow = hutchinson_flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
 
     # sample_and_log_prob should work with Hutchinson
     keys = jax.random.split(key, 10)
@@ -328,7 +328,7 @@ def test_hutchinson_distreqx_interface(hutchinson_flow_setup):
 def test_hutchinson_performance(benchmark, hutchinson_flow_setup):
     """Benchmark Hutchinson estimator."""
     flow = hutchinson_flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey1, subkey2 = jax.random.split(key, 3)
     x0 = flow.base_distribution.sample(key=subkey1)
 
@@ -375,7 +375,7 @@ def test_analytical_flow(analytical_flow_setup, flow_setup):
     """Test that analytical divergence gives identical results to exact computation."""
     analytical_flow = analytical_flow_setup
     exact_flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
 
     x0 = exact_flow.base_distribution.sample(key=subkey)
@@ -391,7 +391,7 @@ def test_analytical_flow_batched(analytical_flow_setup, flow_setup):
     """Test analytical divergence with batched inputs."""
     analytical_flow = analytical_flow_setup
     exact_flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     M = 10
 
@@ -411,7 +411,7 @@ def test_analytical_log_prob(analytical_flow_setup, flow_setup):
     """Test analytical log_prob method."""
     analytical_flow = analytical_flow_setup
     exact_flow = flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
 
     x0 = exact_flow.base_distribution.sample(key=subkey)
@@ -426,7 +426,7 @@ def test_analytical_log_prob(analytical_flow_setup, flow_setup):
 def test_analytical_distreqx_interface(analytical_flow_setup):
     """Test that analytical flow works with distreqx sampling interface."""
     flow = analytical_flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
 
     keys = jax.random.split(key, 10)
     samples, log_probs = jax.vmap(flow.sample_and_log_prob)(keys)
@@ -437,7 +437,7 @@ def test_analytical_distreqx_interface(analytical_flow_setup):
 def test_analytical_performance(benchmark, analytical_flow_setup):
     """Benchmark analytical divergence."""
     flow = analytical_flow_setup
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     x0 = flow.base_distribution.sample(key=subkey)
 

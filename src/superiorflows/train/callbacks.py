@@ -484,7 +484,7 @@ class ESSCallback(Callback):
         keys = jax.random.split(subkey, self.n_samples)
         X, log_q = jax.vmap(flow.sample_and_log_prob)(keys)
 
-        log_p = self.target_log_prob(X)
+        log_p = jax.vmap(self.target_log_prob)(X)
         log_weights = log_p - log_q
         weights = jax.nn.softmax(log_weights)
 

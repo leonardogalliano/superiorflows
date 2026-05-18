@@ -81,7 +81,7 @@ def test_flow_with_different_solvers(base_distribution, velocity_field, solver, 
         stepsize_controller=controller,
     )
 
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     x0 = flow.base_distribution.sample(key)
 
     # Forward map
@@ -103,7 +103,7 @@ def test_solver_consistency_with_analytical(base_distribution):
     def exp_velocity(t, x, args):
         return x
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_distribution.sample(key)
     t1 = 0.5  # short time for accuracy
     true_solution = x0 * jnp.exp(t1)
@@ -143,7 +143,7 @@ def test_solver_consistency_with_analytical(base_distribution):
 
 def test_gradient_default_adjoint(base_flow):
     """Test gradient computation with default RecursiveCheckpointAdjoint."""
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     X = jax.vmap(base_flow.base_distribution.sample)(jax.random.split(key, 10))
     X1 = jax.vmap(base_flow.apply_map)(X)
 
@@ -168,7 +168,7 @@ def test_gradient_with_direct_adjoint(base_distribution, velocity_field):
         augmented_extra_args={"adjoint": dfx.DirectAdjoint()},
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     X = jax.vmap(flow.base_distribution.sample)(jax.random.split(key, 5))
     X1 = jax.vmap(flow.apply_map)(X)
 
@@ -191,7 +191,7 @@ def test_gradient_with_direct_adjoint(base_distribution, velocity_field):
 
 def test_gradient_finite_difference_check(base_flow):
     """Verify autodiff gradient matches finite differences."""
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_flow.base_distribution.sample(key)
     x1 = base_flow.apply_map(x0)
 
@@ -235,7 +235,7 @@ def test_stepsize_controllers(base_distribution, velocity_field, controller, dt0
         dt0=dt0,
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = flow.base_distribution.sample(key)
 
     x1 = flow.apply_map(x0)
@@ -247,7 +247,7 @@ def test_stepsize_controllers(base_distribution, velocity_field, controller, dt0
 
 def test_tolerance_convergence(base_distribution, velocity_field):
     """Verify tighter tolerances produce more accurate results."""
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_distribution.sample(key)
 
     errors = []
@@ -273,7 +273,7 @@ def test_tolerance_convergence(base_distribution, velocity_field):
 
 def test_saveat_t1_only(base_flow):
     """Default: save only at t1."""
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_flow.base_distribution.sample(key)
 
     sol = base_flow.integrate(x0)
@@ -282,7 +282,7 @@ def test_saveat_t1_only(base_flow):
 
 def test_saveat_specific_times(base_flow):
     """Save at specific times."""
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_flow.base_distribution.sample(key)
 
     ts = jnp.array([0.0, 0.25, 0.5, 0.75, 1.0])
@@ -295,7 +295,7 @@ def test_saveat_specific_times(base_flow):
 
 def test_saveat_steps(base_flow):
     """Save at all integration steps."""
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_flow.base_distribution.sample(key)
 
     sol = base_flow.integrate(x0, saveat=dfx.SaveAt(steps=True), max_steps=1000)
@@ -306,7 +306,7 @@ def test_saveat_steps(base_flow):
 
 def test_saveat_dense_output(base_flow):
     """Test dense output for interpolation at arbitrary times."""
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_flow.base_distribution.sample(key)
 
     # For dense output, we need to also save at t1 to get a valid solution
@@ -351,7 +351,7 @@ def test_sphere_projection_callback():
         stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_dist.sample(key)
     # Start on unit sphere
     x0 = x0 / jnp.linalg.norm(x0)
@@ -389,7 +389,7 @@ def test_box_constraint_projection():
         stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_dist.sample(key)
 
     x1 = flow.apply_map(x0)
@@ -425,7 +425,7 @@ def test_steady_state_approach():
         stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_dist.sample(key)
 
     # After long time, should be near origin (steady state)
@@ -454,7 +454,7 @@ def test_identity_flow():
         stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_dist.sample(key)
 
     x1 = flow.apply_map(x0)
@@ -482,7 +482,7 @@ def test_high_dimensional_flow():
         stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_dist.sample(key)
 
     x1 = flow.apply_map(x0)
@@ -515,7 +515,7 @@ def test_solver_benchmark(benchmark, base_distribution, velocity_field, solver_n
         stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = flow.base_distribution.sample(key)
 
     def run():
@@ -543,7 +543,7 @@ def test_dimension_scaling_benchmark(benchmark, velocity_field, dim):
         stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_dist.sample(key)
 
     def run():
@@ -558,7 +558,7 @@ def test_dimension_scaling_benchmark(benchmark, velocity_field, dim):
 @pytest.mark.parametrize("batch_size", [1, 10, 100])
 def test_batch_size_scaling(benchmark, base_flow, batch_size):
     """Benchmark scaling with batch size."""
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     X0 = jax.vmap(base_flow.base_distribution.sample)(jax.random.split(key, batch_size))
 
     def run():
@@ -601,7 +601,7 @@ def test_augmented_solver_consistency(base_distribution, velocity_field, solver,
         augmented_stepsize_controller=controller,
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = flow.base_distribution.sample(key)
 
     # integrate only (no log prob)
@@ -635,7 +635,7 @@ def test_augmented_solver_log_prob_consistency(
         augmented_stepsize_controller=dfx.PIDController(rtol=1e-6, atol=1e-6),
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = flow.base_distribution.sample(key)
     x1 = flow.apply_map(x0)
 
@@ -661,7 +661,7 @@ def test_different_solvers_for_integrate_and_augmented(base_distribution, veloci
         augmented_stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = flow.base_distribution.sample(key)
 
     x1 = flow.apply_map(x0)
@@ -710,7 +710,7 @@ def test_velocity_with_projection_wrapper():
         stepsize_controller=dfx.PIDController(rtol=1e-6, atol=1e-6),
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_dist.sample(key)
     x0 = x0 / jnp.linalg.norm(x0)  # Start on sphere
 
@@ -746,7 +746,7 @@ def test_event_via_extra_args():
         extra_args={"event": event, "max_steps": 1000},
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_dist.sample(key)
 
     # With event, should stop early when |x| < 0.1
@@ -779,7 +779,7 @@ def test_subsaveat_monitoring_at_each_step():
         stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_dist.sample(key)
 
     sol = flow.integrate(x0, saveat=saveat)
@@ -824,7 +824,7 @@ def test_manifold_projection_monitoring():
         stepsize_controller=dfx.PIDController(rtol=1e-6, atol=1e-6),
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     x0 = base_dist.sample(key)
     x0 = x0 / jnp.linalg.norm(x0)  # Start on sphere
 
@@ -872,7 +872,7 @@ def test_hutchinson_dimension_scaling_benchmark(benchmark, dim):
         hutchinson_samples=5,
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key1, key2 = jax.random.split(key)
     x0 = base_dist.sample(key1)
 
@@ -888,7 +888,7 @@ def test_hutchinson_dimension_scaling_benchmark(benchmark, dim):
 @pytest.mark.parametrize("batch_size", [1, 10, 100])
 def test_hutchinson_batch_size_scaling(benchmark, hutchinson_flow, batch_size):
     """Benchmark Hutchinson scaling with batch size."""
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key1, key2 = jax.random.split(key)
     X0 = jax.vmap(hutchinson_flow.base_distribution.sample)(jax.random.split(key1, batch_size))
     keys = jax.random.split(key2, batch_size)
@@ -912,7 +912,7 @@ def test_hutchinson_samples_scaling(benchmark, base_distribution, velocity_field
         hutchinson_samples=hutchinson_samples,
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key1, key2 = jax.random.split(key)
     x0 = base_distribution.sample(key1)
 
@@ -948,7 +948,7 @@ def test_hutchinson_vs_exact_high_dim_comparison():
         hutchinson_samples=10,
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     key1, key2 = jax.random.split(key)
     x0 = base_dist.sample(key1)
 
