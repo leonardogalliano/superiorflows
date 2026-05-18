@@ -27,11 +27,11 @@ class MLPVelocity(eqx.Module):
 
 
 def main():
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     key, subkey = jax.random.split(key)
     velocity_field = MLPVelocity(subkey)
     base_dist = dsx.MultivariateNormalDiag(jnp.zeros(2), jnp.ones(2))
-    X = jax.random.normal(jax.random.PRNGKey(0), (10, 2))
+    X = jax.random.normal(jax.random.key(0), (10, 2))
 
     # ========================================================================
     # PROOF 1: jax.make_jaxpr shows what's actually traced

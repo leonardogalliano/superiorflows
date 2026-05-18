@@ -53,7 +53,7 @@ class UniformParticles(eqx.Module):
         self.d = d
         self.ref_species = jnp.concatenate([jnp.full(int(x * N), i, dtype=int) for i, x in enumerate(composition)])
         assert sum(composition) == 1.0
-        assert jnp.all(self.ref_species.shape[0] == N)
+        assert self.ref_species.shape[0] == N
 
     @property
     def event_shape(self):

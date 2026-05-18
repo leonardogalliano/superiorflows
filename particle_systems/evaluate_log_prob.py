@@ -211,7 +211,7 @@ def main(
         ]
 
     # ── JIT-compile log_prob ──────────────────────────────────────────
-    key = jax.random.PRNGKey(seed)
+    key = jax.random.key(seed)
 
     print("Precompiling JAX graph...")
     t_comp = time.time()

@@ -41,7 +41,7 @@ This design enables the same framework to be applied across a wide range of samp
 The library builds on the JAX ecosystem, in particular:
 - [**Equinox**](https://github.com/patrick-kidger/equinox) for model definition and PyTree-based modules
 - [**Diffrax**](https://github.com/patrick-kidger/diffrax) for continuous-time integration
-- [**Distrax**](https://github.com/google-deepmind/distrax) for probabilistic components
+- [**Distreqx**](https://github.com/hannesliik/distreqx) for probabilistic components
 - [**Optax**](https://github.com/google-deepmind/optax) for training
 - [**Orbax**](https://github.com/google/orbax) for checkpointing
 - [**Grain**](https://github.com/google/grain) for data pipelines

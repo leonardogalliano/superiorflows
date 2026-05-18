@@ -51,7 +51,7 @@ def load_trained_flow(
     base_dist = UniformParticles(N=N, d=d, L=L, composition=composition)
 
     # Model structure and Restore weights
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     velocity_field = build_velocity(config, N, d, n_species, key=key)
 
     model_params = eqx.filter(velocity_field, eqx.is_array)
@@ -171,7 +171,7 @@ def main(
     )
     run_output_dir.mkdir(parents=True, exist_ok=True)
 
-    key = jax.random.PRNGKey(seed)
+    key = jax.random.key(seed)
 
     print("Precompiling JAX graph...")
     t_comp = time.time()
