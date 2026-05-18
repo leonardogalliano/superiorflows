@@ -1,11 +1,29 @@
 from typing import Callable, Optional
 
-import distrax as dsx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 
 from superiorflows import Flow
+
+
+def _vmap_log_prob(flow, batch, key=None):
+    """Evaluate flow.log_prob over a batch, splitting keys for Hutchinson."""
+    if key is not None:
+        batch_size = jax.tree.leaves(batch)[0].shape[0]
+        keys = jax.random.split(key, batch_size)
+        return jax.vmap(lambda x, k: flow.log_prob(x, key=k))(batch, keys)
+    return jax.vmap(flow.log_prob)(batch)
+
+
+def _vmap_apply_map_and_log_prob(flow, batch, key=None):
+    """Evaluate flow.apply_map_and_log_prob over a batch, splitting keys for Hutchinson."""
+    if key is not None:
+        batch_size = jax.tree.leaves(batch)[0].shape[0]
+        keys = jax.random.split(key, batch_size)
+        return jax.vmap(lambda x, k: flow.apply_map_and_log_prob(x, key=k))(batch, keys)
+    return jax.vmap(flow.apply_map_and_log_prob)(batch)
+
 
 __all__ = [
     "MaximumLikelihoodLoss",
@@ -30,14 +48,14 @@ class MaximumLikelihoodLoss(eqx.Module):
         >>> loss = loss_fn(velocity_field, batch, key=jax.random.key(0))
     """
 
-    base_distribution: dsx.Distribution
+    base_distribution: eqx.Module
     flow_kwargs: dict = eqx.field(static=True)
 
     def __init__(self, base_distribution, **flow_kwargs):
         """Initialize the loss module.
 
         Args:
-            base_distribution: A distrax Distribution for the flow base.
+            base_distribution: The base (prior) distribution for the flow.
             **flow_kwargs: Passed to `Flow(...)` (e.g., `dt0`, `hutchinson_samples`).
         """
         self.base_distribution = base_distribution
@@ -61,7 +79,7 @@ class MaximumLikelihoodLoss(eqx.Module):
             base_distribution=self.base_distribution,
             **self.flow_kwargs,
         )
-        return -jnp.mean(flow.log_prob(batch, key=key)), {}
+        return -jnp.mean(_vmap_log_prob(flow, batch, key=key)), {}
 
 
 class EnergyBasedLoss(eqx.Module):
@@ -83,16 +101,16 @@ class EnergyBasedLoss(eqx.Module):
         >>> loss = loss_fn(velocity_field, base_samples, key=jax.random.key(0))
     """
 
-    base_distribution: dsx.Distribution
-    target_distribution: dsx.Distribution
+    base_distribution: eqx.Module
+    target_distribution: eqx.Module
     flow_kwargs: dict = eqx.field(static=True)
 
     def __init__(self, base_distribution, target_distribution, **flow_kwargs):
         """Initialize the loss module.
 
         Args:
-            base_distribution: A distrax Distribution for the flow base.
-            target_distribution: A distrax Distribution for the target.
+            base_distribution: The base distribution for the flow.
+            target_distribution: The target distribution.
             **flow_kwargs: Passed to `Flow(...)`.
         """
         self.base_distribution = base_distribution
@@ -118,14 +136,7 @@ class EnergyBasedLoss(eqx.Module):
         )
 
         x0 = batch
-
-        if key is not None:
-            batch_size = jax.tree.leaves(batch)[0].shape[0]
-            keys = jax.random.split(key, batch_size)
-            x1, logq = jax.vmap(lambda x, k: flow.apply_map_and_log_prob(x, key=k))(x0, keys)
-        else:
-            x1, logq = jax.vmap(flow.apply_map_and_log_prob)(x0)
-
+        x1, logq = _vmap_apply_map_and_log_prob(flow, x0, key=key)
         logp = jax.vmap(self.target_distribution.log_prob)(x1)
         return jnp.mean(logq - logp), {}
 
@@ -157,15 +168,15 @@ class KullbackLeiblerLoss(eqx.Module):
 
     mle_loss: MaximumLikelihoodLoss
     energy_loss: EnergyBasedLoss
-    base_distribution: dsx.Distribution
+    base_distribution: eqx.Module
     alpha: float
 
     def __init__(self, base_distribution, target_distribution, alpha=0.5, **flow_kwargs):
         """Initialize the hybrid loss.
 
         Args:
-            base_distribution: A distrax Distribution for the flow base.
-            target_distribution: A distrax Distribution for the target.
+            base_distribution: The base distribution for the flow.
+            target_distribution: The target distribution.
             alpha: Blending coefficient. 1.0 = pure MLE, 0.0 = pure energy-based.
             **flow_kwargs: Passed to both component losses.
         """
@@ -189,7 +200,8 @@ class KullbackLeiblerLoss(eqx.Module):
         x1 = batch
         batch_size = jax.tree.leaves(batch)[0].shape[0]
         key1, key2, key3 = jax.random.split(key, 3)
-        x0 = self.base_distribution.sample(seed=key1, sample_shape=(batch_size,))
+        keys = jax.random.split(key1, batch_size)
+        x0 = jax.vmap(self.base_distribution.sample)(keys)
         mle_term, _ = self.mle_loss(velocity_field, x1, key=key2)
         energy_term, _ = self.energy_loss(velocity_field, x0, key=key3)
         return self.alpha * mle_term + (1 - self.alpha) * energy_term, {}

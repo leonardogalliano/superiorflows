@@ -228,7 +228,8 @@ class BoltzmannCallback(Callback):
 
         try:
             key, subkey = jax.random.split(trainer.key)
-            samples = flow.sample(seed=subkey, sample_shape=(self.n_samples,))
+            keys = jax.random.split(subkey, self.n_samples)
+            samples = jax.vmap(flow.sample)(keys)
 
             def single_energy(sample: ParticleSystem):
                 return self.energy_fn(sample.positions, sample.species)

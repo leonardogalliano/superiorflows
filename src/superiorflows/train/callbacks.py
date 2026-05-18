@@ -438,7 +438,7 @@ class ESSCallback(Callback):
     (``LoggerCallback``, ``TensorBoardLogger``) automatically pick it up.
 
     Args:
-        target_log_prob: Callable ``(x) -> log_prob``. Can be a distrax
+        target_log_prob: Callable ``(x) -> log_prob``. Can be a distribution's
             distribution's ``.log_prob`` method, an unnormalised energy
             function, or any ``(batch,) -> (batch,)`` callable.
         base_distribution: The base/prior distribution for the flow.
@@ -481,7 +481,8 @@ class ESSCallback(Callback):
         )
 
         key, subkey = jax.random.split(trainer.key)
-        X, log_q = flow.sample_and_log_prob(seed=subkey, sample_shape=(self.n_samples,))
+        keys = jax.random.split(subkey, self.n_samples)
+        X, log_q = jax.vmap(flow.sample_and_log_prob)(keys)
 
         log_p = self.target_log_prob(X)
         log_weights = log_p - log_q

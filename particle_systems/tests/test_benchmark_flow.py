@@ -85,7 +85,8 @@ def test_benchmark_sample(benchmark, base_distribution, mlp_velocity, solver_nam
     # JIT compile the sample function
     @jax.jit
     def sample_fn(key):
-        return flow.sample(seed=key, sample_shape=(batch_size,))
+        keys = jax.random.split(key, batch_size)
+        return jax.vmap(flow.sample)(keys)
 
     key = jax.random.key(42)
     # Warmup and compile
@@ -112,7 +113,8 @@ def test_benchmark_sample_and_log_prob(
     # JIT compile
     @jax.jit
     def sample_lp_fn(key):
-        return flow.sample_and_log_prob(seed=key, sample_shape=(batch_size,))
+        keys = jax.random.split(key, batch_size)
+        return jax.vmap(flow.sample_and_log_prob)(keys)
 
     key = jax.random.key(42)
     # Warmup and compile
@@ -147,7 +149,7 @@ def test_benchmark_log_prob(benchmark, base_distribution, mlp_velocity, solver_n
 
     @jax.jit
     def log_prob_fn(b):
-        return flow.log_prob(b)
+        return jax.vmap(flow.log_prob)(b)
 
     # Warmup and compile
     lps = log_prob_fn(eval_batch)
@@ -171,7 +173,8 @@ def test_profile_sample_and_log_prob(base_distribution, mlp_velocity, solver_nam
     # JIT compile
     @jax.jit
     def sample_lp_fn(key):
-        return flow.sample_and_log_prob(seed=key, sample_shape=(batch_size,))
+        keys = jax.random.split(key, batch_size)
+        return jax.vmap(flow.sample_and_log_prob)(keys)
 
     key = jax.random.key(42)
     # Warmup and compile

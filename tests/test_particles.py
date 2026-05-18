@@ -1,7 +1,6 @@
 from typing import Optional
 
 import diffrax as dfx
-import distrax as dsx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -39,7 +38,7 @@ class ParticlesVelocityField(eqx.Module):
         )
 
 
-class UniformSystem(eqx.Module, dsx.Distribution):
+class UniformSystem(eqx.Module):
     box: jnp.ndarray
     ref_species: jnp.ndarray
     temperature: Optional[float] = eqx.field(static=True, default=None)
@@ -58,40 +57,26 @@ class UniformSystem(eqx.Module, dsx.Distribution):
             temperature=None,
         )
 
-    def _sample_n(self, key, n):
-        N = self.ref_species.shape[0]
-        d = self.box.shape[0]
-
+    def sample(self, key):
         k1, k2 = jax.random.split(key)
-
-        pos = jax.random.uniform(k1, shape=(n, N, d), minval=0.0, maxval=self.box)
-
-        keys_perm = jax.random.split(k2, n)
-
-        def _permute(k):
-            return jax.random.permutation(k, self.ref_species)
-
-        species = jax.vmap(_permute)(keys_perm)
-
-        batched_box = jnp.broadcast_to(self.box, (n, d))
-
-        return System(positions=pos, species=species, box=batched_box, temperature=self.temperature)
+        pos = jax.random.uniform(k1, shape=(self.ref_species.shape[0], self.box.shape[0]), minval=0.0, maxval=self.box)
+        species = jax.random.permutation(k2, self.ref_species)
+        return System(positions=pos, species=species, box=self.box, temperature=self.temperature)
 
     def log_prob(self, value: System):
         N = self.ref_species.shape[0]
-
         vol_log = jnp.sum(jnp.log(self.box))
         base_log_prob = -N * vol_log
-
         in_box = jnp.all((value.positions >= 0.0) & (value.positions <= self.box), axis=(-1, -2))
-
         sorted_val_species = jnp.sort(value.species, axis=-1)
         sorted_ref_species = jnp.sort(self.ref_species, axis=-1)
-
         valid_composition = jnp.all(jnp.isclose(sorted_val_species, sorted_ref_species), axis=-1)
-
         is_valid = in_box & valid_composition
         return jnp.where(is_valid, base_log_prob, -jnp.inf)
+
+    def sample_and_log_prob(self, key):
+        x = self.sample(key)
+        return x, self.log_prob(x)
 
 
 @pytest.fixture
@@ -112,8 +97,9 @@ def test_uniform_box_distribution(uniform_box_distribution_setup):
     key = jax.random.PRNGKey(0)
     key, subkey = jax.random.split(key)
     M = 10
-    X = dist.sample(seed=subkey, sample_shape=(M,))
-    log_probs = dist.log_prob(X)
+    keys = jax.random.split(subkey, M)
+    X = jax.vmap(dist.sample)(keys)
+    log_probs = jax.vmap(dist.log_prob)(X)
     assert X.positions.shape == (M, N, d)
     assert X.species.shape == (M, N)
     assert X.box.shape == (M, d)
@@ -136,7 +122,7 @@ def test_particles_velocity_field(uniform_box_distribution_setup, particles_velo
     t = 1.0
     key = jax.random.PRNGKey(0)
     key, subkey = jax.random.split(key)
-    x = uniform_box_distribution_setup.sample(seed=subkey)
+    x = uniform_box_distribution_setup.sample(key=subkey)
 
     dynamic_mask = eqx.tree_at(lambda x: (x.positions, x.species, x.box), x, replace=(True, True, False))
     y, ctx = eqx.partition(x, dynamic_mask)
@@ -147,7 +133,8 @@ def test_particles_velocity_field(uniform_box_distribution_setup, particles_velo
     assert v.box is None
     M = 10
     key, subkey = jax.random.split(key)
-    X = uniform_box_distribution_setup.sample(seed=subkey, sample_shape=(M,))
+    keys = jax.random.split(subkey, M)
+    X = jax.vmap(uniform_box_distribution_setup.sample)(keys)
 
     Y, Ctx = eqx.partition(X, eqx.tree_at(lambda x: (x.positions, x.species, x.box), X, replace=(True, True, False)))
 
@@ -164,7 +151,7 @@ def particles_flow_setup(uniform_box_distribution_setup, particles_velocity_fiel
     key = jax.random.PRNGKey(0)
     key, subkey = jax.random.split(key)
     dynamic_mask = eqx.tree_at(
-        lambda x: (x.positions, x.species, x.box), dist.sample(seed=subkey), replace=(True, True, False)
+        lambda x: (x.positions, x.species, x.box), dist.sample(key=subkey), replace=(True, True, False)
     )
     flow = Flow(
         velocity_field=velocity_field,
@@ -179,7 +166,7 @@ def test_particles_flow(particles_flow_setup):
     flow = particles_flow_setup
     key = jax.random.PRNGKey(0)
     key, subkey = jax.random.split(key)
-    x0 = particles_flow_setup.base_distribution.sample(seed=subkey)
+    x0 = particles_flow_setup.base_distribution.sample(key=subkey)
     x1 = flow.apply_map(x0)
     assert jax.tree.map(
         lambda x, y: jnp.allclose(x, y, atol=1e-5, rtol=1e-5),
@@ -200,7 +187,8 @@ def test_particles_flow_batched(particles_flow_setup):
     key = jax.random.PRNGKey(0)
     key, subkey = jax.random.split(key)
     M = 10
-    X0 = flow.base_distribution.sample(seed=subkey, sample_shape=(M,))
+    keys = jax.random.split(subkey, M)
+    X0 = jax.vmap(flow.base_distribution.sample)(keys)
     X1 = jax.vmap(flow.apply_map)(X0)
     assert X1.positions.shape == (M,) + X0.positions.shape[1:]
     assert jax.tree.map(
@@ -211,7 +199,7 @@ def test_particles_flow_batched(particles_flow_setup):
     X1, logq1 = jax.vmap(flow.apply_map_and_log_prob)(X0)
     assert X1.positions.shape == (M,) + X0.positions.shape[1:]
     assert logq1.shape == (M,)
-    assert flow.log_prob(X1).shape == (M,)
+    assert jax.vmap(flow.log_prob)(X1).shape == (M,)
     assert jax.tree.map(
         lambda x, y: jnp.allclose(x, y, atol=1e-5, rtol=1e-5),
         jax.vmap(flow.apply_inverse_map)(X1),
@@ -261,7 +249,7 @@ def test_particle_flow_performance(benchmark, particles_flow_setup):
     flow = particles_flow_setup
     key = jax.random.PRNGKey(0)
     key, subkey = jax.random.split(key)
-    x0 = flow.base_distribution.sample(seed=subkey)
+    x0 = flow.base_distribution.sample(key=subkey)
 
     def run_apply_map_and_log_prob():
         x1, logq1 = flow.apply_map_and_log_prob(x0)
@@ -277,7 +265,8 @@ def test_particle_flow_batched_performance(benchmark, particles_flow_setup):
     key = jax.random.PRNGKey(0)
     key, subkey = jax.random.split(key)
     M = 128
-    X0 = flow.base_distribution.sample(seed=subkey, sample_shape=(M,))
+    keys = jax.random.split(subkey, M)
+    X0 = jax.vmap(flow.base_distribution.sample)(keys)
 
     def run_apply_map_and_log_prob():
         X1, logq1 = jax.vmap(flow.apply_map_and_log_prob)(X0)
@@ -290,7 +279,7 @@ def test_particle_flow_batched_performance(benchmark, particles_flow_setup):
 
 @eqx.filter_jit
 def foo_loss(flow, X):
-    logq = flow.log_prob(X)
+    logq = jax.vmap(flow.log_prob)(X)
     return jnp.mean(logq)
 
 
@@ -299,7 +288,8 @@ def test_particle_ad_performance(benchmark, particles_flow_setup):
     key = jax.random.PRNGKey(0)
     key, subkey = jax.random.split(key)
     M = 128
-    X0 = flow.base_distribution.sample(seed=subkey, sample_shape=(M,))
+    keys = jax.random.split(subkey, M)
+    X0 = jax.vmap(flow.base_distribution.sample)(keys)
     X = jax.vmap(flow.apply_map)(X0)
 
     def run_ad():
@@ -321,7 +311,7 @@ def hutchinson_particles_flow_setup(uniform_box_distribution_setup, particles_ve
     key = jax.random.PRNGKey(0)
     key, subkey = jax.random.split(key)
     dynamic_mask = eqx.tree_at(
-        lambda x: (x.positions, x.species, x.box), dist.sample(seed=subkey), replace=(True, True, False)
+        lambda x: (x.positions, x.species, x.box), dist.sample(key=subkey), replace=(True, True, False)
     )
     flow = Flow(
         velocity_field=velocity_field,
@@ -340,7 +330,7 @@ def test_hutchinson_particles_flow(hutchinson_particles_flow_setup, particles_fl
     key = jax.random.PRNGKey(0)
     key, subkey1, subkey2 = jax.random.split(key, 3)
 
-    x0 = exact_flow.base_distribution.sample(seed=subkey1)
+    x0 = exact_flow.base_distribution.sample(key=subkey1)
 
     # Exact result
     x1_exact, logq1_exact = exact_flow.apply_map_and_log_prob(x0)
@@ -362,8 +352,8 @@ def test_hutchinson_particles_flow_batched(hutchinson_particles_flow_setup, part
     key = jax.random.PRNGKey(0)
     key, subkey1, subkey2 = jax.random.split(key, 3)
     M = 10
-
-    X0 = exact_flow.base_distribution.sample(seed=subkey1, sample_shape=(M,))
+    keys = jax.random.split(subkey1, M)
+    X0 = jax.vmap(exact_flow.base_distribution.sample)(keys)
 
     # Exact results
     X1_exact, logq1_exact = jax.vmap(exact_flow.apply_map_and_log_prob)(X0)
@@ -382,7 +372,7 @@ def test_hutchinson_particles_performance(benchmark, hutchinson_particles_flow_s
     flow = hutchinson_particles_flow_setup
     key = jax.random.PRNGKey(0)
     key, subkey1, subkey2 = jax.random.split(key, 3)
-    x0 = flow.base_distribution.sample(seed=subkey1)
+    x0 = flow.base_distribution.sample(key=subkey1)
 
     def run_apply_map_and_log_prob():
         x1, logq1 = flow.apply_map_and_log_prob(x0, key=subkey2)

@@ -5,7 +5,7 @@ from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import diffrax as dfx
-import distrax as dsx
+import distreqx.distributions as dsx
 import equinox as eqx
 import grain
 import jax
@@ -79,7 +79,7 @@ def target_dist():
     locs = 5.0 * jnp.stack([jnp.sin(angles), jnp.cos(angles)], axis=1)
     return dsx.MixtureSameFamily(
         mixture_distribution=dsx.Categorical(probs=jnp.ones(8) / 8),
-        components_distribution=dsx.MultivariateNormalDiag(loc=locs, scale_diag=jnp.full((8, 2), 0.5)),
+        components_distribution=eqx.filter_vmap(dsx.MultivariateNormalDiag)(locs, jnp.full((8, 2), 0.5)),
     )
 
 
@@ -111,7 +111,7 @@ class TestMaximumLikelihoodLoss:
     def test_forward_pass(self, base_dist, target_dist, model):
         """Test loss computes and returns scalar."""
         loss_fn = MaximumLikelihoodLoss(base_dist)
-        batch = target_dist.sample(seed=jax.random.key(0), sample_shape=(16,))
+        batch = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(0), 16))
         loss, _aux = loss_fn(model, batch, key=jax.random.key(1))
         assert loss.shape == ()
         assert jnp.isfinite(loss)
@@ -119,7 +119,7 @@ class TestMaximumLikelihoodLoss:
     def test_has_gradient(self, base_dist, target_dist, model):
         """Test loss is differentiable."""
         loss_fn = MaximumLikelihoodLoss(base_dist)
-        batch = target_dist.sample(seed=jax.random.key(0), sample_shape=(16,))
+        batch = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(0), 16))
 
         @eqx.filter_jit
         def loss_and_grad(m):
@@ -164,7 +164,7 @@ class TestEnergyBasedLoss:
     def test_forward_pass(self, base_dist, target_dist, model):
         """Test loss computes and returns scalar."""
         loss_fn = EnergyBasedLoss(base_dist, target_dist)
-        batch = base_dist.sample(seed=jax.random.key(0), sample_shape=(16,))
+        batch = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(0), 16))
         loss, _aux = loss_fn(model, batch, key=jax.random.key(1))
         assert loss.shape == ()
         assert jnp.isfinite(loss)
@@ -172,7 +172,7 @@ class TestEnergyBasedLoss:
     def test_has_gradient(self, base_dist, target_dist, model):
         """Test loss is differentiable."""
         loss_fn = EnergyBasedLoss(base_dist, target_dist)
-        batch = base_dist.sample(seed=jax.random.key(0), sample_shape=(16,))
+        batch = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(0), 16))
 
         @eqx.filter_jit
         def loss_and_grad(m):
@@ -196,7 +196,7 @@ class TestKullbackLeiblerLoss:
 
     def test_alpha_bounds(self, base_dist, target_dist, model):
         """Test alpha=1 is pure MLE, alpha=0 is pure energy-based."""
-        batch = target_dist.sample(seed=jax.random.key(0), sample_shape=(16,))
+        batch = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(0), 16))
 
         loss_mle = MaximumLikelihoodLoss(base_dist)
         loss_hybrid_alpha1 = KullbackLeiblerLoss(base_dist, target_dist, alpha=1.0)
@@ -209,7 +209,7 @@ class TestKullbackLeiblerLoss:
     def test_forward_pass(self, base_dist, target_dist, model):
         """Test loss computes and returns scalar."""
         loss_fn = KullbackLeiblerLoss(base_dist, target_dist, alpha=0.5)
-        batch = target_dist.sample(seed=jax.random.key(0), sample_shape=(16,))
+        batch = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(0), 16))
         loss, _aux = loss_fn(model, batch, key=jax.random.key(1))
         assert loss.shape == ()
         assert jnp.isfinite(loss)
@@ -217,7 +217,7 @@ class TestKullbackLeiblerLoss:
     def test_has_gradient(self, base_dist, target_dist, model):
         """Test loss is differentiable."""
         loss_fn = KullbackLeiblerLoss(base_dist, target_dist, alpha=0.5)
-        batch = target_dist.sample(seed=jax.random.key(0), sample_shape=(16,))
+        batch = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(0), 16))
 
         @eqx.filter_jit
         def loss_and_grad(m):
@@ -515,7 +515,7 @@ class TestTensorBoardLogger:
         loss_fn = MaximumLikelihoodLoss(base_dist)
         optimizer = optax.adam(1e-3)
 
-        val_data = [target_dist.sample(seed=jax.random.key(1), sample_shape=(32,))]
+        val_data = [jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(1), 32))]
         val_cb = ValidationCallback(val_data=val_data, loss_module=loss_fn, val_freq=5)
 
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[val_cb, tb])
@@ -591,7 +591,7 @@ class TestTrainerTraining:
         optimizer = optax.adam(1e-2)
         loss_fn = MaximumLikelihoodLoss(base_dist)
 
-        test_batch = target_dist.sample(seed=jax.random.key(99), sample_shape=(64,))
+        test_batch = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(99), 64))
         initial_loss, _ = loss_fn(model, test_batch, key=jax.random.key(100))
 
         trainer = Trainer(model, optimizer, loss_fn, seed=0)
@@ -631,7 +631,7 @@ class TestTrainerTraining:
                 if "val_loss" in logs and step % 5 == 0:
                     val_steps.append(step)
 
-        val_data = [target_dist.sample(seed=jax.random.key(1), sample_shape=(32,))]
+        val_data = [jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(1), 32))]
         val_cb = ValidationCallback(val_data=val_data, loss_module=loss_fn, val_freq=5)
 
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[val_cb, ValTracker()])
@@ -787,7 +787,7 @@ class ParticleVelocityFieldTrainable(eqx.Module):
         )
 
 
-class UniformParticleDistribution(eqx.Module, dsx.Distribution):
+class UniformParticleDistribution(eqx.Module):
     """Uniform distribution over particle systems in a box."""
 
     box: jnp.ndarray
@@ -803,26 +803,28 @@ class UniformParticleDistribution(eqx.Module, dsx.Distribution):
             temperature=None,
         )
 
-    def _sample_n(self, key, n):
+    def sample(self, key):
         N = self.ref_species.shape[0]
         d = self.box.shape[0]
         k1, k2 = jax.random.split(key)
-        pos = jax.random.uniform(k1, shape=(n, N, d), minval=0.0, maxval=self.box)
-        keys_perm = jax.random.split(k2, n)
-        species = jax.vmap(lambda k: jax.random.permutation(k, self.ref_species))(keys_perm)
-        batched_box = jnp.broadcast_to(self.box, (n, d))
-        return ParticleSystem(positions=pos, species=species, box=batched_box, temperature=self.temperature)
+        pos = jax.random.uniform(k1, shape=(N, d), minval=0.0, maxval=self.box)
+        species = jax.random.permutation(k2, self.ref_species)
+        return ParticleSystem(positions=pos, species=species, box=self.box, temperature=self.temperature)
 
     def log_prob(self, value: ParticleSystem):
         N = self.ref_species.shape[0]
         vol_log = jnp.sum(jnp.log(self.box))
         base_log_prob = -N * vol_log
-        in_box = jnp.all((value.positions >= 0.0) & (value.positions <= self.box), axis=(-1, -2))
-        sorted_val = jnp.sort(value.species, axis=-1)
-        sorted_ref = jnp.sort(self.ref_species, axis=-1)
-        valid_composition = jnp.all(jnp.isclose(sorted_val, sorted_ref), axis=-1)
+        in_box = jnp.all((value.positions >= 0.0) & (value.positions <= self.box))
+        sorted_val = jnp.sort(value.species)
+        sorted_ref = jnp.sort(self.ref_species)
+        valid_composition = jnp.all(jnp.isclose(sorted_val, sorted_ref))
         is_valid = in_box & valid_composition
         return jnp.where(is_valid, base_log_prob, -jnp.inf)
+
+    def sample_and_log_prob(self, key):
+        x = self.sample(key)
+        return x, self.log_prob(x)
 
 
 class TestTrainerWithParticleSystems:
@@ -841,7 +843,7 @@ class TestTrainerWithParticleSystems:
         base_dist = UniformParticleDistribution(box=box, ref_species=ref_species, temperature=1.0)
         velocity_field = ParticleVelocityFieldTrainable(params=jax.random.normal(k2, (d, d)))
 
-        sample = base_dist.sample(seed=jax.random.key(99))
+        sample = base_dist.sample(jax.random.key(99))
         dynamic_mask = eqx.tree_at(
             lambda x: (x.positions, x.species, x.box),
             sample,
@@ -884,7 +886,7 @@ class TestTrainerWithParticleSystems:
             stepsize_controller=dfx.ConstantStepSize(),
             dt0=0.1,
         )
-        x0 = base_dist.sample(seed=jax.random.key(1))
+        x0 = base_dist.sample(jax.random.key(1))
         x1 = flow.apply_map(x0)
         assert x1.positions.shape == x0.positions.shape
         assert jnp.all(jnp.isfinite(x1.positions))
@@ -925,7 +927,7 @@ class TestTrainerWithParticleSystems:
             dt0=0.1,
         )
 
-        x0 = base_dist.sample(seed=jax.random.key(0))
+        x0 = base_dist.sample(jax.random.key(0))
         x1, logq = flow.apply_map_and_log_prob(x0)
 
         assert jnp.all(jnp.isfinite(x1.positions))
@@ -975,7 +977,7 @@ class TestEndToEndTraining:
         assert trainer.step == 20
 
         flow = Flow(velocity_field=trained_model, base_distribution=base_dist)
-        x0 = base_dist.sample(seed=jax.random.key(1), sample_shape=(10,))
+        x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(1), 10))
         x1 = jax.vmap(flow.apply_map)(x0)
         assert x1.shape == (10, 2)
         assert jnp.all(jnp.isfinite(x1))
@@ -993,7 +995,7 @@ class TestEndToEndTraining:
         assert trainer.step == 20
 
         flow = Flow(velocity_field=trained_model, base_distribution=base_dist)
-        x0 = base_dist.sample(seed=jax.random.key(1), sample_shape=(10,))
+        x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(1), 10))
         x1 = jax.vmap(flow.apply_map)(x0)
         assert x1.shape == (10, 2)
         assert jnp.all(jnp.isfinite(x1))
@@ -1011,7 +1013,7 @@ class TestEndToEndTraining:
         assert trainer.step == 20
 
         flow = Flow(velocity_field=trained_model, base_distribution=base_dist)
-        x0 = base_dist.sample(seed=jax.random.key(1), sample_shape=(10,))
+        x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(1), 10))
         x1 = jax.vmap(flow.apply_map)(x0)
         assert x1.shape == (10, 2)
         assert jnp.all(jnp.isfinite(x1))
@@ -1042,12 +1044,13 @@ class TestHutchinsonTraining:
             base_distribution=base_dist,
             hutchinson_samples=5,
         )
-        x0 = base_dist.sample(seed=jax.random.key(1), sample_shape=(5,))
+        x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(1), 5))
         x1 = jax.vmap(flow.apply_map)(x0)
         assert x1.shape == (5, 2)
         assert jnp.all(jnp.isfinite(x1))
 
-        logp = flow.log_prob(x1, key=jax.random.key(2))
+        keys_lp = jax.random.split(jax.random.key(2), 5)
+        logp = jax.vmap(lambda x, k: flow.log_prob(x, key=k))(x1, keys_lp)
         assert logp.shape == (5,)
         assert jnp.all(jnp.isfinite(logp))
 
@@ -1068,7 +1071,7 @@ class TestHutchinsonTraining:
             base_distribution=base_dist,
             hutchinson_samples=3,
         )
-        x0 = base_dist.sample(seed=jax.random.key(1), sample_shape=(5,))
+        x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(1), 5))
         keys = jax.random.split(jax.random.key(2), 5)
         x1, logq = jax.vmap(lambda x, k: flow.apply_map_and_log_prob(x, key=k))(x0, keys)
         assert x1.shape == (5, 2)
@@ -1112,7 +1115,7 @@ class TestHutchinsonParticleTraining:
         dataset_hutch = grain.MapDataset.source(source_hutch).repeat()
         trained_hutch = trainer_hutch.train(dataset_hutch, max_steps=20)
 
-        x0 = base_dist.sample(seed=jax.random.key(99), sample_shape=(10,))
+        x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(99), 10))
 
         flow_exact = Flow(velocity_field=trained_exact, base_distribution=base_dist)
         flow_hutch = Flow(
@@ -1129,8 +1132,9 @@ class TestHutchinsonParticleTraining:
 
         assert jnp.abs(jnp.mean(x1_exact) - jnp.mean(x1_hutch)) < 5.0
 
-        logp_exact = flow_exact.log_prob(x1_exact)
-        logp_hutch = flow_hutch.log_prob(x1_hutch, key=jax.random.key(100))
+        logp_exact = jax.vmap(flow_exact.log_prob)(x1_exact)
+        keys_hutch = jax.random.split(jax.random.key(100), 10)
+        logp_hutch = jax.vmap(lambda x, k: flow_hutch.log_prob(x, key=k))(x1_hutch, keys_hutch)
         assert jnp.all(jnp.isfinite(logp_exact))
         assert jnp.all(jnp.isfinite(logp_hutch))
 
@@ -1183,12 +1187,12 @@ class TestAnalyticalDivergenceTraining:
             base_distribution=base_dist,
             divergence_fn=_linear_divergence_fn,
         )
-        x0 = base_dist.sample(seed=jax.random.key(1), sample_shape=(5,))
+        x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(1), 5))
         x1 = jax.vmap(flow.apply_map)(x0)
         assert x1.shape == (5, 2)
         assert jnp.all(jnp.isfinite(x1))
 
-        logp = flow.log_prob(x1)
+        logp = jax.vmap(flow.log_prob)(x1)
         assert logp.shape == (5,)
         assert jnp.all(jnp.isfinite(logp))
 
@@ -1210,7 +1214,7 @@ class TestAnalyticalDivergenceTraining:
             base_distribution=base_dist,
             divergence_fn=_linear_divergence_fn,
         )
-        x0 = base_dist.sample(seed=jax.random.key(1), sample_shape=(5,))
+        x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(1), 5))
         x1, logq = jax.vmap(flow.apply_map_and_log_prob)(x0)
         assert x1.shape == (5, 2)
         assert logq.shape == (5,)
@@ -1233,7 +1237,7 @@ class TestAnalyticalDivergenceTraining:
     def test_analytical_gives_same_as_exact(self, base_dist, target_dist):
         """Verify analytical divergence training produces same loss as exact."""
         model = LinearVelocity(dim=2, key=jax.random.key(42))
-        batch = target_dist.sample(seed=jax.random.key(0), sample_shape=(16,))
+        batch = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(0), 16))
 
         loss_exact = MaximumLikelihoodLoss(base_dist)
         loss_analytical = MaximumLikelihoodLoss(base_dist, divergence_fn=_linear_divergence_fn)

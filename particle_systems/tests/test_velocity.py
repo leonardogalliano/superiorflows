@@ -97,6 +97,6 @@ def test_flow_log_prob_single(flow, trajectory_batch):
 
 def test_flow_log_prob_batched(flow, trajectory_batch):
     """log_prob on a batch of frames should return finite values for each."""
-    lp = flow.log_prob(trajectory_batch)
+    lp = jax.vmap(flow.log_prob)(trajectory_batch)
     assert lp.shape == (8,)
     assert jnp.all(jnp.isfinite(lp))

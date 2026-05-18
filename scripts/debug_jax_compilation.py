@@ -12,7 +12,7 @@ Run with: uv run python scripts/debug_jax_compilation.py
 import time
 
 import diffrax as dfx
-import distrax as dsx
+import distreqx.distributions as dsx
 import equinox as eqx
 import jax
 import jax.numpy as jnp

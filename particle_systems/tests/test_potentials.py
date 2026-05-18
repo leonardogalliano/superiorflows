@@ -406,7 +406,7 @@ def test_boltzmann_log_prob_is_minus_energy_over_T():
 def test_boltzmann_unsampleable(boltzmann_setup):
     """Sampling should raise NotImplementedError."""
     with pytest.raises(NotImplementedError):
-        boltzmann_setup.sample(seed=jax.random.PRNGKey(0))
+        boltzmann_setup.sample(jax.random.PRNGKey(0))
 
 
 def test_boltzmann_event_shape(boltzmann_setup):
@@ -418,7 +418,7 @@ def test_boltzmann_event_shape(boltzmann_setup):
 
 
 def test_boltzmann_batched(boltzmann_setup):
-    """log_prob should handle batched samples directly (distrax convention)."""
+    """log_prob via vmap should match individual calls."""
     dist = boltzmann_setup
     M = 8
     positions = jax.random.uniform(jax.random.PRNGKey(42), (M, 4, 2)) * 5.0
@@ -426,11 +426,10 @@ def test_boltzmann_batched(boltzmann_setup):
     boxes = jnp.tile(jnp.array([5.0, 5.0]), (M, 1))
 
     batch = ParticleSystem(positions=positions, species=species, box=boxes)
-    log_probs = dist.log_prob(batch)
+    log_probs = jax.vmap(dist.log_prob)(batch)
     assert log_probs.shape == (M,)
     assert jnp.all(jnp.isfinite(log_probs))
 
-    # Batched should match single calls
     single_lps = jnp.stack(
         [dist.log_prob(ParticleSystem(positions=positions[i], species=species[i], box=boxes[i])) for i in range(M)]
     )

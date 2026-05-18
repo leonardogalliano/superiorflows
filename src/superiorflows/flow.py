@@ -7,7 +7,6 @@ This is particularly useful for complex state structures like physical systems.
 from typing import Any, Callable, Dict, Optional
 
 import diffrax as dfx
-import distrax as dsx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -104,7 +103,7 @@ def _augmented_dynamics(t, y, args, divergence_fn):
     return {"x": v, "logq": -div_v}
 
 
-class Flow(eqx.Module, dsx.Distribution):
+class Flow(eqx.Module):
     """Continuous Normalizing Flow for generative modeling.
 
     A Flow transforms samples from a base distribution through a learned
@@ -129,7 +128,7 @@ class Flow(eqx.Module, dsx.Distribution):
         velocity_field: Callable with signature (t, x, args) -> velocity pytree.
             The velocity field defining the flow dynamics. Must return a pytree
             with the same structure as the dynamic part of x.
-        base_distribution: A distrax.Distribution representing the base/prior.
+        base_distribution: The base (prior) distribution for the flow.
         dynamic_mask: A pytree or callable that returns True for leaves to flow,
             False for static context. Defaults to flowing all inexact arrays.
         divergence_fn: Optional callable (velocity_field, t, x, args) -> (v, div_v)
@@ -151,7 +150,7 @@ class Flow(eqx.Module, dsx.Distribution):
     """
 
     velocity_field: Callable
-    base_distribution: dsx.Distribution
+    base_distribution: eqx.Module
     dynamic_mask: Callable = eqx.field(
         default=lambda x: jax.tree.map(eqx.is_inexact_array, x),
         static=True,
@@ -188,20 +187,19 @@ class Flow(eqx.Module, dsx.Distribution):
     def event_shape(self):
         return self.base_distribution.event_shape
 
-    def _sample_n(self, key, n):
-        x0 = self.base_distribution.sample(seed=key, sample_shape=(n,))
-        x1 = jax.vmap(self.apply_map)(x0)
+    def sample(self, key):
+        x0 = self.base_distribution.sample(key=key)
+        x1 = self.apply_map(x0)
         return x1
 
-    def _sample_n_and_log_prob(self, key, n):
+    def sample_and_log_prob(self, key):
         if self.hutchinson_samples is not None:
             key1, key2 = jax.random.split(key)
-            x0 = self.base_distribution.sample(seed=key1, sample_shape=(n,))
-            keys = jax.random.split(key2, n)
-            x1, logq1 = jax.vmap(lambda x, k: self.apply_map_and_log_prob(x, key=k))(x0, keys)
+            x0 = self.base_distribution.sample(key=key1)
+            x1, logq1 = self.apply_map_and_log_prob(x0, key=key2)
         else:
-            x0 = self.base_distribution.sample(seed=key, sample_shape=(n,))
-            x1, logq1 = jax.vmap(self.apply_map_and_log_prob)(x0)
+            x0 = self.base_distribution.sample(key=key)
+            x1, logq1 = self.apply_map_and_log_prob(x0)
         return x1, logq1
 
     def _merge_solution(self, ys, ctx):
@@ -404,78 +402,28 @@ class Flow(eqx.Module, dsx.Distribution):
         return x1, logq1
 
     @eqx.filter_jit
-    def log_prob(self, x1, *, key=None, **kwargs):
-        """Compute log probability density of samples under the flow.
+    def log_prob(self, value, *, key=None, **kwargs):
+        """Compute log probability density of a sample under the flow.
 
-        Inverts the flow to map x1 back to the base distribution and
+        Inverts the flow to map value back to the base distribution and
         applies the change of variables formula to compute the exact
         log probability.
 
-        Automatically handles batched inputs: if x1 has an extra leading
-        dimension compared to event_shape, it will vmap over that dimension.
-
         Args:
-            x1: Sample(s) from the target distribution.
+            value: Sample from the target distribution.
             key: PRNG key for Hutchinson estimator (required if hutchinson_samples is set).
             **kwargs: Override solver parameters.
 
         Returns:
-            Log probability density. Shape is () for single sample,
-            (batch_size,) for batched input.
+            Log probability density. Shape is ().
         """
-        event_shape = self.event_shape
-
-        def _log_prob(x, k):
-            f = jnp.zeros(())
-            kw = dict(kwargs)
-            t0 = kw.pop("t0", self.t0)
-            t1 = kw.pop("t1", self.t1)
-            saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
-            sol = self.integrate_augmented_ode(x, t0=t1, t1=t0, logq0=f, saveat=saveat, key=k, **kw)
-            x0 = jax.tree.map(lambda y: y[-1], sol.ys["x"])
-            f0 = sol.ys["logq"][-1]
-            logq0 = self.base_distribution.log_prob(x0)
-            return logq0 - f0
-
-        def _has_batch_dimension(x1_leaves, shape_leaves):
-            """Check if all array leaves have a consistent batch dimension."""
-            if len(x1_leaves) == 0 or len(x1_leaves) != len(shape_leaves):
-                return False, 0
-
-            def is_shape_tuple(x):
-                return isinstance(x, tuple) and all(isinstance(i, int) for i in x)
-
-            batch_sizes = []
-            for arr, shape in zip(x1_leaves, shape_leaves):
-                if not is_shape_tuple(shape):
-                    continue
-                if arr.ndim == len(shape) + 1:
-                    batch_sizes.append(arr.shape[0])
-                elif arr.ndim == len(shape):
-                    return False, 0
-                else:
-                    return False, 0
-
-            if len(batch_sizes) == 0:
-                return False, 0
-            if len(set(batch_sizes)) == 1:
-                return True, batch_sizes[0]
-            return False, 0
-
-        def is_shape_tuple(x):
-            return isinstance(x, tuple) and all(isinstance(i, int) for i in x)
-
-        leaves_x1 = jax.tree.leaves(x1)
-        leaves_shape = jax.tree.leaves(event_shape, is_leaf=is_shape_tuple)
-
-        has_batch, batch_size = _has_batch_dimension(leaves_x1, leaves_shape)
-        if has_batch:
-            if key is not None:
-                keys = jax.random.split(key, batch_size)
-            else:
-                keys = None
-            if keys is not None:
-                return jax.vmap(_log_prob)(x1, keys)
-            else:
-                return jax.vmap(lambda x: _log_prob(x, None))(x1)
-        return _log_prob(x1, key)
+        f = jnp.zeros(())
+        kw = dict(kwargs)
+        t0 = kw.pop("t0", self.t0)
+        t1 = kw.pop("t1", self.t1)
+        saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
+        sol = self.integrate_augmented_ode(value, t0=t1, t1=t0, logq0=f, saveat=saveat, key=key, **kw)
+        x0 = jax.tree.map(lambda y: y[-1], sol.ys["x"])
+        f0 = sol.ys["logq"][-1]
+        logq0 = self.base_distribution.log_prob(x0)
+        return logq0 - f0

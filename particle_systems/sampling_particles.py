@@ -179,17 +179,20 @@ def main(
     @jax.jit
     def sample_batch(rng):
         if ignore_density:
-            x0 = flow.base_distribution.sample(seed=rng, sample_shape=(batch_size,))
+            sample_keys = jax.random.split(rng, batch_size)
+            x0 = jax.vmap(flow.base_distribution.sample)(sample_keys)
             x1 = jax.vmap(flow.apply_map)(x0)
             return x0, x1
 
         if flow.hutchinson_samples is not None:
             key1, key2 = jax.random.split(rng)
-            x0 = flow.base_distribution.sample(seed=key1, sample_shape=(batch_size,))
+            sample_keys = jax.random.split(key1, batch_size)
+            x0 = jax.vmap(flow.base_distribution.sample)(sample_keys)
             keys = jax.random.split(key2, batch_size)
             x1, log_probs = jax.vmap(lambda x, k: flow.apply_map_and_log_prob(x, key=k))(x0, keys)
         else:
-            x0 = flow.base_distribution.sample(seed=rng, sample_shape=(batch_size,))
+            sample_keys = jax.random.split(rng, batch_size)
+            x0 = jax.vmap(flow.base_distribution.sample)(sample_keys)
             x1, log_probs = jax.vmap(flow.apply_map_and_log_prob)(x0)
         return x0, x1, log_probs
 

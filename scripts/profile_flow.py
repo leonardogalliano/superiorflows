@@ -9,7 +9,7 @@ This script uses JAX's profiling tools to verify that:
 
 import time
 
-import distrax as dsx
+import distreqx.distributions as dsx
 import equinox as eqx
 import jax
 import jax.numpy as jnp

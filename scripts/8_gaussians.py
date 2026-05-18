@@ -2,7 +2,7 @@ import time
 from pathlib import Path
 
 import diffrax as dfx
-import distrax as dsx
+import distreqx.distributions as dsx
 import equinox as eqx
 import grain
 import jax
@@ -91,7 +91,7 @@ def train_single_model(
     locs = 10.0 * jnp.stack([jnp.sin(angles), jnp.cos(angles)], axis=1)
     target_dist = dsx.MixtureSameFamily(
         mixture_distribution=dsx.Categorical(probs=jnp.ones(8) / 8),
-        components_distribution=dsx.MultivariateNormalDiag(loc=locs, scale_diag=jnp.full((8, 2), 0.7)),
+        components_distribution=eqx.filter_vmap(dsx.MultivariateNormalDiag)(locs, jnp.full((8, 2), 0.7)),
     )
     # Base: Standard Gaussian
     base_dist = dsx.MultivariateNormalDiag(jnp.zeros(d), jnp.ones(d))
@@ -161,12 +161,12 @@ def train_single_model(
         val_key1, val_key2 = jax.random.split(val_key)
         val_data = [
             (
-                base_dist.sample(seed=val_key1, sample_shape=(1000,)),
-                target_dist.sample(seed=val_key2, sample_shape=(1000,)),
+                jax.vmap(base_dist.sample)(jax.random.split(val_key1, 1000)),
+                jax.vmap(target_dist.sample)(jax.random.split(val_key2, 1000)),
             )
         ]
     else:
-        val_data = [target_dist.sample(seed=val_key, sample_shape=(1000,))]
+        val_data = [jax.vmap(target_dist.sample)(jax.random.split(val_key, 1000))]
 
     # Construct unique run name for TensorBoard
     # Convention: {loss_type}_w{width}d{depth}_lr{lr}_s{seed}_{timestamp}

@@ -5,7 +5,7 @@ flexibility and correctness across different integration schemes.
 """
 
 import diffrax as dfx
-import distrax as dsx
+import distreqx.distributions as dsx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -23,7 +23,7 @@ def base_distribution():
     d = (2,)
     low = -jnp.ones(d)
     high = jnp.ones(d)
-    return dsx.Independent(dsx.Uniform(low, high), reinterpreted_batch_ndims=1)
+    return dsx.Independent(eqx.filter_vmap(dsx.Uniform)(low, high))
 
 
 class SimpleVelocity(eqx.Module):
@@ -82,7 +82,7 @@ def test_flow_with_different_solvers(base_distribution, velocity_field, solver, 
     )
 
     key = jax.random.PRNGKey(42)
-    x0 = flow.base_distribution.sample(seed=key)
+    x0 = flow.base_distribution.sample(key)
 
     # Forward map
     x1 = flow.apply_map(x0)
@@ -104,7 +104,7 @@ def test_solver_consistency_with_analytical(base_distribution):
         return x
 
     key = jax.random.PRNGKey(0)
-    x0 = base_distribution.sample(seed=key)
+    x0 = base_distribution.sample(key)
     t1 = 0.5  # short time for accuracy
     true_solution = x0 * jnp.exp(t1)
 
@@ -144,7 +144,7 @@ def test_solver_consistency_with_analytical(base_distribution):
 def test_gradient_default_adjoint(base_flow):
     """Test gradient computation with default RecursiveCheckpointAdjoint."""
     key = jax.random.PRNGKey(0)
-    X = base_flow.base_distribution.sample(seed=key, sample_shape=(10,))
+    X = jax.vmap(base_flow.base_distribution.sample)(jax.random.split(key, 10))
     X1 = jax.vmap(base_flow.apply_map)(X)
 
     @eqx.filter_jit
@@ -169,7 +169,7 @@ def test_gradient_with_direct_adjoint(base_distribution, velocity_field):
     )
 
     key = jax.random.PRNGKey(0)
-    X = flow.base_distribution.sample(seed=key, sample_shape=(5,))
+    X = jax.vmap(flow.base_distribution.sample)(jax.random.split(key, 5))
     X1 = jax.vmap(flow.apply_map)(X)
 
     @eqx.filter_jit
@@ -192,7 +192,7 @@ def test_gradient_with_direct_adjoint(base_distribution, velocity_field):
 def test_gradient_finite_difference_check(base_flow):
     """Verify autodiff gradient matches finite differences."""
     key = jax.random.PRNGKey(0)
-    x0 = base_flow.base_distribution.sample(seed=key)
+    x0 = base_flow.base_distribution.sample(key)
     x1 = base_flow.apply_map(x0)
 
     def log_prob_scalar(params_flat, x):
@@ -236,7 +236,7 @@ def test_stepsize_controllers(base_distribution, velocity_field, controller, dt0
     )
 
     key = jax.random.PRNGKey(0)
-    x0 = flow.base_distribution.sample(seed=key)
+    x0 = flow.base_distribution.sample(key)
 
     x1 = flow.apply_map(x0)
     x0_rec = flow.apply_inverse_map(x1)
@@ -248,7 +248,7 @@ def test_stepsize_controllers(base_distribution, velocity_field, controller, dt0
 def test_tolerance_convergence(base_distribution, velocity_field):
     """Verify tighter tolerances produce more accurate results."""
     key = jax.random.PRNGKey(0)
-    x0 = base_distribution.sample(seed=key)
+    x0 = base_distribution.sample(key)
 
     errors = []
     for rtol in [1e-3, 1e-5, 1e-7]:
@@ -274,7 +274,7 @@ def test_tolerance_convergence(base_distribution, velocity_field):
 def test_saveat_t1_only(base_flow):
     """Default: save only at t1."""
     key = jax.random.PRNGKey(0)
-    x0 = base_flow.base_distribution.sample(seed=key)
+    x0 = base_flow.base_distribution.sample(key)
 
     sol = base_flow.integrate(x0)
     assert sol.ys.shape[0] == 1  # Only t1 saved
@@ -283,7 +283,7 @@ def test_saveat_t1_only(base_flow):
 def test_saveat_specific_times(base_flow):
     """Save at specific times."""
     key = jax.random.PRNGKey(0)
-    x0 = base_flow.base_distribution.sample(seed=key)
+    x0 = base_flow.base_distribution.sample(key)
 
     ts = jnp.array([0.0, 0.25, 0.5, 0.75, 1.0])
     sol = base_flow.integrate(x0, saveat=dfx.SaveAt(ts=ts))
@@ -296,7 +296,7 @@ def test_saveat_specific_times(base_flow):
 def test_saveat_steps(base_flow):
     """Save at all integration steps."""
     key = jax.random.PRNGKey(0)
-    x0 = base_flow.base_distribution.sample(seed=key)
+    x0 = base_flow.base_distribution.sample(key)
 
     sol = base_flow.integrate(x0, saveat=dfx.SaveAt(steps=True), max_steps=1000)
 
@@ -307,7 +307,7 @@ def test_saveat_steps(base_flow):
 def test_saveat_dense_output(base_flow):
     """Test dense output for interpolation at arbitrary times."""
     key = jax.random.PRNGKey(0)
-    x0 = base_flow.base_distribution.sample(seed=key)
+    x0 = base_flow.base_distribution.sample(key)
 
     # For dense output, we need to also save at t1 to get a valid solution
     sol = base_flow.integrate(x0, saveat=dfx.SaveAt(dense=True, t1=True), max_steps=1000)
@@ -334,7 +334,7 @@ def test_sphere_projection_callback():
     d = 3
     low = -jnp.ones(d)
     high = jnp.ones(d)
-    base_dist = dsx.Independent(dsx.Uniform(low, high), reinterpreted_batch_ndims=1)
+    base_dist = dsx.Independent(eqx.filter_vmap(dsx.Uniform)(low, high))
 
     def radial_velocity(t, x, args):
         """Velocity that would push off sphere without projection."""
@@ -352,7 +352,7 @@ def test_sphere_projection_callback():
     )
 
     key = jax.random.PRNGKey(0)
-    x0 = base_dist.sample(seed=key)
+    x0 = base_dist.sample(key)
     # Start on unit sphere
     x0 = x0 / jnp.linalg.norm(x0)
 
@@ -373,7 +373,7 @@ def test_box_constraint_projection():
     d = (2,)
     low = -jnp.ones(d)
     high = jnp.ones(d)
-    base_dist = dsx.Independent(dsx.Uniform(low, high), reinterpreted_batch_ndims=1)
+    base_dist = dsx.Independent(eqx.filter_vmap(dsx.Uniform)(low, high))
 
     def expanding_velocity(t, x, args):
         """Velocity that expands beyond box."""
@@ -390,7 +390,7 @@ def test_box_constraint_projection():
     )
 
     key = jax.random.PRNGKey(0)
-    x0 = base_dist.sample(seed=key)
+    x0 = base_dist.sample(key)
 
     x1 = flow.apply_map(x0)
 
@@ -412,7 +412,7 @@ def test_steady_state_approach():
     d = (2,)
     low = -jnp.ones(d)
     high = jnp.ones(d)
-    base_dist = dsx.Independent(dsx.Uniform(low, high), reinterpreted_batch_ndims=1)
+    base_dist = dsx.Independent(eqx.filter_vmap(dsx.Uniform)(low, high))
 
     def damped_velocity(t, x, args):
         """Velocity that damps to zero: v = -x (approaches origin)."""
@@ -426,7 +426,7 @@ def test_steady_state_approach():
     )
 
     key = jax.random.PRNGKey(0)
-    x0 = base_dist.sample(seed=key)
+    x0 = base_dist.sample(key)
 
     # After long time, should be near origin (steady state)
     x1 = flow.apply_map(x0)
@@ -443,7 +443,7 @@ def test_identity_flow():
     d = (2,)
     low = -jnp.ones(d)
     high = jnp.ones(d)
-    base_dist = dsx.Independent(dsx.Uniform(low, high), reinterpreted_batch_ndims=1)
+    base_dist = dsx.Independent(eqx.filter_vmap(dsx.Uniform)(low, high))
 
     def zero_velocity(t, x, args):
         return jnp.zeros_like(x)
@@ -455,7 +455,7 @@ def test_identity_flow():
     )
 
     key = jax.random.PRNGKey(0)
-    x0 = base_dist.sample(seed=key)
+    x0 = base_dist.sample(key)
 
     x1 = flow.apply_map(x0)
     assert jnp.allclose(x1, x0, atol=1e-5)
@@ -471,7 +471,7 @@ def test_high_dimensional_flow():
     d = 50
     low = -jnp.ones(d)
     high = jnp.ones(d)
-    base_dist = dsx.Independent(dsx.Uniform(low, high), reinterpreted_batch_ndims=1)
+    base_dist = dsx.Independent(eqx.filter_vmap(dsx.Uniform)(low, high))
 
     def simple_velocity(t, x, args):
         return -t * x
@@ -483,7 +483,7 @@ def test_high_dimensional_flow():
     )
 
     key = jax.random.PRNGKey(0)
-    x0 = base_dist.sample(seed=key)
+    x0 = base_dist.sample(key)
 
     x1 = flow.apply_map(x0)
     assert x1.shape == (d,)
@@ -516,7 +516,7 @@ def test_solver_benchmark(benchmark, base_distribution, velocity_field, solver_n
     )
 
     key = jax.random.PRNGKey(0)
-    x0 = flow.base_distribution.sample(seed=key)
+    x0 = flow.base_distribution.sample(key)
 
     def run():
         x1, logq1 = flow.apply_map_and_log_prob(x0)
@@ -532,7 +532,7 @@ def test_dimension_scaling_benchmark(benchmark, velocity_field, dim):
     """Benchmark scaling with dimension (exact divergence)."""
     low = -jnp.ones(dim)
     high = jnp.ones(dim)
-    base_dist = dsx.Independent(dsx.Uniform(low, high), reinterpreted_batch_ndims=1)
+    base_dist = dsx.Independent(eqx.filter_vmap(dsx.Uniform)(low, high))
 
     def velocity_d(t, x, args):
         return -t * x
@@ -544,7 +544,7 @@ def test_dimension_scaling_benchmark(benchmark, velocity_field, dim):
     )
 
     key = jax.random.PRNGKey(0)
-    x0 = base_dist.sample(seed=key)
+    x0 = base_dist.sample(key)
 
     def run():
         x1, logq1 = flow.apply_map_and_log_prob(x0)
@@ -559,7 +559,7 @@ def test_dimension_scaling_benchmark(benchmark, velocity_field, dim):
 def test_batch_size_scaling(benchmark, base_flow, batch_size):
     """Benchmark scaling with batch size."""
     key = jax.random.PRNGKey(0)
-    X0 = base_flow.base_distribution.sample(seed=key, sample_shape=(batch_size,))
+    X0 = jax.vmap(base_flow.base_distribution.sample)(jax.random.split(key, batch_size))
 
     def run():
         X1, logq1 = jax.vmap(base_flow.apply_map_and_log_prob)(X0)
@@ -602,7 +602,7 @@ def test_augmented_solver_consistency(base_distribution, velocity_field, solver,
     )
 
     key = jax.random.PRNGKey(0)
-    x0 = flow.base_distribution.sample(seed=key)
+    x0 = flow.base_distribution.sample(key)
 
     # integrate only (no log prob)
     x1_integrate = flow.apply_map(x0)
@@ -636,7 +636,7 @@ def test_augmented_solver_log_prob_consistency(
     )
 
     key = jax.random.PRNGKey(0)
-    x0 = flow.base_distribution.sample(seed=key)
+    x0 = flow.base_distribution.sample(key)
     x1 = flow.apply_map(x0)
 
     # Compute log_prob (uses integrate_augmented_ode in reverse)
@@ -662,7 +662,7 @@ def test_different_solvers_for_integrate_and_augmented(base_distribution, veloci
     )
 
     key = jax.random.PRNGKey(0)
-    x0 = flow.base_distribution.sample(seed=key)
+    x0 = flow.base_distribution.sample(key)
 
     x1 = flow.apply_map(x0)
     x1_aug, logq = flow.apply_map_and_log_prob(x0)
@@ -685,7 +685,7 @@ def test_velocity_with_projection_wrapper():
     d = 3
     low = -jnp.ones(d)
     high = jnp.ones(d)
-    base_dist = dsx.Independent(dsx.Uniform(low, high), reinterpreted_batch_ndims=1)
+    base_dist = dsx.Independent(eqx.filter_vmap(dsx.Uniform)(low, high))
 
     def project_to_sphere(x):
         """Project onto unit sphere."""
@@ -711,7 +711,7 @@ def test_velocity_with_projection_wrapper():
     )
 
     key = jax.random.PRNGKey(0)
-    x0 = base_dist.sample(seed=key)
+    x0 = base_dist.sample(key)
     x0 = x0 / jnp.linalg.norm(x0)  # Start on sphere
 
     x1 = flow.apply_map(x0)
@@ -726,7 +726,7 @@ def test_event_via_extra_args():
     d = (2,)
     low = -jnp.ones(d)
     high = jnp.ones(d)
-    base_dist = dsx.Independent(dsx.Uniform(low, high), reinterpreted_batch_ndims=1)
+    base_dist = dsx.Independent(eqx.filter_vmap(dsx.Uniform)(low, high))
 
     def damped_velocity(t, x, args):
         return -2 * x  # Fast decay to origin
@@ -747,7 +747,7 @@ def test_event_via_extra_args():
     )
 
     key = jax.random.PRNGKey(0)
-    x0 = base_dist.sample(seed=key)
+    x0 = base_dist.sample(key)
 
     # With event, should stop early when |x| < 0.1
     sol = flow.integrate(x0)
@@ -764,7 +764,7 @@ def test_subsaveat_monitoring_at_each_step():
     d = (2,)
     low = -jnp.ones(d)
     high = jnp.ones(d)
-    base_dist = dsx.Independent(dsx.Uniform(low, high), reinterpreted_batch_ndims=1)
+    base_dist = dsx.Independent(eqx.filter_vmap(dsx.Uniform)(low, high))
 
     def contracting_velocity(t, x, args):
         return -t * x
@@ -780,7 +780,7 @@ def test_subsaveat_monitoring_at_each_step():
     )
 
     key = jax.random.PRNGKey(0)
-    x0 = base_dist.sample(seed=key)
+    x0 = base_dist.sample(key)
 
     sol = flow.integrate(x0, saveat=saveat)
     trajectory = sol.ys
@@ -800,7 +800,7 @@ def test_manifold_projection_monitoring():
     d = 3
     low = -jnp.ones(d)
     high = jnp.ones(d)
-    base_dist = dsx.Independent(dsx.Uniform(low, high), reinterpreted_batch_ndims=1)
+    base_dist = dsx.Independent(eqx.filter_vmap(dsx.Uniform)(low, high))
 
     def project_to_sphere(x):
         return x / jnp.linalg.norm(x)
@@ -825,7 +825,7 @@ def test_manifold_projection_monitoring():
     )
 
     key = jax.random.PRNGKey(0)
-    x0 = base_dist.sample(seed=key)
+    x0 = base_dist.sample(key)
     x0 = x0 / jnp.linalg.norm(x0)  # Start on sphere
 
     sol = flow.integrate(x0, saveat=saveat)
@@ -860,7 +860,7 @@ def test_hutchinson_dimension_scaling_benchmark(benchmark, dim):
     """Benchmark Hutchinson scaling with dimension."""
     low = -jnp.ones(dim)
     high = jnp.ones(dim)
-    base_dist = dsx.Independent(dsx.Uniform(low, high), reinterpreted_batch_ndims=1)
+    base_dist = dsx.Independent(eqx.filter_vmap(dsx.Uniform)(low, high))
 
     def velocity_d(t, x, args):
         return -t * x
@@ -874,7 +874,7 @@ def test_hutchinson_dimension_scaling_benchmark(benchmark, dim):
 
     key = jax.random.PRNGKey(0)
     key1, key2 = jax.random.split(key)
-    x0 = base_dist.sample(seed=key1)
+    x0 = base_dist.sample(key1)
 
     def run():
         x1, logq1 = flow.apply_map_and_log_prob(x0, key=key2)
@@ -890,7 +890,7 @@ def test_hutchinson_batch_size_scaling(benchmark, hutchinson_flow, batch_size):
     """Benchmark Hutchinson scaling with batch size."""
     key = jax.random.PRNGKey(0)
     key1, key2 = jax.random.split(key)
-    X0 = hutchinson_flow.base_distribution.sample(seed=key1, sample_shape=(batch_size,))
+    X0 = jax.vmap(hutchinson_flow.base_distribution.sample)(jax.random.split(key1, batch_size))
     keys = jax.random.split(key2, batch_size)
 
     def run():
@@ -914,7 +914,7 @@ def test_hutchinson_samples_scaling(benchmark, base_distribution, velocity_field
 
     key = jax.random.PRNGKey(0)
     key1, key2 = jax.random.split(key)
-    x0 = base_distribution.sample(seed=key1)
+    x0 = base_distribution.sample(key1)
 
     def run():
         x1, logq1 = flow.apply_map_and_log_prob(x0, key=key2)
@@ -930,7 +930,7 @@ def test_hutchinson_vs_exact_high_dim_comparison():
     d = 30
     low = -jnp.ones(d)
     high = jnp.ones(d)
-    base_dist = dsx.Independent(dsx.Uniform(low, high), reinterpreted_batch_ndims=1)
+    base_dist = dsx.Independent(eqx.filter_vmap(dsx.Uniform)(low, high))
 
     def velocity_d(t, x, args):
         return -t * x
@@ -950,7 +950,7 @@ def test_hutchinson_vs_exact_high_dim_comparison():
 
     key = jax.random.PRNGKey(0)
     key1, key2 = jax.random.split(key)
-    x0 = base_dist.sample(seed=key1)
+    x0 = base_dist.sample(key1)
 
     x1_exact, logq_exact = exact_flow.apply_map_and_log_prob(x0)
     x1_hutch, logq_hutch = hutch_flow.apply_map_and_log_prob(x0, key=key2)

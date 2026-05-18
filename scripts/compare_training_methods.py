@@ -13,7 +13,8 @@ import sys
 from pathlib import Path
 
 import diffrax as dfx
-import distrax as dsx
+import distreqx.distributions as dsx
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import matplotlib
@@ -139,7 +140,7 @@ def main():
     locs = 10.0 * jnp.stack([jnp.sin(angles), jnp.cos(angles)], axis=1)
     target_dist = dsx.MixtureSameFamily(
         mixture_distribution=dsx.Categorical(probs=jnp.ones(8) / 8),
-        components_distribution=dsx.MultivariateNormalDiag(loc=locs, scale_diag=jnp.full((8, 2), 0.7)),
+        components_distribution=eqx.filter_vmap(dsx.MultivariateNormalDiag)(locs, jnp.full((8, 2), 0.7)),
     )
     # Base: Standard Gaussian
     base_dist = dsx.MultivariateNormalDiag(jnp.zeros(d), jnp.ones(d))
@@ -162,7 +163,7 @@ def main():
 
     def get_samples(model, key):
         flow = Flow(velocity_field=model, base_distribution=base_dist)
-        x0 = base_dist.sample(seed=key, sample_shape=(n_samples,))
+        x0 = jax.vmap(base_dist.sample)(jax.random.split(key, n_samples))
         return jax.vmap(flow.apply_map)(x0)
 
     samples_mle = get_samples(model_mle, k1)
@@ -204,7 +205,7 @@ def main():
     save_times = jnp.linspace(0.0, 1.0, n_frames)
 
     key, subkey = jax.random.split(key)
-    x0 = base_dist.sample(seed=subkey, sample_shape=(n_particles,))
+    x0 = jax.vmap(base_dist.sample)(jax.random.split(subkey, n_particles))
 
     # Integrate methods
     def get_trajectories(model):

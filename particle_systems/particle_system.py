@@ -2,7 +2,6 @@ import logging
 from itertools import permutations, product
 from pathlib import Path
 
-import distrax as dsx
 import equinox as eqx
 import grain
 import jax
@@ -42,7 +41,7 @@ def exp_map(x, v, L):
     return jnp.remainder(x + v, L)
 
 
-class UniformParticles(eqx.Module, dsx.Distribution):
+class UniformParticles(eqx.Module):
     N: int = eqx.field(static=True)
     d: int = eqx.field(static=True)
     L: float = eqx.field(static=True)
@@ -64,43 +63,26 @@ class UniformParticles(eqx.Module, dsx.Distribution):
             box=(self.d,),
         )
 
-    def _sample_n(self, key, n):
+    def sample(self, key):
         k_pos, k_spec = jax.random.split(key)
-
-        # 1. Sample Positions: Uniform(0, L)
-        # Shape: (n, N, d)
-        pos = jax.random.uniform(k_pos, shape=(n, self.N, self.d), minval=0.0, maxval=self.L)
-
-        # 2. Sample Species: Random permutation of ref_species
-        def _permute(k):
-            return jax.random.permutation(k, self.ref_species)
-
-        keys_perm = jax.random.split(k_spec, n)
-        species = jax.vmap(_permute)(keys_perm)
-
-        # 3. Box: Broadcast scalar L
-        batched_box = jnp.full((n, self.d), self.L)
-
-        return ParticleSystem(positions=pos, species=species, box=batched_box)
+        pos = jax.random.uniform(k_pos, shape=(self.N, self.d), minval=0.0, maxval=self.L)
+        species = jax.random.permutation(k_spec, self.ref_species)
+        box = jnp.full((self.d,), self.L)
+        return ParticleSystem(positions=pos, species=species, box=box)
 
     def log_prob(self, value: ParticleSystem):
-        # We assume configurations outside the box are valid
-        # as they represent configurations
-        # that would be projected back into the box.
-
-        # 1. Base Log Prob: -N * log(Volume)
         base_log_prob = -self.N * (self.d * jnp.log(self.L))
-
-        # 2. Correct Species Composition
         sorted_val_species = jnp.sort(value.species, axis=-1)
         sorted_ref_species = jnp.sort(self.ref_species, axis=-1)
         valid_composition = jnp.all(sorted_val_species == sorted_ref_species, axis=-1)
-
-        # 3. Return
         return jnp.where(valid_composition, base_log_prob, -jnp.inf)
 
+    def sample_and_log_prob(self, key):
+        x = self.sample(key)
+        return x, self.log_prob(x)
 
-class BoltzmannDistribution(eqx.Module, dsx.Distribution):
+
+class BoltzmannDistribution(eqx.Module):
     """Boltzmann distribution at temperature T for a particle system.
 
     This is the *target* distribution for CNF training.  It provides the
@@ -146,31 +128,21 @@ class BoltzmannDistribution(eqx.Module, dsx.Distribution):
             box=(self.d,),
         )
 
-    def _sample_n(self, key, n):
+    def sample(self, key):
         raise NotImplementedError("Cannot sample from Boltzmann distribution.")
 
     def log_prob(self, value: ParticleSystem):
         """Unnormalised log-probability: -U(x) / T.
 
-        Note:
-            This is **not** normalised.
-
         Args:
-            value: A ``ParticleSystem``, single or batched.
+            value: A ``ParticleSystem``.
 
         Returns:
-            Scalar or array of unnormalised log-probabilities.
+            Scalar unnormalised log-probability.
         """
         positions = jnp.asarray(value.positions)
         species = jnp.asarray(value.species)
-
-        def _single_log_prob(pos, sp):
-            return -self._energy_fn(pos, sp) / self.temperature
-
-        if positions.ndim == 2:  # single system: (N, d)
-            return _single_log_prob(positions, species)
-        # batched: (M, N, d)
-        return jax.vmap(_single_log_prob)(positions, species)
+        return -self._energy_fn(positions, species) / self.temperature
 
 
 class TrajectoryDataSource(grain.sources.RandomAccessDataSource):
@@ -348,8 +320,8 @@ class CoupleBaseSamples:
         batch_size = x1.positions.shape[0]
 
         with jax.default_device(jax.devices("cpu")[0]):
-            key = jax.random.fold_in(jax.random.key(self.seed), index)
-            x0 = self.base_dist.sample(seed=key, sample_shape=(batch_size,))
+            keys = jax.random.split(jax.random.fold_in(jax.random.key(self.seed), index), batch_size)
+            x0 = jax.vmap(self.base_dist.sample)(keys)
 
         return (x0, x1)
 

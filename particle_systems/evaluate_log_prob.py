@@ -225,8 +225,11 @@ def main(
             return jax.vmap(flow.apply_map_and_log_prob)(batch)
         else:
             if hutchinson_samples is not None:
-                return batch, flow.log_prob(batch, key=rng)
-            return batch, flow.log_prob(batch)
+                keys = jax.random.split(rng, batch_size)
+                lp = jax.vmap(lambda x, k: flow.log_prob(x, key=k))(batch, keys)
+            else:
+                lp = jax.vmap(flow.log_prob)(batch)
+            return batch, lp
 
     comp_sys = systems_base[0] if forward_ode else systems[0]
     compiled_eval = eval_log_prob.lower(comp_sys, key).compile()
