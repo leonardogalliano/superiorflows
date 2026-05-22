@@ -6,7 +6,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
-from superiorflows import Flow
+from superiorflows import Flow, ODEBijector
 
 # ============================================================================
 # Setup
@@ -42,11 +42,8 @@ def debug_setup():
     velocity = LinearVelocityField(A=A, b=b)
 
     flow = Flow(
-        velocity_field=velocity,
-        base_distribution=base_dist,
-        t0=0.0,
-        t1=1.0,
-        solver=dfx.Tsit5(),  # Default solver
+        ODEBijector(velocity, t0=0.0, t1=1.0, solver=dfx.Tsit5()),
+        base_dist,
     )
 
     return flow, k3
@@ -234,7 +231,7 @@ def test_ode_diagnostics(debug_setup):
     print("\n\n>>> ODE Diagnostics")
 
     # We use SaveAt(steps=True) to save every step taken by the solver
-    sol = flow.integrate(x0, saveat=dfx.SaveAt(steps=True))
+    sol = flow.bijector.integrate(x0, saveat=dfx.SaveAt(steps=True))
 
     ts = sol.ts  # Times at which steps were taken
     # ys = sol.ys  # State values at those times
@@ -257,7 +254,7 @@ def test_ode_diagnostics(debug_setup):
 
     # Check final time
     t_final = ts[jnp.argmax(valid_steps * jnp.arange(ts.shape[0]))]
-    print(f"Final integration time reached: {t_final:.4f} (Target: {flow.t1})")
+    print(f"Final integration time reached: {t_final:.4f} (Target: {flow.bijector.t1})")
 
-    assert jnp.isclose(t_final, flow.t1, atol=1e-3), "Solver did not reach final time t1!"
+    assert jnp.isclose(t_final, flow.bijector.t1, atol=1e-3), "Solver did not reach final time t1!"
     print(">>> ODE Diagnostics Passed.")

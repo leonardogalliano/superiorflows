@@ -10,7 +10,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
-from superiorflows import Flow
+from superiorflows import Flow, ODEBijector
 
 # ============================================================================
 # Fixtures
@@ -42,9 +42,8 @@ def velocity_field():
 def base_flow(base_distribution, velocity_field):
     """Default flow with Tsit5 solver."""
     return Flow(
-        velocity_field=velocity_field,
-        base_distribution=base_distribution,
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+        ODEBijector(velocity_field, stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5)),
+        base_distribution,
     )
 
 
@@ -74,23 +73,20 @@ def test_flow_with_different_solvers(base_distribution, velocity_field, solver, 
         controller = dfx.PIDController(rtol=1e-5, atol=1e-5)
 
     flow = Flow(
-        velocity_field=velocity_field,
-        base_distribution=base_distribution,
-        solver=solver,
-        dt0=dt0,
-        stepsize_controller=controller,
+        ODEBijector(velocity_field, solver=solver, dt0=dt0, stepsize_controller=controller),
+        base_distribution,
     )
 
     key = jax.random.key(42)
     x0 = flow.base_distribution.sample(key)
 
     # Forward map
-    x1 = flow.apply_map(x0)
+    x1 = flow.bijector.forward(x0)
     assert x1.shape == x0.shape
     assert jnp.all(jnp.isfinite(x1))
 
     # Inverse should reconstruct approximately
-    x0_rec = flow.apply_inverse_map(x1)
+    x0_rec = flow.bijector.inverse(x1)
     # Tolerance depends on solver order
     tol = 0.1 if isinstance(solver, dfx.Euler) else 1e-3
     assert jnp.allclose(x0_rec, x0, atol=tol, rtol=tol)
@@ -121,14 +117,10 @@ def test_solver_consistency_with_analytical(base_distribution):
             controller = dfx.PIDController(rtol=1e-7, atol=1e-7)
 
         flow = Flow(
-            velocity_field=exp_velocity,
-            base_distribution=base_distribution,
-            solver=solver,
-            dt0=dt0,
-            t1=t1,
-            stepsize_controller=controller,
+            ODEBijector(exp_velocity, solver=solver, dt0=dt0, t1=t1, stepsize_controller=controller),
+            base_distribution,
         )
-        results[name] = flow.apply_map(x0)
+        results[name] = flow.bijector.forward(x0)
 
     # All should be close to true solution
     for name, result in results.items():
@@ -145,7 +137,7 @@ def test_gradient_default_adjoint(base_flow):
     """Test gradient computation with default RecursiveCheckpointAdjoint."""
     key = jax.random.key(0)
     X = jax.vmap(base_flow.base_distribution.sample)(jax.random.split(key, 10))
-    X1 = jax.vmap(base_flow.apply_map)(X)
+    X1 = jax.vmap(base_flow.bijector.forward)(X)
 
     @eqx.filter_jit
     def loss(flow, x):
@@ -161,16 +153,18 @@ def test_gradient_default_adjoint(base_flow):
 def test_gradient_with_direct_adjoint(base_distribution, velocity_field):
     """Test gradient with DirectAdjoint (supports both forward and reverse mode)."""
     flow = Flow(
-        velocity_field=velocity_field,
-        base_distribution=base_distribution,
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
-        extra_args={"adjoint": dfx.DirectAdjoint()},
-        augmented_extra_args={"adjoint": dfx.DirectAdjoint()},
+        ODEBijector(
+            velocity_field,
+            stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+            extra_args={"adjoint": dfx.DirectAdjoint()},
+            augmented_extra_args={"adjoint": dfx.DirectAdjoint()},
+        ),
+        base_distribution,
     )
 
     key = jax.random.key(0)
     X = jax.vmap(flow.base_distribution.sample)(jax.random.split(key, 5))
-    X1 = jax.vmap(flow.apply_map)(X)
+    X1 = jax.vmap(flow.bijector.forward)(X)
 
     @eqx.filter_jit
     def loss(flow, x):
@@ -193,7 +187,7 @@ def test_gradient_finite_difference_check(base_flow):
     """Verify autodiff gradient matches finite differences."""
     key = jax.random.key(0)
     x0 = base_flow.base_distribution.sample(key)
-    x1 = base_flow.apply_map(x0)
+    x1 = base_flow.bijector.forward(x0)
 
     def log_prob_scalar(params_flat, x):
         # Simple finite diff check on the log_prob output
@@ -229,17 +223,15 @@ def test_gradient_finite_difference_check(base_flow):
 def test_stepsize_controllers(base_distribution, velocity_field, controller, dt0):
     """Test Flow with different stepsize controllers."""
     flow = Flow(
-        velocity_field=velocity_field,
-        base_distribution=base_distribution,
-        stepsize_controller=controller,
-        dt0=dt0,
+        ODEBijector(velocity_field, stepsize_controller=controller, dt0=dt0),
+        base_distribution,
     )
 
     key = jax.random.key(0)
     x0 = flow.base_distribution.sample(key)
 
-    x1 = flow.apply_map(x0)
-    x0_rec = flow.apply_inverse_map(x1)
+    x1 = flow.bijector.forward(x0)
+    x0_rec = flow.bijector.inverse(x1)
 
     assert jnp.all(jnp.isfinite(x1))
     assert jnp.allclose(x0_rec, x0, atol=1e-2, rtol=1e-2)
@@ -253,12 +245,11 @@ def test_tolerance_convergence(base_distribution, velocity_field):
     errors = []
     for rtol in [1e-3, 1e-5, 1e-7]:
         flow = Flow(
-            velocity_field=velocity_field,
-            base_distribution=base_distribution,
-            stepsize_controller=dfx.PIDController(rtol=rtol, atol=rtol),
+            ODEBijector(velocity_field, stepsize_controller=dfx.PIDController(rtol=rtol, atol=rtol)),
+            base_distribution,
         )
-        x1 = flow.apply_map(x0)
-        x0_rec = flow.apply_inverse_map(x1)
+        x1 = flow.bijector.forward(x0)
+        x0_rec = flow.bijector.inverse(x1)
         error = jnp.max(jnp.abs(x0_rec - x0))
         errors.append(float(error))
 
@@ -276,7 +267,7 @@ def test_saveat_t1_only(base_flow):
     key = jax.random.key(0)
     x0 = base_flow.base_distribution.sample(key)
 
-    sol = base_flow.integrate(x0)
+    sol = base_flow.bijector.integrate(x0)
     assert sol.ys.shape[0] == 1  # Only t1 saved
 
 
@@ -286,7 +277,7 @@ def test_saveat_specific_times(base_flow):
     x0 = base_flow.base_distribution.sample(key)
 
     ts = jnp.array([0.0, 0.25, 0.5, 0.75, 1.0])
-    sol = base_flow.integrate(x0, saveat=dfx.SaveAt(ts=ts))
+    sol = base_flow.bijector.integrate(x0, saveat=dfx.SaveAt(ts=ts))
 
     assert sol.ys.shape[0] == len(ts)
     # First should be close to x0
@@ -298,7 +289,7 @@ def test_saveat_steps(base_flow):
     key = jax.random.key(0)
     x0 = base_flow.base_distribution.sample(key)
 
-    sol = base_flow.integrate(x0, saveat=dfx.SaveAt(steps=True), max_steps=1000)
+    sol = base_flow.bijector.integrate(x0, saveat=dfx.SaveAt(steps=True), max_steps=1000)
 
     # Should have multiple steps saved
     assert sol.ys.shape[0] > 1
@@ -310,7 +301,7 @@ def test_saveat_dense_output(base_flow):
     x0 = base_flow.base_distribution.sample(key)
 
     # For dense output, we need to also save at t1 to get a valid solution
-    sol = base_flow.integrate(x0, saveat=dfx.SaveAt(dense=True, t1=True), max_steps=1000)
+    sol = base_flow.bijector.integrate(x0, saveat=dfx.SaveAt(dense=True, t1=True), max_steps=1000)
 
     # Evaluate at arbitrary times using dense interpolation
     t_eval = 0.5
@@ -346,9 +337,8 @@ def test_sphere_projection_callback():
 
     # Create flow - no direct callback support, but we can verify the concept
     flow = Flow(
-        velocity_field=radial_velocity,
-        base_distribution=base_dist,
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+        ODEBijector(radial_velocity, stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5)),
+        base_dist,
     )
 
     key = jax.random.key(0)
@@ -357,7 +347,7 @@ def test_sphere_projection_callback():
     x0 = x0 / jnp.linalg.norm(x0)
 
     # Without projection, x1 will leave the sphere
-    x1 = flow.apply_map(x0)
+    x1 = flow.bijector.forward(x0)
     norm_x1 = jnp.linalg.norm(x1)
 
     # Verify it left the sphere (norm != 1)
@@ -384,15 +374,14 @@ def test_box_constraint_projection():
         return jnp.clip(x, low, high)
 
     flow = Flow(
-        velocity_field=expanding_velocity,
-        base_distribution=base_dist,
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+        ODEBijector(expanding_velocity, stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5)),
+        base_dist,
     )
 
     key = jax.random.key(0)
     x0 = base_dist.sample(key)
 
-    x1 = flow.apply_map(x0)
+    x1 = flow.bijector.forward(x0)
 
     # Without projection, should exceed bounds
     assert jnp.any(jnp.abs(x1) > 1.0)
@@ -419,17 +408,15 @@ def test_steady_state_approach():
         return -x
 
     flow = Flow(
-        velocity_field=damped_velocity,
-        base_distribution=base_dist,
-        t1=10.0,  # Long time to ensure convergence
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+        ODEBijector(damped_velocity, t1=10.0, stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5)),
+        base_dist,
     )
 
     key = jax.random.key(0)
     x0 = base_dist.sample(key)
 
     # After long time, should be near origin (steady state)
-    x1 = flow.apply_map(x0)
+    x1 = flow.bijector.forward(x0)
     assert jnp.allclose(x1, 0.0, atol=1e-3)
 
 
@@ -449,19 +436,18 @@ def test_identity_flow():
         return jnp.zeros_like(x)
 
     flow = Flow(
-        velocity_field=zero_velocity,
-        base_distribution=base_dist,
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+        ODEBijector(zero_velocity, stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5)),
+        base_dist,
     )
 
     key = jax.random.key(0)
     x0 = base_dist.sample(key)
 
-    x1 = flow.apply_map(x0)
+    x1 = flow.bijector.forward(x0)
     assert jnp.allclose(x1, x0, atol=1e-5)
 
     # Log prob should equal base distribution log prob (zero divergence)
-    x1, logq1 = flow.apply_map_and_log_prob(x0)
+    x1, logq1 = flow.push_forward_and_log_prob(x0)
     logq_base = base_dist.log_prob(x0)
     assert jnp.allclose(logq1, logq_base, atol=1e-4)
 
@@ -477,19 +463,18 @@ def test_high_dimensional_flow():
         return -t * x
 
     flow = Flow(
-        velocity_field=simple_velocity,
-        base_distribution=base_dist,
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+        ODEBijector(simple_velocity, stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5)),
+        base_dist,
     )
 
     key = jax.random.key(0)
     x0 = base_dist.sample(key)
 
-    x1 = flow.apply_map(x0)
+    x1 = flow.bijector.forward(x0)
     assert x1.shape == (d,)
     assert jnp.all(jnp.isfinite(x1))
 
-    x1, logq1 = flow.apply_map_and_log_prob(x0)
+    x1, logq1 = flow.push_forward_and_log_prob(x0)
     assert jnp.isfinite(logq1)
 
 
@@ -509,17 +494,15 @@ def test_high_dimensional_flow():
 def test_solver_benchmark(benchmark, base_distribution, velocity_field, solver_name, solver):
     """Benchmark different solvers."""
     flow = Flow(
-        velocity_field=velocity_field,
-        base_distribution=base_distribution,
-        solver=solver,
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+        ODEBijector(velocity_field, solver=solver, stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5)),
+        base_distribution,
     )
 
     key = jax.random.key(0)
     x0 = flow.base_distribution.sample(key)
 
     def run():
-        x1, logq1 = flow.apply_map_and_log_prob(x0)
+        x1, logq1 = flow.push_forward_and_log_prob(x0)
         x1.block_until_ready()
         logq1.block_until_ready()
         return x1, logq1
@@ -538,16 +521,15 @@ def test_dimension_scaling_benchmark(benchmark, velocity_field, dim):
         return -t * x
 
     flow = Flow(
-        velocity_field=velocity_d,
-        base_distribution=base_dist,
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+        ODEBijector(velocity_d, stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5)),
+        base_dist,
     )
 
     key = jax.random.key(0)
     x0 = base_dist.sample(key)
 
     def run():
-        x1, logq1 = flow.apply_map_and_log_prob(x0)
+        x1, logq1 = flow.push_forward_and_log_prob(x0)
         x1.block_until_ready()
         logq1.block_until_ready()
         return x1, logq1
@@ -562,7 +544,7 @@ def test_batch_size_scaling(benchmark, base_flow, batch_size):
     X0 = jax.vmap(base_flow.base_distribution.sample)(jax.random.split(key, batch_size))
 
     def run():
-        X1, logq1 = jax.vmap(base_flow.apply_map_and_log_prob)(X0)
+        X1, logq1 = jax.vmap(base_flow.push_forward_and_log_prob)(X0)
         X1.block_until_ready()
         logq1.block_until_ready()
         return X1, logq1
@@ -592,23 +574,25 @@ def test_augmented_solver_consistency(base_distribution, velocity_field, solver,
         controller = dfx.PIDController(rtol=1e-5, atol=1e-5)
 
     flow = Flow(
-        velocity_field=velocity_field,
-        base_distribution=base_distribution,
-        solver=solver,
-        augmented_solver=augmented_solver,
-        dt0=dt0,
-        stepsize_controller=controller,
-        augmented_stepsize_controller=controller,
+        ODEBijector(
+            velocity_field,
+            solver=solver,
+            augmented_solver=augmented_solver,
+            dt0=dt0,
+            stepsize_controller=controller,
+            augmented_stepsize_controller=controller,
+        ),
+        base_distribution,
     )
 
     key = jax.random.key(0)
     x0 = flow.base_distribution.sample(key)
 
     # integrate only (no log prob)
-    x1_integrate = flow.apply_map(x0)
+    x1_integrate = flow.bijector.forward(x0)
 
     # integrate_augmented_ode (with log prob)
-    x1_augmented, logq1 = flow.apply_map_and_log_prob(x0)
+    x1_augmented, logq1 = flow.push_forward_and_log_prob(x0)
 
     # Trajectories should match
     tol = 0.05 if isinstance(solver, dfx.Heun) else 1e-4
@@ -629,22 +613,24 @@ def test_augmented_solver_log_prob_consistency(
 ):
     """Test log_prob is consistent across different augmented solvers."""
     flow = Flow(
-        velocity_field=velocity_field,
-        base_distribution=base_distribution,
-        augmented_solver=augmented_solver,
-        augmented_stepsize_controller=dfx.PIDController(rtol=1e-6, atol=1e-6),
+        ODEBijector(
+            velocity_field,
+            augmented_solver=augmented_solver,
+            augmented_stepsize_controller=dfx.PIDController(rtol=1e-6, atol=1e-6),
+        ),
+        base_distribution,
     )
 
     key = jax.random.key(0)
     x0 = flow.base_distribution.sample(key)
-    x1 = flow.apply_map(x0)
+    x1 = flow.bijector.forward(x0)
 
     # Compute log_prob (uses integrate_augmented_ode in reverse)
     logq = flow.log_prob(x1)
     assert jnp.isfinite(logq)
 
     # Forward and reverse log_prob should be consistent
-    x1_fwd, logq_fwd = flow.apply_map_and_log_prob(x0)
+    x1_fwd, logq_fwd = flow.push_forward_and_log_prob(x0)
     logq_rev = flow.log_prob(x1_fwd)
     assert jnp.allclose(logq_fwd, logq_rev, atol=1e-3, rtol=1e-3)
 
@@ -653,19 +639,21 @@ def test_different_solvers_for_integrate_and_augmented(base_distribution, veloci
     """Test using different solvers for integrate vs integrate_augmented_ode."""
     # Use high-order solver for regular integration, lower for augmented
     flow = Flow(
-        velocity_field=velocity_field,
-        base_distribution=base_distribution,
-        solver=dfx.Dopri8(),
-        augmented_solver=dfx.Tsit5(),
-        stepsize_controller=dfx.PIDController(rtol=1e-7, atol=1e-7),
-        augmented_stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+        ODEBijector(
+            velocity_field,
+            solver=dfx.Dopri8(),
+            augmented_solver=dfx.Tsit5(),
+            stepsize_controller=dfx.PIDController(rtol=1e-7, atol=1e-7),
+            augmented_stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+        ),
+        base_distribution,
     )
 
     key = jax.random.key(0)
     x0 = flow.base_distribution.sample(key)
 
-    x1 = flow.apply_map(x0)
-    x1_aug, logq = flow.apply_map_and_log_prob(x0)
+    x1 = flow.bijector.forward(x0)
+    x1_aug, logq = flow.push_forward_and_log_prob(x0)
 
     # Should still be reasonably close despite different solvers
     assert jnp.allclose(x1, x1_aug, atol=1e-3, rtol=1e-3)
@@ -705,16 +693,15 @@ def test_velocity_with_projection_wrapper():
             return v_tangent
 
     flow = Flow(
-        velocity_field=ProjectedVelocity(),
-        base_distribution=base_dist,
-        stepsize_controller=dfx.PIDController(rtol=1e-6, atol=1e-6),
+        ODEBijector(ProjectedVelocity(), stepsize_controller=dfx.PIDController(rtol=1e-6, atol=1e-6)),
+        base_dist,
     )
 
     key = jax.random.key(0)
     x0 = base_dist.sample(key)
     x0 = x0 / jnp.linalg.norm(x0)  # Start on sphere
 
-    x1 = flow.apply_map(x0)
+    x1 = flow.bijector.forward(x0)
     # With tangent-space velocity, should stay close to sphere
     # (not exact due to integration discretization)
     norm_x1 = jnp.linalg.norm(x1)
@@ -739,18 +726,20 @@ def test_event_via_extra_args():
 
     # Pass event through extra_args
     flow = Flow(
-        velocity_field=damped_velocity,
-        base_distribution=base_dist,
-        t1=10.0,  # Long time
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
-        extra_args={"event": event, "max_steps": 1000},
+        ODEBijector(
+            damped_velocity,
+            t1=10.0,
+            stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+            extra_args={"event": event, "max_steps": 1000},
+        ),
+        base_dist,
     )
 
     key = jax.random.key(0)
     x0 = base_dist.sample(key)
 
     # With event, should stop early when |x| < 0.1
-    sol = flow.integrate(x0)
+    sol = flow.bijector.integrate(x0)
     x1 = sol.ys[-1]
 
     # Should have stopped before going all the way to near-zero
@@ -774,15 +763,14 @@ def test_subsaveat_monitoring_at_each_step():
     saveat = dfx.SaveAt(ts=ts)
 
     flow = Flow(
-        velocity_field=contracting_velocity,
-        base_distribution=base_dist,
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+        ODEBijector(contracting_velocity, stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5)),
+        base_dist,
     )
 
     key = jax.random.key(0)
     x0 = base_dist.sample(key)
 
-    sol = flow.integrate(x0, saveat=saveat)
+    sol = flow.bijector.integrate(x0, saveat=saveat)
     trajectory = sol.ys
 
     # Compute norms at each saved time
@@ -819,16 +807,15 @@ def test_manifold_projection_monitoring():
     saveat = dfx.SaveAt(ts=ts)
 
     flow = Flow(
-        velocity_field=TangentSpaceVelocity(),
-        base_distribution=base_dist,
-        stepsize_controller=dfx.PIDController(rtol=1e-6, atol=1e-6),
+        ODEBijector(TangentSpaceVelocity(), stepsize_controller=dfx.PIDController(rtol=1e-6, atol=1e-6)),
+        base_dist,
     )
 
     key = jax.random.key(0)
     x0 = base_dist.sample(key)
     x0 = x0 / jnp.linalg.norm(x0)  # Start on sphere
 
-    sol = flow.integrate(x0, saveat=saveat)
+    sol = flow.bijector.integrate(x0, saveat=saveat)
     trajectory = sol.ys
 
     # Compute manifold distances at each saved time
@@ -848,10 +835,8 @@ def test_manifold_projection_monitoring():
 def hutchinson_flow(base_distribution, velocity_field):
     """Flow with Hutchinson estimator."""
     return Flow(
-        velocity_field=velocity_field,
-        base_distribution=base_distribution,
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
-        hutchinson_samples=5,
+        ODEBijector(velocity_field, stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5), hutchinson_samples=5),
+        base_distribution,
     )
 
 
@@ -866,10 +851,8 @@ def test_hutchinson_dimension_scaling_benchmark(benchmark, dim):
         return -t * x
 
     flow = Flow(
-        velocity_field=velocity_d,
-        base_distribution=base_dist,
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
-        hutchinson_samples=5,
+        ODEBijector(velocity_d, stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5), hutchinson_samples=5),
+        base_dist,
     )
 
     key = jax.random.key(0)
@@ -877,7 +860,7 @@ def test_hutchinson_dimension_scaling_benchmark(benchmark, dim):
     x0 = base_dist.sample(key1)
 
     def run():
-        x1, logq1 = flow.apply_map_and_log_prob(x0, key=key2)
+        x1, logq1 = flow.push_forward_and_log_prob(x0, key=key2)
         x1.block_until_ready()
         logq1.block_until_ready()
         return x1, logq1
@@ -894,7 +877,7 @@ def test_hutchinson_batch_size_scaling(benchmark, hutchinson_flow, batch_size):
     keys = jax.random.split(key2, batch_size)
 
     def run():
-        X1, logq1 = jax.vmap(lambda x, k: hutchinson_flow.apply_map_and_log_prob(x, key=k))(X0, keys)
+        X1, logq1 = jax.vmap(lambda x, k: hutchinson_flow.push_forward_and_log_prob(x, key=k))(X0, keys)
         X1.block_until_ready()
         logq1.block_until_ready()
         return X1, logq1
@@ -906,10 +889,12 @@ def test_hutchinson_batch_size_scaling(benchmark, hutchinson_flow, batch_size):
 def test_hutchinson_samples_scaling(benchmark, base_distribution, velocity_field, hutchinson_samples):
     """Benchmark scaling with number of Hutchinson samples."""
     flow = Flow(
-        velocity_field=velocity_field,
-        base_distribution=base_distribution,
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
-        hutchinson_samples=hutchinson_samples,
+        ODEBijector(
+            velocity_field,
+            stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+            hutchinson_samples=hutchinson_samples,
+        ),
+        base_distribution,
     )
 
     key = jax.random.key(0)
@@ -917,7 +902,7 @@ def test_hutchinson_samples_scaling(benchmark, base_distribution, velocity_field
     x0 = base_distribution.sample(key1)
 
     def run():
-        x1, logq1 = flow.apply_map_and_log_prob(x0, key=key2)
+        x1, logq1 = flow.push_forward_and_log_prob(x0, key=key2)
         x1.block_until_ready()
         logq1.block_until_ready()
         return x1, logq1
@@ -936,24 +921,21 @@ def test_hutchinson_vs_exact_high_dim_comparison():
         return -t * x
 
     exact_flow = Flow(
-        velocity_field=velocity_d,
-        base_distribution=base_dist,
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+        ODEBijector(velocity_d, stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5)),
+        base_dist,
     )
 
     hutch_flow = Flow(
-        velocity_field=velocity_d,
-        base_distribution=base_dist,
-        stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
-        hutchinson_samples=10,
+        ODEBijector(velocity_d, stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5), hutchinson_samples=10),
+        base_dist,
     )
 
     key = jax.random.key(0)
     key1, key2 = jax.random.split(key)
     x0 = base_dist.sample(key1)
 
-    x1_exact, logq_exact = exact_flow.apply_map_and_log_prob(x0)
-    x1_hutch, logq_hutch = hutch_flow.apply_map_and_log_prob(x0, key=key2)
+    x1_exact, logq_exact = exact_flow.push_forward_and_log_prob(x0)
+    x1_hutch, logq_hutch = hutch_flow.push_forward_and_log_prob(x0, key=key2)
 
     # Trajectories should match
     assert jnp.allclose(x1_exact, x1_hutch, atol=1e-4)

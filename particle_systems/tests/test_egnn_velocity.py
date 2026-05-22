@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from superiorflows import Flow
+from superiorflows import Flow, ODEBijector
 
 from particle_systems.particle_system import (
     ParticleSystem,
@@ -85,13 +85,15 @@ def single_frame():
 @pytest.fixture(scope="module")
 def flow(egnn_velocity, base_dist):
     return Flow(
-        velocity_field=egnn_velocity,
-        base_distribution=base_dist,
-        dynamic_mask=ParticleSystem.get_dynamic_mask(),
-        solver=dfx.Tsit5(),
-        augmented_solver=dfx.Tsit5(),
-        stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
-        augmented_stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
+        ODEBijector(
+            egnn_velocity,
+            dynamic_mask=ParticleSystem.get_dynamic_mask(),
+            solver=dfx.Tsit5(),
+            augmented_solver=dfx.Tsit5(),
+            stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
+            augmented_stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
+        ),
+        base_dist,
     )
 
 

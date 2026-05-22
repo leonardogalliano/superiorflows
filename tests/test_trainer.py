@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 import optax
 import pytest
-from superiorflows import CoupledDataSource, DistributionDataSource, Flow
+from superiorflows import CoupledDataSource, DistributionDataSource, Flow, ODEBijector
 from superiorflows.train import (
     Callback,
     CheckpointCallback,
@@ -99,18 +99,27 @@ class TestMaximumLikelihoodLoss:
 
     def test_initialization(self, base_dist):
         """Test loss can be created."""
-        loss = MaximumLikelihoodLoss(base_dist)
+
+        def make_bijector(vf):
+            return ODEBijector(vf)
+
+        loss = MaximumLikelihoodLoss(base_dist, make_bijector)
         assert loss.base_distribution is base_dist
-        assert loss.flow_kwargs == {}
+        assert loss.make_bijector is make_bijector
 
     def test_initialization_with_kwargs(self, base_dist):
         """Test loss with custom flow kwargs."""
-        loss = MaximumLikelihoodLoss(base_dist, stepsize_controller=dfx.PIDController(rtol=1e-4, atol=1e-4))
-        assert "stepsize_controller" in loss.flow_kwargs
+        controller = dfx.PIDController(rtol=1e-4, atol=1e-4)
+
+        def make_bijector(vf):
+            return ODEBijector(vf, stepsize_controller=controller)
+
+        loss = MaximumLikelihoodLoss(base_dist, make_bijector)
+        assert loss.make_bijector is make_bijector
 
     def test_forward_pass(self, base_dist, target_dist, model):
         """Test loss computes and returns scalar."""
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         batch = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(0), 16))
         loss, _aux = loss_fn(model, batch, key=jax.random.key(1))
         assert loss.shape == ()
@@ -118,7 +127,7 @@ class TestMaximumLikelihoodLoss:
 
     def test_has_gradient(self, base_dist, target_dist, model):
         """Test loss is differentiable."""
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         batch = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(0), 16))
 
         @eqx.filter_jit
@@ -131,10 +140,11 @@ class TestMaximumLikelihoodLoss:
         total_grad_norm = sum(jax.tree.leaves(grad_norms))
         assert total_grad_norm > 0
 
-    def test_flow_kwargs_passed_to_flow(self, base_dist):
-        """Verify flow_kwargs are passed to the Flow constructor."""
-        controller = dfx.PIDController(rtol=1e-4, atol=1e-4)
-        loss_fn = MaximumLikelihoodLoss(base_dist, stepsize_controller=controller, dt0=0.05)
+    def test_make_bijector_called(self, base_dist):
+        """Verify make_bijector is called with the model."""
+
+        make_bijector = MagicMock()
+        loss_fn = MaximumLikelihoodLoss(base_dist, make_bijector)
 
         mock_model = MagicMock(spec=eqx.Module)
         batch = jnp.zeros((10, 2))
@@ -146,10 +156,11 @@ class TestMaximumLikelihoodLoss:
             with jax.disable_jit():
                 loss_fn(mock_model, batch, key=jax.random.key(0))
 
-            kwargs = MockFlow.call_args[1]
-            assert "stepsize_controller" in kwargs
-            assert kwargs["stepsize_controller"] is controller
-            assert kwargs["dt0"] == 0.05
+            make_bijector.assert_called_once_with(mock_model)
+            MockFlow.assert_called_once()
+            assert MockFlow.call_args[0][0] is make_bijector.return_value
+            passed_base = MockFlow.call_args[0][1]
+            assert all(jnp.array_equal(a, b) for a, b in zip(jax.tree.leaves(passed_base), jax.tree.leaves(base_dist)))
 
 
 class TestEnergyBasedLoss:
@@ -157,13 +168,17 @@ class TestEnergyBasedLoss:
 
     def test_initialization(self, base_dist, target_dist):
         """Test loss can be created."""
-        loss = EnergyBasedLoss(base_dist, target_dist)
+
+        def make_bijector(vf):
+            return ODEBijector(vf)
+
+        loss = EnergyBasedLoss(base_dist, target_dist, make_bijector)
         assert loss.base_distribution is base_dist
         assert loss.target_distribution is target_dist
 
     def test_forward_pass(self, base_dist, target_dist, model):
         """Test loss computes and returns scalar."""
-        loss_fn = EnergyBasedLoss(base_dist, target_dist)
+        loss_fn = EnergyBasedLoss(base_dist, target_dist, lambda vf: ODEBijector(vf))
         batch = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(0), 16))
         loss, _aux = loss_fn(model, batch, key=jax.random.key(1))
         assert loss.shape == ()
@@ -171,7 +186,7 @@ class TestEnergyBasedLoss:
 
     def test_has_gradient(self, base_dist, target_dist, model):
         """Test loss is differentiable."""
-        loss_fn = EnergyBasedLoss(base_dist, target_dist)
+        loss_fn = EnergyBasedLoss(base_dist, target_dist, lambda vf: ODEBijector(vf))
         batch = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(0), 16))
 
         @eqx.filter_jit
@@ -190,7 +205,7 @@ class TestKullbackLeiblerLoss:
 
     def test_initialization(self, base_dist, target_dist):
         """Test loss can be created."""
-        loss = KullbackLeiblerLoss(base_dist, target_dist, alpha=0.5)
+        loss = KullbackLeiblerLoss(base_dist, target_dist, lambda vf: ODEBijector(vf), alpha=0.5)
         assert loss.alpha == 0.5
         assert loss.base_distribution is base_dist
 
@@ -198,8 +213,11 @@ class TestKullbackLeiblerLoss:
         """Test alpha=1 is pure MLE, alpha=0 is pure energy-based."""
         batch = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(0), 16))
 
-        loss_mle = MaximumLikelihoodLoss(base_dist)
-        loss_hybrid_alpha1 = KullbackLeiblerLoss(base_dist, target_dist, alpha=1.0)
+        def make_bijector(vf):
+            return ODEBijector(vf)
+
+        loss_mle = MaximumLikelihoodLoss(base_dist, make_bijector)
+        loss_hybrid_alpha1 = KullbackLeiblerLoss(base_dist, target_dist, make_bijector, alpha=1.0)
 
         l_mle, _ = loss_mle(model, batch, key=jax.random.key(1))
         l_hybrid, _ = loss_hybrid_alpha1(model, batch, key=jax.random.key(1))
@@ -208,7 +226,7 @@ class TestKullbackLeiblerLoss:
 
     def test_forward_pass(self, base_dist, target_dist, model):
         """Test loss computes and returns scalar."""
-        loss_fn = KullbackLeiblerLoss(base_dist, target_dist, alpha=0.5)
+        loss_fn = KullbackLeiblerLoss(base_dist, target_dist, lambda vf: ODEBijector(vf), alpha=0.5)
         batch = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(0), 16))
         loss, _aux = loss_fn(model, batch, key=jax.random.key(1))
         assert loss.shape == ()
@@ -216,7 +234,7 @@ class TestKullbackLeiblerLoss:
 
     def test_has_gradient(self, base_dist, target_dist, model):
         """Test loss is differentiable."""
-        loss_fn = KullbackLeiblerLoss(base_dist, target_dist, alpha=0.5)
+        loss_fn = KullbackLeiblerLoss(base_dist, target_dist, lambda vf: ODEBijector(vf), alpha=0.5)
         batch = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(0), 16))
 
         @eqx.filter_jit
@@ -254,7 +272,7 @@ class TestLoggerCallback:
 
     def test_logging_in_training_loop(self, base_dist, target_dist, model, capsys):
         """Test that logger actually activates during training."""
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         optimizer = optax.adam(1e-3)
         logger = LoggerCallback(log_freq=1)
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[logger])
@@ -279,7 +297,7 @@ class TestProgressBarCallback:
 
     def test_progress_bar_active(self, base_dist, target_dist, model, capsys):
         """Test progress bar updates during training."""
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         optimizer = optax.adam(1e-3)
         pbar = ProgressBarCallback(refresh_rate=1)
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[pbar])
@@ -330,7 +348,7 @@ class TestProfilingCallback:
         trace_dir = tmp_path / "traces"
         cb = ProfilingCallback(log_dir=trace_dir, warmup_steps=2, profile_steps=3)
 
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         optimizer = optax.adam(1e-3)
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[cb])
 
@@ -349,7 +367,7 @@ class TestProfilingCallback:
         trace_dir = tmp_path / "traces_none"
         cb = ProfilingCallback(log_dir=trace_dir, warmup_steps=2, profile_steps=None)
 
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         optimizer = optax.adam(1e-3)
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[cb])
 
@@ -374,6 +392,7 @@ class TestESSCallback:
         cb = ESSCallback(
             target_log_prob=target_dist.log_prob,
             base_distribution=base_dist,
+            make_bijector=lambda vf: ODEBijector(vf),
         )
         assert cb.n_samples == 1000
         assert cb.eval_freq == 250
@@ -381,6 +400,7 @@ class TestESSCallback:
         cb_custom = ESSCallback(
             target_log_prob=target_dist.log_prob,
             base_distribution=base_dist,
+            make_bijector=lambda vf: ODEBijector(vf),
             n_samples=500,
             eval_freq=100,
         )
@@ -401,11 +421,12 @@ class TestESSCallback:
         ess_cb = ESSCallback(
             target_log_prob=target_dist.log_prob,
             base_distribution=base_dist,
+            make_bijector=lambda vf: ODEBijector(vf),
             n_samples=100,
             eval_freq=5,
         )
 
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         optimizer = optax.adam(1e-3)
         # ESSCallback must come BEFORE ESSTracker so it injects first
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[ess_cb, ESSTracker()])
@@ -440,11 +461,12 @@ class TestESSCallback:
         ess_cb = ESSCallback(
             target_log_prob=custom_log_prob,
             base_distribution=base_dist,
+            make_bijector=lambda vf: ODEBijector(vf),
             n_samples=50,
             eval_freq=3,
         )
 
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         optimizer = optax.adam(1e-3)
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[ess_cb, ESSTracker()])
 
@@ -490,7 +512,7 @@ class TestTensorBoardLogger:
         tb_dir = tmp_path / "tb_logs"
         tb = TensorBoardLogger(log_dir=tb_dir, log_freq=1)
 
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         optimizer = optax.adam(1e-3)
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[tb])
 
@@ -512,7 +534,7 @@ class TestTensorBoardLogger:
         tb_dir = tmp_path / "tb_val"
         tb = TensorBoardLogger(log_dir=tb_dir, log_freq=1)
 
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         optimizer = optax.adam(1e-3)
 
         val_data = [jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(1), 32))]
@@ -540,7 +562,7 @@ class TestTrainerInitialization:
     def test_basic_init(self, base_dist, model):
         """Test trainer can be initialized."""
         optimizer = optax.adam(1e-3)
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         trainer = Trainer(model, optimizer, loss_fn, seed=42)
         assert trainer.model is model
         assert trainer.step == 0
@@ -548,7 +570,7 @@ class TestTrainerInitialization:
     def test_init_with_prng_key(self, base_dist, model):
         """Test trainer init with explicit PRNG key."""
         optimizer = optax.adam(1e-3)
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         key = jax.random.key(123)
         trainer = Trainer(model, optimizer, loss_fn, seed=key)
         assert jnp.array_equal(trainer.key, key)
@@ -556,7 +578,7 @@ class TestTrainerInitialization:
     def test_init_with_callbacks(self, base_dist, model):
         """Test trainer with callbacks in init."""
         optimizer = optax.adam(1e-3)
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         cb = Callback()
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[cb])
         assert len(trainer.callbacks) == 1
@@ -564,7 +586,7 @@ class TestTrainerInitialization:
     def test_add_callback(self, base_dist, model):
         """Test adding callbacks after init."""
         optimizer = optax.adam(1e-3)
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         trainer = Trainer(model, optimizer, loss_fn)
         trainer.add_callback(LoggerCallback())
         assert len(trainer.callbacks) == 1
@@ -576,7 +598,7 @@ class TestTrainerTraining:
     def test_basic_training(self, base_dist, target_dist, model):
         """Test basic training loop runs."""
         optimizer = optax.adam(1e-3)
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         trainer = Trainer(model, optimizer, loss_fn, seed=0)
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
@@ -589,7 +611,7 @@ class TestTrainerTraining:
     def test_training_decreases_loss(self, base_dist, target_dist, model):
         """Test that training actually improves the loss."""
         optimizer = optax.adam(1e-2)
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
 
         test_batch = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(99), 64))
         initial_loss, _ = loss_fn(model, test_batch, key=jax.random.key(100))
@@ -606,7 +628,7 @@ class TestTrainerTraining:
     def test_training_with_small_source(self, base_dist, target_dist, model):
         """Test training with a small data source (grain repeats it)."""
         optimizer = optax.adam(1e-3)
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         trainer = Trainer(model, optimizer, loss_fn, seed=0)
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0, length=3)
@@ -620,7 +642,7 @@ class TestTrainerTraining:
         from superiorflows.train import ValidationCallback
 
         optimizer = optax.adam(1e-3)
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
 
         val_steps = []
 
@@ -652,7 +674,7 @@ class TestTrainerCheckpointing:
     def test_checkpoint_save_restore(self, base_dist, target_dist, model, tmp_path):
         """Test full checkpoint save and restore cycle."""
         optimizer = optax.adam(1e-3)
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
 
         ckpt_path = tmp_path / "checkpoints"
         cb = CheckpointCallback(ckpt_path=str(ckpt_path), save_freq=5)
@@ -674,7 +696,7 @@ class TestTrainerCheckpointing:
     def test_checkpoint_overwrite_behavior(self, base_dist, target_dist, model, tmp_path):
         """Test that overwrite flag is respected during training."""
         optimizer = optax.adam(1e-3)
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
 
         ckpt_path = tmp_path / "checkpoints_overwrite"
 
@@ -728,7 +750,7 @@ class TestCompilationEfficiency:
     def test_no_recompilation_during_training(self, base_dist, target_dist, model):
         """Test that training steps do not trigger recompilation."""
         optimizer = optax.adam(1e-3)
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(target_dist, batch_size=32, seed=0)
@@ -866,9 +888,9 @@ class TestTrainerWithParticleSystems:
 
         loss_fn = MaximumLikelihoodLoss(
             base_distribution=base_dist,
-            dynamic_mask=dynamic_mask,
-            stepsize_controller=dfx.ConstantStepSize(),
-            dt0=0.1,
+            make_bijector=lambda vf: ODEBijector(
+                vf, dynamic_mask=dynamic_mask, stepsize_controller=dfx.ConstantStepSize(), dt0=0.1
+            ),
         )
 
         optimizer = optax.sgd(1e-4)
@@ -880,14 +902,11 @@ class TestTrainerWithParticleSystems:
 
         assert trainer.step == 5
         flow = Flow(
-            velocity_field=trained_model,
-            base_distribution=base_dist,
-            dynamic_mask=dynamic_mask,
-            stepsize_controller=dfx.ConstantStepSize(),
-            dt0=0.1,
+            ODEBijector(trained_model, dynamic_mask=dynamic_mask, stepsize_controller=dfx.ConstantStepSize(), dt0=0.1),
+            base_dist,
         )
         x0 = base_dist.sample(jax.random.key(1))
-        x1 = flow.apply_map(x0)
+        x1 = flow.bijector.forward(x0)
         assert x1.positions.shape == x0.positions.shape
         assert jnp.all(jnp.isfinite(x1.positions))
 
@@ -899,10 +918,9 @@ class TestTrainerWithParticleSystems:
 
         loss_fn = MaximumLikelihoodLoss(
             base_distribution=base_dist,
-            dynamic_mask=dynamic_mask,
-            hutchinson_samples=3,
-            stepsize_controller=dfx.ConstantStepSize(),
-            dt0=0.1,
+            make_bijector=lambda vf: ODEBijector(
+                vf, dynamic_mask=dynamic_mask, hutchinson_samples=3, stepsize_controller=dfx.ConstantStepSize(), dt0=0.1
+            ),
         )
 
         optimizer = optax.sgd(1e-4)
@@ -920,15 +938,12 @@ class TestTrainerWithParticleSystems:
         dynamic_mask = particle_setup["dynamic_mask"]
 
         flow = Flow(
-            velocity_field=velocity_field,
-            base_distribution=base_dist,
-            dynamic_mask=dynamic_mask,
-            stepsize_controller=dfx.ConstantStepSize(),
-            dt0=0.1,
+            ODEBijector(velocity_field, dynamic_mask=dynamic_mask, stepsize_controller=dfx.ConstantStepSize(), dt0=0.1),
+            base_dist,
         )
 
         x0 = base_dist.sample(jax.random.key(0))
-        x1, logq = flow.apply_map_and_log_prob(x0)
+        x1, logq = flow.push_forward_and_log_prob(x0)
 
         assert jnp.all(jnp.isfinite(x1.positions))
         assert jnp.isfinite(logq)
@@ -937,13 +952,10 @@ class TestTrainerWithParticleSystems:
         def compute_logq_grad(vf):
             def loss_fn(model):
                 f = Flow(
-                    velocity_field=model,
-                    base_distribution=base_dist,
-                    dynamic_mask=dynamic_mask,
-                    stepsize_controller=dfx.ConstantStepSize(),
-                    dt0=0.1,
+                    ODEBijector(model, dynamic_mask=dynamic_mask, stepsize_controller=dfx.ConstantStepSize(), dt0=0.1),
+                    base_dist,
                 )
-                _, lq = f.apply_map_and_log_prob(x0)
+                _, lq = f.push_forward_and_log_prob(x0)
                 return lq
 
             return eqx.filter_value_and_grad(loss_fn)(vf)
@@ -966,7 +978,7 @@ class TestEndToEndTraining:
     def test_8_gaussians_ml_training(self, base_dist, target_dist, model):
         """Full 8 Gaussians test with ML loss."""
         optimizer = optax.adam(1e-3)
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         logger = LoggerCallback(log_freq=10)
         trainer = Trainer(model, optimizer, loss_fn, callbacks=[logger])
 
@@ -976,16 +988,16 @@ class TestEndToEndTraining:
 
         assert trainer.step == 20
 
-        flow = Flow(velocity_field=trained_model, base_distribution=base_dist)
+        flow = Flow(ODEBijector(trained_model), base_dist)
         x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(1), 10))
-        x1 = jax.vmap(flow.apply_map)(x0)
+        x1 = jax.vmap(flow.bijector.forward)(x0)
         assert x1.shape == (10, 2)
         assert jnp.all(jnp.isfinite(x1))
 
     def test_8_gaussians_energy_training(self, base_dist, target_dist, model):
         """Full 8 Gaussians test with Energy-based loss."""
         optimizer = optax.adam(1e-3)
-        loss_fn = EnergyBasedLoss(base_dist, target_dist)
+        loss_fn = EnergyBasedLoss(base_dist, target_dist, lambda vf: ODEBijector(vf))
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(base_dist, batch_size=32, seed=0)
@@ -994,16 +1006,16 @@ class TestEndToEndTraining:
 
         assert trainer.step == 20
 
-        flow = Flow(velocity_field=trained_model, base_distribution=base_dist)
+        flow = Flow(ODEBijector(trained_model), base_dist)
         x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(1), 10))
-        x1 = jax.vmap(flow.apply_map)(x0)
+        x1 = jax.vmap(flow.bijector.forward)(x0)
         assert x1.shape == (10, 2)
         assert jnp.all(jnp.isfinite(x1))
 
     def test_8_gaussians_hybrid_training(self, base_dist, target_dist, model):
         """Full 8 Gaussians test with Hybrid KL loss."""
         optimizer = optax.adam(1e-3)
-        loss_fn = KullbackLeiblerLoss(base_dist, target_dist, alpha=0.5)
+        loss_fn = KullbackLeiblerLoss(base_dist, target_dist, lambda vf: ODEBijector(vf), alpha=0.5)
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(target_dist, batch_size=32, seed=0)
@@ -1012,9 +1024,9 @@ class TestEndToEndTraining:
 
         assert trainer.step == 20
 
-        flow = Flow(velocity_field=trained_model, base_distribution=base_dist)
+        flow = Flow(ODEBijector(trained_model), base_dist)
         x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(1), 10))
-        x1 = jax.vmap(flow.apply_map)(x0)
+        x1 = jax.vmap(flow.bijector.forward)(x0)
         assert x1.shape == (10, 2)
         assert jnp.all(jnp.isfinite(x1))
 
@@ -1030,7 +1042,7 @@ class TestHutchinsonTraining:
     def test_ml_loss_with_hutchinson(self, base_dist, target_dist, model):
         """Test ML training with Hutchinson estimator for divergence."""
         optimizer = optax.adam(1e-3)
-        loss_fn = MaximumLikelihoodLoss(base_dist, hutchinson_samples=5)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf, hutchinson_samples=5))
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
@@ -1040,12 +1052,11 @@ class TestHutchinsonTraining:
         assert trainer.step == 10
 
         flow = Flow(
-            velocity_field=trained_model,
-            base_distribution=base_dist,
-            hutchinson_samples=5,
+            ODEBijector(trained_model, hutchinson_samples=5),
+            base_dist,
         )
         x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(1), 5))
-        x1 = jax.vmap(flow.apply_map)(x0)
+        x1 = jax.vmap(flow.bijector.forward)(x0)
         assert x1.shape == (5, 2)
         assert jnp.all(jnp.isfinite(x1))
 
@@ -1057,7 +1068,7 @@ class TestHutchinsonTraining:
     def test_energy_loss_with_hutchinson(self, base_dist, target_dist, model):
         """Test Energy-based training with Hutchinson estimator."""
         optimizer = optax.adam(1e-3)
-        loss_fn = EnergyBasedLoss(base_dist, target_dist, hutchinson_samples=3)
+        loss_fn = EnergyBasedLoss(base_dist, target_dist, lambda vf: ODEBijector(vf, hutchinson_samples=3))
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(base_dist, batch_size=16, seed=0)
@@ -1067,13 +1078,12 @@ class TestHutchinsonTraining:
         assert trainer.step == 10
 
         flow = Flow(
-            velocity_field=trained_model,
-            base_distribution=base_dist,
-            hutchinson_samples=3,
+            ODEBijector(trained_model, hutchinson_samples=3),
+            base_dist,
         )
         x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(1), 5))
         keys = jax.random.split(jax.random.key(2), 5)
-        x1, logq = jax.vmap(lambda x, k: flow.apply_map_and_log_prob(x, key=k))(x0, keys)
+        x1, logq = jax.vmap(lambda x, k: flow.push_forward_and_log_prob(x, key=k))(x0, keys)
         assert x1.shape == (5, 2)
         assert logq.shape == (5,)
         assert jnp.all(jnp.isfinite(x1))
@@ -1082,7 +1092,9 @@ class TestHutchinsonTraining:
     def test_hybrid_loss_with_hutchinson(self, base_dist, target_dist, model):
         """Test Hybrid KL training with Hutchinson estimator."""
         optimizer = optax.adam(1e-3)
-        loss_fn = KullbackLeiblerLoss(base_dist, target_dist, alpha=0.5, hutchinson_samples=3)
+        loss_fn = KullbackLeiblerLoss(
+            base_dist, target_dist, lambda vf: ODEBijector(vf, hutchinson_samples=3), alpha=0.5
+        )
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
@@ -1103,13 +1115,13 @@ class TestHutchinsonParticleTraining:
         model_exact = MLPVelocity(input_dim=2, width=16, depth=2, key=k1)
         model_hutch = MLPVelocity(input_dim=2, width=16, depth=2, key=k1)
 
-        loss_exact = MaximumLikelihoodLoss(base_dist)
+        loss_exact = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         trainer_exact = Trainer(model_exact, optax.adam(1e-3), loss_exact, seed=0)
         source_exact = DistributionDataSource(target_dist, batch_size=32, seed=10)
         dataset_exact = grain.MapDataset.source(source_exact).repeat()
         trained_exact = trainer_exact.train(dataset_exact, max_steps=20)
 
-        loss_hutch = MaximumLikelihoodLoss(base_dist, hutchinson_samples=5)
+        loss_hutch = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf, hutchinson_samples=5))
         trainer_hutch = Trainer(model_hutch, optax.adam(1e-3), loss_hutch, seed=0)
         source_hutch = DistributionDataSource(target_dist, batch_size=32, seed=10)
         dataset_hutch = grain.MapDataset.source(source_hutch).repeat()
@@ -1117,15 +1129,14 @@ class TestHutchinsonParticleTraining:
 
         x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(99), 10))
 
-        flow_exact = Flow(velocity_field=trained_exact, base_distribution=base_dist)
+        flow_exact = Flow(ODEBijector(trained_exact), base_dist)
         flow_hutch = Flow(
-            velocity_field=trained_hutch,
-            base_distribution=base_dist,
-            hutchinson_samples=5,
+            ODEBijector(trained_hutch, hutchinson_samples=5),
+            base_dist,
         )
 
-        x1_exact = jax.vmap(flow_exact.apply_map)(x0)
-        x1_hutch = jax.vmap(flow_hutch.apply_map)(x0)
+        x1_exact = jax.vmap(flow_exact.bijector.forward)(x0)
+        x1_hutch = jax.vmap(flow_hutch.bijector.forward)(x0)
 
         assert jnp.all(jnp.isfinite(x1_exact))
         assert jnp.all(jnp.isfinite(x1_hutch))
@@ -1173,7 +1184,7 @@ class TestAnalyticalDivergenceTraining:
         """Test ML training with analytical divergence."""
         model = LinearVelocity(dim=2, key=jax.random.key(42))
         optimizer = optax.adam(1e-3)
-        loss_fn = MaximumLikelihoodLoss(base_dist, divergence_fn=_linear_divergence_fn)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf, divergence_fn=_linear_divergence_fn))
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
@@ -1183,12 +1194,11 @@ class TestAnalyticalDivergenceTraining:
         assert trainer.step == 10
 
         flow = Flow(
-            velocity_field=trained_model,
-            base_distribution=base_dist,
-            divergence_fn=_linear_divergence_fn,
+            ODEBijector(trained_model, divergence_fn=_linear_divergence_fn),
+            base_dist,
         )
         x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(1), 5))
-        x1 = jax.vmap(flow.apply_map)(x0)
+        x1 = jax.vmap(flow.bijector.forward)(x0)
         assert x1.shape == (5, 2)
         assert jnp.all(jnp.isfinite(x1))
 
@@ -1200,7 +1210,9 @@ class TestAnalyticalDivergenceTraining:
         """Test Energy-based training with analytical divergence."""
         model = LinearVelocity(dim=2, key=jax.random.key(42))
         optimizer = optax.adam(1e-3)
-        loss_fn = EnergyBasedLoss(base_dist, target_dist, divergence_fn=_linear_divergence_fn)
+        loss_fn = EnergyBasedLoss(
+            base_dist, target_dist, lambda vf: ODEBijector(vf, divergence_fn=_linear_divergence_fn)
+        )
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(base_dist, batch_size=16, seed=0)
@@ -1210,12 +1222,11 @@ class TestAnalyticalDivergenceTraining:
         assert trainer.step == 10
 
         flow = Flow(
-            velocity_field=trained_model,
-            base_distribution=base_dist,
-            divergence_fn=_linear_divergence_fn,
+            ODEBijector(trained_model, divergence_fn=_linear_divergence_fn),
+            base_dist,
         )
         x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(1), 5))
-        x1, logq = jax.vmap(flow.apply_map_and_log_prob)(x0)
+        x1, logq = jax.vmap(flow.push_forward_and_log_prob)(x0)
         assert x1.shape == (5, 2)
         assert logq.shape == (5,)
         assert jnp.all(jnp.isfinite(x1))
@@ -1225,7 +1236,9 @@ class TestAnalyticalDivergenceTraining:
         """Test Hybrid KL training with analytical divergence."""
         model = LinearVelocity(dim=2, key=jax.random.key(42))
         optimizer = optax.adam(1e-3)
-        loss_fn = KullbackLeiblerLoss(base_dist, target_dist, alpha=0.5, divergence_fn=_linear_divergence_fn)
+        loss_fn = KullbackLeiblerLoss(
+            base_dist, target_dist, lambda vf: ODEBijector(vf, divergence_fn=_linear_divergence_fn), alpha=0.5
+        )
         trainer = Trainer(model, optimizer, loss_fn)
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0)
@@ -1239,8 +1252,10 @@ class TestAnalyticalDivergenceTraining:
         model = LinearVelocity(dim=2, key=jax.random.key(42))
         batch = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(0), 16))
 
-        loss_exact = MaximumLikelihoodLoss(base_dist)
-        loss_analytical = MaximumLikelihoodLoss(base_dist, divergence_fn=_linear_divergence_fn)
+        loss_exact = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
+        loss_analytical = MaximumLikelihoodLoss(
+            base_dist, lambda vf: ODEBijector(vf, divergence_fn=_linear_divergence_fn)
+        )
 
         l_exact, _ = loss_exact(model, batch)
         l_analytical, _ = loss_analytical(model, batch)
@@ -1259,7 +1274,7 @@ class TestDatasetExhausted:
     def test_exhausted_without_repeat(self, base_dist, target_dist, model):
         """Test that training without .repeat() raises DatasetExhausted."""
         optimizer = optax.adam(1e-3)
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         trainer = Trainer(model, optimizer, loss_fn, seed=0)
 
         # Dataset with 3 elements and no .repeat()
@@ -1272,7 +1287,7 @@ class TestDatasetExhausted:
     def test_exact_exhaustion_with_repeat(self, base_dist, target_dist, model):
         """Test that .repeat() prevents DatasetExhausted."""
         optimizer = optax.adam(1e-3)
-        loss_fn = MaximumLikelihoodLoss(base_dist)
+        loss_fn = MaximumLikelihoodLoss(base_dist, lambda vf: ODEBijector(vf))
         trainer = Trainer(model, optimizer, loss_fn, seed=0)
 
         source = DistributionDataSource(target_dist, batch_size=16, seed=0, length=3)

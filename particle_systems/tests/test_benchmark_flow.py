@@ -5,7 +5,7 @@ import grain
 import jax
 import jax.numpy as jnp
 import pytest
-from superiorflows import Flow
+from superiorflows import Flow, ODEBijector
 
 from particle_systems.particle_system import ParticleSystem, TrajectoryDataSource, UniformParticles
 from particle_systems.velocities import ParticlesMLPVelocity
@@ -65,7 +65,7 @@ def get_flow(base_dist, velocity, solver_name, solver_param):
             augmented_stepsize_controller=dfx.PIDController(rtol=tol, atol=tol),
         )
 
-    return Flow(velocity_field=velocity, base_distribution=base_dist, **flow_kwargs)
+    return Flow(ODEBijector(velocity, **flow_kwargs), base_dist)
 
 
 SOLVER_CONFIGS = [

@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import optax
 import typer
-from superiorflows import DistributionDataSource
+from superiorflows import DistributionDataSource, ODEBijector
 from superiorflows.train import (
     CheckpointCallback,
     LoggerCallback,
@@ -242,7 +242,11 @@ def train_model(
     flow_kwargs = dict(
         stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5), dynamic_mask=ToyParticles.get_dynamic_mask()
     )
-    loss_fn = MaximumLikelihoodLoss(base_distribution=uniform_dist, **flow_kwargs)
+
+    def make_bijector(vf):
+        return ODEBijector(vf, **flow_kwargs)
+
+    loss_fn = MaximumLikelihoodLoss(base_distribution=uniform_dist, make_bijector=make_bijector)
 
     # Model
     key, subkey = jax.random.split(key)

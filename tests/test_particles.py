@@ -5,7 +5,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
-from superiorflows import Flow
+from superiorflows import Flow, ODEBijector
 
 
 class System(eqx.Module):
@@ -154,10 +154,12 @@ def particles_flow_setup(uniform_box_distribution_setup, particles_velocity_fiel
         lambda x: (x.positions, x.species, x.box), dist.sample(key=subkey), replace=(True, True, False)
     )
     flow = Flow(
-        velocity_field=velocity_field,
-        base_distribution=dist,
-        stepsize_controller=dfx.PIDController(rtol=1e-7, atol=1e-7),
-        dynamic_mask=dynamic_mask,
+        ODEBijector(
+            velocity_field,
+            stepsize_controller=dfx.PIDController(rtol=1e-7, atol=1e-7),
+            dynamic_mask=dynamic_mask,
+        ),
+        dist,
     )
     return flow
 
@@ -167,18 +169,18 @@ def test_particles_flow(particles_flow_setup):
     key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     x0 = particles_flow_setup.base_distribution.sample(key=subkey)
-    x1 = flow.apply_map(x0)
+    x1 = flow.bijector.forward(x0)
     assert jax.tree.map(
         lambda x, y: jnp.allclose(x, y, atol=1e-5, rtol=1e-5),
-        flow.apply_inverse_map(flow.apply_map(x0=x0)),
+        flow.bijector.inverse(flow.bijector.forward(x0)),
         x0,
     )
-    x1, logq1 = flow.apply_map_and_log_prob(x0)
+    x1, logq1 = flow.push_forward_and_log_prob(x0)
     logq_inv = flow.log_prob(x1)
     assert jnp.allclose(logq_inv, logq1, atol=1e-4, rtol=1e-4)
     assert jax.tree.map(
         lambda x, y: jnp.allclose(x, y, atol=1e-5, rtol=1e-5),
-        flow.apply_inverse_map(x1),
+        flow.bijector.inverse(x1),
         x0,
     )
 
@@ -190,14 +192,14 @@ def test_particles_flow_batched(particles_flow_setup):
     M = 10
     keys = jax.random.split(subkey, M)
     X0 = jax.vmap(flow.base_distribution.sample)(keys)
-    X1 = jax.vmap(flow.apply_map)(X0)
+    X1 = jax.vmap(flow.bijector.forward)(X0)
     assert X1.positions.shape == (M,) + X0.positions.shape[1:]
     assert jax.tree.map(
         lambda x, y: jnp.allclose(x, y, atol=1e-5, rtol=1e-5),
-        jax.vmap(flow.apply_inverse_map)(X1),
+        jax.vmap(flow.bijector.inverse)(X1),
         X0,
     )
-    X1, logq1 = jax.vmap(flow.apply_map_and_log_prob)(X0)
+    X1, logq1 = jax.vmap(flow.push_forward_and_log_prob)(X0)
     assert X1.positions.shape == (M,) + X0.positions.shape[1:]
     assert logq1.shape == (M,)
     logq_inv = jax.vmap(flow.log_prob)(X1)
@@ -205,7 +207,7 @@ def test_particles_flow_batched(particles_flow_setup):
     assert jnp.allclose(logq_inv, logq1, atol=1e-4, rtol=1e-4)
     assert jax.tree.map(
         lambda x, y: jnp.allclose(x, y, atol=1e-5, rtol=1e-5),
-        jax.vmap(flow.apply_inverse_map)(X1),
+        jax.vmap(flow.bijector.inverse)(X1),
         X0,
     )
 
@@ -238,12 +240,12 @@ def test_array_of_systems(particles_flow_setup):
     list_of_systems = [x1, x2, x3]
     batched_systems = jax.tree.map(lambda *vals: jnp.array(vals), *list_of_systems)
     assert batched_systems.positions.shape == (3, N, d)
-    x1, logq1 = jax.vmap(flow.apply_map_and_log_prob)(batched_systems)
+    x1, logq1 = jax.vmap(flow.push_forward_and_log_prob)(batched_systems)
     assert x1.positions.shape == (3, N, d)
     assert logq1.shape == (3,)
     assert jax.tree.map(
         lambda x, y: jnp.allclose(x, y, atol=1e-5, rtol=1e-5),
-        jax.vmap(flow.apply_inverse_map)(x1),
+        jax.vmap(flow.bijector.inverse)(x1),
         batched_systems,
     )
 
@@ -255,7 +257,7 @@ def test_particle_flow_performance(benchmark, particles_flow_setup):
     x0 = flow.base_distribution.sample(key=subkey)
 
     def run_apply_map_and_log_prob():
-        x1, logq1 = flow.apply_map_and_log_prob(x0)
+        x1, logq1 = flow.push_forward_and_log_prob(x0)
         jax.tree.map(lambda x: x.block_until_ready(), x1)
         logq1.block_until_ready()
         return x1, logq1
@@ -272,7 +274,7 @@ def test_particle_flow_batched_performance(benchmark, particles_flow_setup):
     X0 = jax.vmap(flow.base_distribution.sample)(keys)
 
     def run_apply_map_and_log_prob():
-        X1, logq1 = jax.vmap(flow.apply_map_and_log_prob)(X0)
+        X1, logq1 = jax.vmap(flow.push_forward_and_log_prob)(X0)
         jax.tree.map(lambda x: x.block_until_ready(), X1)
         logq1.block_until_ready()
         return X1, logq1
@@ -293,10 +295,10 @@ def test_particle_ad_performance(benchmark, particles_flow_setup):
     M = 128
     keys = jax.random.split(subkey, M)
     X0 = jax.vmap(flow.base_distribution.sample)(keys)
-    X = jax.vmap(flow.apply_map)(X0)
+    X = jax.vmap(flow.bijector.forward)(X0)
 
     def run_ad():
-        jax.grad(foo_loss)(flow, X).velocity_field.params.block_until_ready()
+        jax.grad(foo_loss)(flow, X).bijector.velocity_field.params.block_until_ready()
 
     benchmark(run_ad)
 
@@ -317,11 +319,13 @@ def hutchinson_particles_flow_setup(uniform_box_distribution_setup, particles_ve
         lambda x: (x.positions, x.species, x.box), dist.sample(key=subkey), replace=(True, True, False)
     )
     flow = Flow(
-        velocity_field=velocity_field,
-        base_distribution=dist,
-        stepsize_controller=dfx.PIDController(rtol=1e-7, atol=1e-7),
-        dynamic_mask=dynamic_mask,
-        hutchinson_samples=5,  # Use 5 random vectors
+        ODEBijector(
+            velocity_field,
+            stepsize_controller=dfx.PIDController(rtol=1e-7, atol=1e-7),
+            dynamic_mask=dynamic_mask,
+            hutchinson_samples=5,  # Use 5 random vectors
+        ),
+        dist,
     )
     return flow
 
@@ -336,10 +340,10 @@ def test_hutchinson_particles_flow(hutchinson_particles_flow_setup, particles_fl
     x0 = exact_flow.base_distribution.sample(key=subkey1)
 
     # Exact result
-    x1_exact, logq1_exact = exact_flow.apply_map_and_log_prob(x0)
+    x1_exact, logq1_exact = exact_flow.push_forward_and_log_prob(x0)
 
     # Hutchinson result
-    x1_hutch, logq1_hutch = hutchinson_flow.apply_map_and_log_prob(x0, key=subkey2)
+    x1_hutch, logq1_hutch = hutchinson_flow.push_forward_and_log_prob(x0, key=subkey2)
 
     # Positions should match (only divergence differs)
     assert jnp.allclose(x1_exact.positions, x1_hutch.positions, atol=1e-5)
@@ -359,11 +363,11 @@ def test_hutchinson_particles_flow_batched(hutchinson_particles_flow_setup, part
     X0 = jax.vmap(exact_flow.base_distribution.sample)(keys)
 
     # Exact results
-    X1_exact, logq1_exact = jax.vmap(exact_flow.apply_map_and_log_prob)(X0)
+    X1_exact, logq1_exact = jax.vmap(exact_flow.push_forward_and_log_prob)(X0)
 
     # Hutchinson results
     keys = jax.random.split(subkey2, M)
-    X1_hutch, logq1_hutch = jax.vmap(lambda x, k: hutchinson_flow.apply_map_and_log_prob(x, key=k))(X0, keys)
+    X1_hutch, logq1_hutch = jax.vmap(lambda x, k: hutchinson_flow.push_forward_and_log_prob(x, key=k))(X0, keys)
 
     assert X1_hutch.positions.shape == X1_exact.positions.shape
     assert logq1_hutch.shape == (M,)
@@ -378,7 +382,7 @@ def test_hutchinson_particles_performance(benchmark, hutchinson_particles_flow_s
     x0 = flow.base_distribution.sample(key=subkey1)
 
     def run_apply_map_and_log_prob():
-        x1, logq1 = flow.apply_map_and_log_prob(x0, key=subkey2)
+        x1, logq1 = flow.push_forward_and_log_prob(x0, key=subkey2)
         jax.tree.map(lambda x: x.block_until_ready(), x1)
         logq1.block_until_ready()
         return x1, logq1

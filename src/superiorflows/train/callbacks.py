@@ -438,11 +438,9 @@ class ESSCallback(Callback):
     (``LoggerCallback``, ``TensorBoardLogger``) automatically pick it up.
 
     Args:
-        target_log_prob: Callable ``(x) -> log_prob``. Can be a distribution's
-            distribution's ``.log_prob`` method, an unnormalised energy
-            function, or any ``(batch,) -> (batch,)`` callable.
+        target_log_prob: Callable ``(x) -> log_prob``.
         base_distribution: The base/prior distribution for the flow.
-        flow_kwargs: Extra kwargs passed to ``Flow(...)`` (e.g., ``dt0``).
+        make_bijector: Callable ``model -> AbstractBijector``.
         n_samples: Number of samples for ESS estimation.
         eval_freq: Compute ESS every N steps.
     """
@@ -451,13 +449,13 @@ class ESSCallback(Callback):
         self,
         target_log_prob: Callable,
         base_distribution,
-        flow_kwargs: dict | None = None,
+        make_bijector: Callable,
         n_samples: int = 1000,
         eval_freq: int = 250,
     ):
         self.target_log_prob = target_log_prob
         self.base_distribution = base_distribution
-        self.flow_kwargs = flow_kwargs or {}
+        self.make_bijector = make_bijector
         self.n_samples = n_samples
         self.eval_freq = eval_freq
 
@@ -472,13 +470,10 @@ class ESSCallback(Callback):
         import jax
         import jax.numpy as jnp
 
-        from superiorflows import Flow
+        from superiorflows.flow import Flow
 
-        flow = Flow(
-            velocity_field=trainer.model,
-            base_distribution=self.base_distribution,
-            **self.flow_kwargs,
-        )
+        bijector = self.make_bijector(trainer.model)
+        flow = Flow(bijector, self.base_distribution)
 
         key, subkey = jax.random.split(trainer.key)
         keys = jax.random.split(subkey, self.n_samples)

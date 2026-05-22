@@ -20,7 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import typer
-from superiorflows import DistributionDataSource
+from superiorflows import DistributionDataSource, ODEBijector
 from superiorflows.train import (
     CheckpointCallback,
     EnergyBasedLoss,
@@ -156,7 +156,7 @@ def build_velocity(config: dict, N: int, d: int, n_species: int, *, key):
 
 
 def build_solver(config: dict) -> dict:
-    """Build ``flow_kwargs`` from the ``solver`` config block."""
+    """Build ``bijector_kwargs`` from the ``solver`` config block."""
     scfg = config["solver"]
     stype = scfg["type"].lower()
     solver_steps = scfg.get("solver_steps")
@@ -171,25 +171,25 @@ def build_solver(config: dict) -> dict:
 
     slv = solvers[stype]()
 
-    flow_kwargs = dict(
+    bijector_kwargs = dict(
         dynamic_mask=ParticleSystem.get_dynamic_mask(),
         solver=slv,
         augmented_solver=slv,
     )
 
     if solver_steps is not None:
-        flow_kwargs.update(
+        bijector_kwargs.update(
             stepsize_controller=dfx.ConstantStepSize(),
             augmented_stepsize_controller=dfx.ConstantStepSize(),
             dt0=1.0 / solver_steps,
         )
     else:
-        flow_kwargs.update(
+        bijector_kwargs.update(
             stepsize_controller=dfx.PIDController(rtol=scfg["rtol"], atol=scfg["atol"]),
             augmented_stepsize_controller=dfx.PIDController(rtol=scfg["rtol"], atol=scfg["atol"]),
         )
 
-    return flow_kwargs
+    return bijector_kwargs
 
 
 def build_schedule_fn(expr: str):
@@ -285,7 +285,7 @@ def train_single_model(config: dict):
 
     # Distributions
     base_dist = UniformParticles(N=N, d=d, L=L, composition=composition)
-    flow_kwargs = build_solver(config)
+    bijector_kwargs = build_solver(config)
 
     # Target distribution
     boltzmann_model = None
@@ -304,9 +304,12 @@ def train_single_model(config: dict):
             composition=composition,
         )
 
+    def make_bijector(vf):
+        return ODEBijector(vf, **bijector_kwargs)
+
     # Loss and dataset
     if loss_type == "maximum_likelihood":
-        loss_fn = MaximumLikelihoodLoss(base_distribution=base_dist, **flow_kwargs)
+        loss_fn = MaximumLikelihoodLoss(base_distribution=base_dist, make_bijector=make_bijector)
         dataset = source.to_dataset(batch_size=batch_size, shuffle=True, seed=seed).repeat()
 
     elif loss_type == "energy_based":
@@ -315,7 +318,7 @@ def train_single_model(config: dict):
         loss_fn = EnergyBasedLoss(
             base_distribution=base_dist,
             target_distribution=target_dist,
-            **flow_kwargs,
+            make_bijector=make_bijector,
         )
         dataset = grain.MapDataset.source(DistributionDataSource(base_dist, batch_size, seed=seed)).repeat()
 
@@ -325,8 +328,8 @@ def train_single_model(config: dict):
         loss_fn = KullbackLeiblerLoss(
             base_distribution=base_dist,
             target_distribution=target_dist,
+            make_bijector=make_bijector,
             alpha=0.5,
-            **flow_kwargs,
         )
         dataset = source.to_dataset(batch_size=batch_size, shuffle=True, seed=seed).repeat()
 
@@ -337,7 +340,8 @@ def train_single_model(config: dict):
         def interpolant(t, x0, x1):
             return particle_geodesic_interpolant(t, x0, x1, L, s_fn=s_fn)
 
-        loss_fn = StochasticInterpolantLoss(interpolant=interpolant, gamma=gamma_fn, **flow_kwargs)
+        si_kwargs = {k: v for k, v in bijector_kwargs.items() if k in ("dynamic_mask",)}
+        loss_fn = StochasticInterpolantLoss(interpolant=interpolant, gamma=gamma_fn, **si_kwargs)
         dataset = (
             source.to_dataset(batch_size=batch_size, shuffle=True, seed=seed)
             .repeat()
@@ -396,7 +400,7 @@ def train_single_model(config: dict):
             ESSCallback(
                 target_log_prob=target_dist.log_prob,
                 base_distribution=base_dist,
-                flow_kwargs=flow_kwargs,
+                make_bijector=make_bijector,
                 n_samples=ccfg["ess"]["samples"],
                 eval_freq=ccfg["ess"]["freq"],
             )
@@ -453,7 +457,8 @@ def train_single_model(config: dict):
                 base_distribution=base_dist,
                 ref_species=jnp.array(source[0].species),
                 target_source=source,
-                flow_kwargs=flow_kwargs,
+                flow_kwargs=bijector_kwargs,
+                make_bijector=make_bijector,
                 n_samples=bz_cfg.get("samples", 20),
                 n_target_samples=bz_cfg.get("n_target_samples", 256),
                 eval_freq=bz_cfg.get("freq", log_freq),

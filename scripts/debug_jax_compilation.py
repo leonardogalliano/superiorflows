@@ -17,7 +17,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
-from superiorflows import Flow
+from superiorflows import Flow, ODEBijector
 from superiorflows.train import MaximumLikelihoodLoss
 from superiorflows.train.trainer import train_step
 
@@ -163,16 +163,16 @@ def test_flow_direct():
     base_dist = dsx.MultivariateNormalDiag(jnp.zeros(dim), jnp.ones(dim))
     velocity = SimpleVelocity(dim=dim, hidden=16, key=key)
 
-    print("\n3a. Testing flow.apply_map compilation...")
+    print("\n3a. Testing flow.bijector.forward compilation...")
 
     # Create flow once
-    flow = Flow(velocity_field=velocity, base_distribution=base_dist)
+    flow = Flow(ODEBijector(velocity), base_dist)
     x = jnp.zeros(dim)
 
     times = []
     for i in range(5):
         t0 = time.perf_counter()
-        result = flow.apply_map(x)
+        result = flow.bijector.forward(x)
         jax.block_until_ready(result)
         t1 = time.perf_counter()
         times.append((t1 - t0) * 1000)
@@ -212,7 +212,7 @@ def test_static_fields():
 
     base_dist = dsx.MultivariateNormalDiag(jnp.zeros(dim), jnp.ones(dim))
     velocity = SimpleVelocity(dim=dim, hidden=16, key=key)
-    flow = Flow(velocity_field=velocity, base_distribution=base_dist)
+    flow = Flow(ODEBijector(velocity), base_dist)
 
     print("\n4a. Field categorization:")
 
@@ -248,7 +248,7 @@ def test_static_fields():
     # This is key - the default lambda is shared!
     key2 = jax.random.key(1)
     velocity2 = SimpleVelocity(dim=dim, hidden=16, key=key2)
-    flow2 = Flow(velocity_field=velocity2, base_distribution=base_dist)
+    flow2 = Flow(ODEBijector(velocity2), base_dist)
 
     print(f"  flow1.dynamic_mask is flow2.dynamic_mask: {flow.dynamic_mask is flow2.dynamic_mask}")
 

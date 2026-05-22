@@ -11,7 +11,7 @@ import jax
 import numpy as np
 import orbax.checkpoint as ocp
 import typer
-from superiorflows import Flow
+from superiorflows import Flow, ODEBijector
 
 from particle_systems.particle_system import (
     TrajectoryDataSource,
@@ -69,7 +69,8 @@ def load_trained_flow(
     # Bind into Flow
     base_flow_kwargs = build_solver(config)
     base_flow_kwargs.update(flow_kwargs)
-    flow = Flow(velocity_field=trained_velocity_field, base_distribution=base_dist, **base_flow_kwargs)
+    bijector = ODEBijector(trained_velocity_field, **base_flow_kwargs)
+    flow = Flow(bijector, base_dist)
 
     return flow, N, d, L, composition
 
@@ -145,11 +146,11 @@ def main(
     print(f"Loaded successfully in {t1 - t0:.1f}s. Model handles N={N}, d={d}, L={L:.4f}")
 
     # Extract solver info from Flow for naming
-    s_name = type(flow.solver).__name__.lower()
-    if isinstance(flow.stepsize_controller, dfx.PIDController):
-        suffix = f"tol{flow.stepsize_controller.atol}"
-    elif isinstance(flow.stepsize_controller, dfx.ConstantStepSize):
-        dt0 = getattr(flow, "dt0", None)
+    s_name = type(flow.bijector.solver).__name__.lower()
+    if isinstance(flow.bijector.stepsize_controller, dfx.PIDController):
+        suffix = f"tol{flow.bijector.stepsize_controller.atol}"
+    elif isinstance(flow.bijector.stepsize_controller, dfx.ConstantStepSize):
+        dt0 = getattr(flow.bijector, "dt0", None)
         if dt0 is not None and dt0 > 0:
             steps = int(round(1.0 / dt0))
             suffix = f"steps{steps}"
@@ -181,19 +182,19 @@ def main(
         if ignore_density:
             sample_keys = jax.random.split(rng, batch_size)
             x0 = jax.vmap(flow.base_distribution.sample)(sample_keys)
-            x1 = jax.vmap(flow.apply_map)(x0)
+            x1 = jax.vmap(flow.bijector.forward)(x0)
             return x0, x1
 
-        if flow.hutchinson_samples is not None:
+        if flow.bijector.hutchinson_samples is not None:
             key1, key2 = jax.random.split(rng)
             sample_keys = jax.random.split(key1, batch_size)
             x0 = jax.vmap(flow.base_distribution.sample)(sample_keys)
             keys = jax.random.split(key2, batch_size)
-            x1, log_probs = jax.vmap(lambda x, k: flow.apply_map_and_log_prob(x, key=k))(x0, keys)
+            x1, log_probs = jax.vmap(lambda x, k: flow.push_forward_and_log_prob(x, key=k))(x0, keys)
         else:
             sample_keys = jax.random.split(rng, batch_size)
             x0 = jax.vmap(flow.base_distribution.sample)(sample_keys)
-            x1, log_probs = jax.vmap(flow.apply_map_and_log_prob)(x0)
+            x1, log_probs = jax.vmap(flow.push_forward_and_log_prob)(x0)
         return x0, x1, log_probs
 
     compiled_sample = sample_batch.lower(key).compile()

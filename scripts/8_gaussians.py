@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import optax
 import typer
-from superiorflows import CoupledDataSource, DistributionDataSource
+from superiorflows import CoupledDataSource, DistributionDataSource, ODEBijector
 from superiorflows.train import (
     CheckpointCallback,
     EnergyBasedLoss,
@@ -99,18 +99,23 @@ def train_single_model(
     # Loss Setup
     flow_kwargs = dict(stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5))
 
+    def make_bijector(vf):
+        return ODEBijector(vf, **flow_kwargs)
+
     if loss_type == "maximum_likelihood":
-        loss_fn = MaximumLikelihoodLoss(base_distribution=base_dist, **flow_kwargs)
+        loss_fn = MaximumLikelihoodLoss(base_distribution=base_dist, make_bijector=make_bijector)
         dataset = grain.MapDataset.source(DistributionDataSource(target_dist, batch_size, seed=seed)).repeat()
     elif loss_type == "energy_based":
-        loss_fn = EnergyBasedLoss(base_distribution=base_dist, target_distribution=target_dist, **flow_kwargs)
+        loss_fn = EnergyBasedLoss(
+            base_distribution=base_dist, target_distribution=target_dist, make_bijector=make_bijector
+        )
         dataset = grain.MapDataset.source(DistributionDataSource(base_dist, batch_size, seed=seed)).repeat()
     elif loss_type == "hybrid":
         loss_fn = KullbackLeiblerLoss(
             base_distribution=base_dist,
             target_distribution=target_dist,
+            make_bijector=make_bijector,
             alpha=0.5,
-            **flow_kwargs,
         )
         dataset = grain.MapDataset.source(DistributionDataSource(target_dist, batch_size, seed=seed)).repeat()
     elif loss_type == "stochastic_interpolant":
@@ -199,7 +204,7 @@ def train_single_model(
             ESSCallback(
                 target_log_prob=target_dist.log_prob,
                 base_distribution=base_dist,
-                flow_kwargs=flow_kwargs,
+                make_bijector=make_bijector,
                 n_samples=ess_samples,
                 eval_freq=ess_freq,
             )

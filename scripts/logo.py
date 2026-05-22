@@ -12,7 +12,7 @@ import numpy as np
 import optax
 from PIL import Image, ImageDraw, ImageFont
 from scipy.optimize import linear_sum_assignment
-from superiorflows import CoupledDataSource, DistributionDataSource, Flow
+from superiorflows import CoupledDataSource, DistributionDataSource, Flow, ODEBijector
 from superiorflows.train import (
     CheckpointCallback,
     LoggerCallback,
@@ -224,8 +224,8 @@ x0 = jax.vmap(base_dist.sample)(jax.random.split(subkey, n_particles))
 
 
 def get_trajectories(model):
-    flow = Flow(velocity_field=model, base_distribution=base_dist)
-    return jax.vmap(lambda x: flow.integrate(x, saveat=dfx.SaveAt(ts=save_times)).ys)(x0)
+    flow = Flow(ODEBijector(model), base_dist)
+    return jax.vmap(lambda x: flow.bijector.integrate(x, saveat=dfx.SaveAt(ts=save_times)).ys)(x0)
 
 
 trajectory = get_trajectories(model)

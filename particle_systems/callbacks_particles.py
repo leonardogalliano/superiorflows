@@ -10,7 +10,7 @@ from typing import Any, Dict
 import jax
 import jax.numpy as jnp
 import numpy as np
-from superiorflows import Flow
+from superiorflows import Flow, ODEBijector
 from superiorflows.train import Callback
 
 from particle_systems.particle_system import (
@@ -125,6 +125,7 @@ class BoltzmannCallback(Callback):
         ref_species,
         target_source,
         flow_kwargs: dict | None = None,
+        make_bijector=None,
         n_samples: int = 20,
         n_target_samples: int = 256,
         eval_freq: int = 250,
@@ -137,7 +138,13 @@ class BoltzmannCallback(Callback):
         self.base_distribution = base_distribution
         self.ref_species = ref_species
         self.target_source = target_source
-        self.flow_kwargs = flow_kwargs or {}
+        if make_bijector is not None:
+            self.make_bijector = make_bijector
+        elif flow_kwargs is not None:
+            fk = dict(flow_kwargs)
+            self.make_bijector = lambda model: ODEBijector(model, **fk)
+        else:
+            self.make_bijector = lambda model: ODEBijector(model)
         self.n_samples = n_samples
         self.n_target_samples = n_target_samples
         self.eval_freq = eval_freq
@@ -220,11 +227,8 @@ class BoltzmannCallback(Callback):
         if step % self.eval_freq != 0 and step != 1 and not is_last:
             return
 
-        flow = Flow(
-            velocity_field=trainer.model,
-            base_distribution=self.base_distribution,
-            **self.flow_kwargs,
-        )
+        bijector = self.make_bijector(trainer.model)
+        flow = Flow(bijector, self.base_distribution)
 
         try:
             key, subkey = jax.random.split(trainer.key)

@@ -4,7 +4,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
-from superiorflows import Flow
+from superiorflows import Flow, ODEBijector
 
 
 @pytest.fixture
@@ -32,9 +32,8 @@ def true_density_solution(t, f0, x0):
 def flow_setup(uniform_distribution_setup):
     uniform_dist = uniform_distribution_setup
     flow = Flow(
-        velocity_field=velocity_field,
-        base_distribution=uniform_dist,
-        stepsize_controller=dfx.PIDController(rtol=1e-7, atol=1e-7),
+        ODEBijector(velocity_field, stepsize_controller=dfx.PIDController(rtol=1e-7, atol=1e-7)),
+        uniform_dist,
     )
     return flow
 
@@ -45,12 +44,12 @@ def test_flow(flow_setup):
     key, subkey = jax.random.split(key)
     M = 10
     X0 = jax.vmap(flow.base_distribution.sample)(jax.random.split(subkey, M))
-    flow_result = jax.vmap(flow.apply_map)(X0)
+    flow_result = jax.vmap(flow.bijector.forward)(X0)
     true_result = jax.vmap(true_solution, in_axes=(None, 0))(1.0, X0)
     assert jnp.allclose(flow_result, true_result)
-    inverse_flow_result = jax.vmap(flow.apply_inverse_map)(flow_result)
+    inverse_flow_result = jax.vmap(flow.bijector.inverse)(flow_result)
     assert jnp.allclose(inverse_flow_result, X0)
-    augmented_flow_result, logq = jax.vmap(flow.apply_map_and_log_prob)(X0)
+    augmented_flow_result, logq = jax.vmap(flow.push_forward_and_log_prob)(X0)
     assert jnp.allclose(augmented_flow_result, true_result)
     log_prob_flow_result = jax.vmap(flow.log_prob)(flow_result)
     log_prob_augmented_result = jax.vmap(flow.log_prob)(augmented_flow_result)
@@ -79,10 +78,12 @@ def analytical_divergence_fn(velocity_field_fn, t, x, args):
 def analytical_flow_setup(uniform_distribution_setup):
     uniform_dist = uniform_distribution_setup
     flow = Flow(
-        velocity_field=velocity_field,
-        base_distribution=uniform_dist,
-        stepsize_controller=dfx.PIDController(rtol=1e-7, atol=1e-7),
-        divergence_fn=analytical_divergence_fn,
+        ODEBijector(
+            velocity_field,
+            stepsize_controller=dfx.PIDController(rtol=1e-7, atol=1e-7),
+            divergence_fn=analytical_divergence_fn,
+        ),
+        uniform_dist,
     )
     return flow
 
@@ -95,11 +96,11 @@ def test_flow_analytical(analytical_flow_setup):
     M = 10
     X0 = jax.vmap(flow.base_distribution.sample)(jax.random.split(subkey, M))
 
-    flow_result = jax.vmap(flow.apply_map)(X0)
+    flow_result = jax.vmap(flow.bijector.forward)(X0)
     true_result = jax.vmap(true_solution, in_axes=(None, 0))(1.0, X0)
     assert jnp.allclose(flow_result, true_result)
 
-    augmented_flow_result, logq = jax.vmap(flow.apply_map_and_log_prob)(X0)
+    augmented_flow_result, logq = jax.vmap(flow.push_forward_and_log_prob)(X0)
     assert jnp.allclose(augmented_flow_result, true_result)
 
     true_log_prob = jax.vmap(true_density_solution, in_axes=(None, 0, 0))(

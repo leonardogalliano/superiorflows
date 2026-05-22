@@ -20,7 +20,7 @@ import jax.numpy as jnp
 import matplotlib
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
-from superiorflows import Flow
+from superiorflows import Flow, ODEBijector
 
 # Import 8_gaussians module dynamically
 script_path = Path(__file__).parent / "8_gaussians.py"
@@ -162,9 +162,9 @@ def main():
     n_samples = 500
 
     def get_samples(model, key):
-        flow = Flow(velocity_field=model, base_distribution=base_dist)
+        flow = Flow(ODEBijector(model), base_dist)
         x0 = jax.vmap(base_dist.sample)(jax.random.split(key, n_samples))
-        return jax.vmap(flow.apply_map)(x0)
+        return jax.vmap(flow.bijector.forward)(x0)
 
     samples_mle = get_samples(model_mle, k1)
     samples_energy = get_samples(model_energy, k2)
@@ -209,9 +209,9 @@ def main():
 
     # Integrate methods
     def get_trajectories(model):
-        flow = Flow(velocity_field=model, base_distribution=base_dist)
+        flow = Flow(ODEBijector(model), base_dist)
         # return shape: (n_particles, n_frames, dim)
-        return jax.vmap(lambda x: flow.integrate(x, saveat=dfx.SaveAt(ts=save_times)).ys)(x0)
+        return jax.vmap(lambda x: flow.bijector.integrate(x, saveat=dfx.SaveAt(ts=save_times)).ys)(x0)
 
     traj_mle = get_trajectories(model_mle)
     traj_energy = get_trajectories(model_energy)

@@ -4,7 +4,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
-from superiorflows import Flow
+from superiorflows import Flow, ODEBijector
 
 from particle_systems.particle_system import ParticleSystem, TrajectoryDataSource, UniformParticles
 from particle_systems.velocities import ParticlesMLPVelocity
@@ -75,11 +75,13 @@ def flow(velocity_field, base_distribution):
     import diffrax as dfx
 
     return Flow(
-        velocity_field=velocity_field,
-        base_distribution=base_distribution,
-        dynamic_mask=ParticleSystem.get_dynamic_mask(),
-        stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
-        augmented_stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
+        ODEBijector(
+            velocity_field,
+            dynamic_mask=ParticleSystem.get_dynamic_mask(),
+            stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
+            augmented_stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
+        ),
+        base_distribution,
     )
 
 

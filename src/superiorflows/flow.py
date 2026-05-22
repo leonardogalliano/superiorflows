@@ -1,429 +1,131 @@
-"""Continuous Normalizing Flows (CNF) implementation in JAX.
+"""Generic normalising flow.
 
-This module provides a flexible, JAX-friendly implementation of continuous
-normalizing flows that can handle arbitrary pytree structures as inputs.
-This is particularly useful for complex state structures like physical systems.
+A :class:`Flow` composes an invertible transformation (bijector) with a base
+distribution to define a new distribution via the change-of-variables formula.
+It is agnostic to the nature of the bijector — ODE-based continuous flows,
+discrete invertible architectures, or wrapped distreqx bijectors all work.
+
+The class operates on arbitrary pytree states; all leaf-level handling
+(dynamic/static partitioning, divergence computation) is delegated to the
+bijector.
 """
-from typing import Any, Callable, Dict, Optional
 
-import diffrax as dfx
 import equinox as eqx
 import jax
-import jax.numpy as jnp
+
+from superiorflows.bijector import AbstractBijector
 
 __all__ = ["Flow"]
 
 
-def _divergence_exact(velocity_field, t, x, args):
-    """Compute exact divergence via diagonal JVP extraction.
-
-    Uses jax.linearize to obtain the JVP map, then extracts only the diagonal
-    elements J_ii via unit-vector probes. This avoids materialising the full
-    d×d Jacobian (O(d) memory instead of O(d²)), while the FLOP count remains
-    O(d²) — each of the d probes costs O(d).
-    """
-    x_flat, unravel = jax.flatten_util.ravel_pytree(x)
-
-    def v_flat(x_flat_):
-        x_unravelled = unravel(x_flat_)
-        v = velocity_field(t, x_unravelled, args)
-        v_flattened, _ = jax.flatten_util.ravel_pytree(v)
-        return v_flattened
-
-    y_flat, jvp_fn = jax.linearize(v_flat, x_flat)
-    v = unravel(y_flat)
-
-    def diag_element(i):
-        e = jnp.zeros_like(x_flat).at[i].set(1.0)
-        return jvp_fn(e)[i]
-
-    divergence = jnp.sum(jax.vmap(diag_element)(jnp.arange(x_flat.size)))
-    return v, divergence
-
-
-def _divergence_hutchinson(velocity_field, t, x, args, random_vectors):
-    """Compute stochastic divergence estimate using Hutchinson's trace estimator.
-
-    Uses the identity: trace(J) = E[v^T J v] where v has E[v v^T] = I.
-    Rademacher vectors (±1) are optimal for this estimator.
-
-    Complexity: O(d * n_samples) instead of O(d²) for exact.
-
-    Args:
-        velocity_field: The velocity field callable
-        t: Current time
-        x: State pytree
-        args: Additional arguments
-        random_vectors: Array of shape (n_samples, d) with Rademacher vectors
-
-    Returns:
-        Tuple of (velocity, divergence_estimate)
-    """
-    x_flat, unravel = jax.flatten_util.ravel_pytree(x)
-
-    def v_flat(x_flat_):
-        x_unravelled = unravel(x_flat_)
-        v = velocity_field(t, x_unravelled, args)
-        v_flattened, _ = jax.flatten_util.ravel_pytree(v)
-        return v_flattened
-
-    # Compute velocity and JVP function
-    y_flat, jvp_fn = jax.linearize(v_flat, x_flat)
-    v = unravel(y_flat)
-
-    # Estimate trace: trace(J) ≈ mean(v^T J v) = mean(v^T jvp(v))
-    def estimate_single(rand_vec):
-        jvp_result = jvp_fn(rand_vec)
-        return jnp.dot(rand_vec, jvp_result)
-
-    estimates = jax.vmap(estimate_single)(random_vectors)
-    divergence = jnp.mean(estimates)
-    return v, divergence
-
-
-def _augmented_dynamics(t, y, args, divergence_fn):
-    """Augmented ODE dynamics for computing the change of variables formula.
-
-    Solves the coupled system:
-        dx/dt = v(t, x)
-        d(log q)/dt = -div(v(t, x))
-
-    where div(v) is the divergence of the velocity field.
-
-    Args:
-        t: Current time (scalar)
-        y: Dictionary with keys "x" (state) and "logq" (log probability)
-        args: Context pytree passed to velocity_field
-        divergence_fn: Callable (t, x, args) -> (velocity, divergence)
-
-    Returns:
-        Dictionary with derivatives {"x": v, "logq": -div_v}
-    """
-    v, div_v = divergence_fn(t, y["x"], args)
-    return {"x": v, "logq": -div_v}
-
-
 class Flow(eqx.Module):
-    """Continuous Normalizing Flow for generative modeling.
+    """Normalising flow: pushforward of a base distribution through a bijector.
 
-    A Flow transforms samples from a base distribution through a learned
-    velocity field, enabling exact density evaluation via the instantaneous
-    change of variables formula.
+    Composes an invertible transformation with a base distribution to provide
+    ``sample``, ``log_prob``, and ``sample_and_log_prob``.
 
-    The flow supports arbitrary pytree structures as inputs, making it suitable
-    for particle systems with complex state structures (e.g., positions, species,
-    box vectors). Use the `dynamic_mask` to specify which parts of the pytree
-    should be transformed (dynamic) vs. kept constant (context).
+    The change-of-variables formula used internally:
 
-    Three divergence computation strategies are available, selected at
-    construction time and resolved once via `__check_init__`:
+        log p(y) = log p_base(f⁻¹(y)) + log|det J_{f⁻¹}(y)|
+                 = log p_base(x)       − log|det J_f(x)|
 
-    - **Exact** (default): Full Jacobian computation, O(d²) complexity.
-    - **Hutchinson**: Stochastic trace estimator, O(d·n_samples) complexity.
-      Activated by setting `hutchinson_samples`.
-    - **Analytical**: User-supplied closed-form divergence. Activated by
-      setting `divergence_fn`.
+    where ``f`` is the bijector's forward map.
 
     Attributes:
-        velocity_field: Callable with signature (t, x, args) -> velocity pytree.
-            The velocity field defining the flow dynamics. Must return a pytree
-            with the same structure as the dynamic part of x.
-        base_distribution: The base (prior) distribution for the flow.
-        dynamic_mask: A pytree or callable that returns True for leaves to flow,
-            False for static context. Defaults to flowing all inexact arrays.
-        divergence_fn: Optional callable (velocity_field, t, x, args) -> (v, div_v)
-            providing a closed-form divergence. Mutually exclusive with
-            hutchinson_samples.
-        hutchinson_samples: Number of random vectors for stochastic divergence
-            estimation. If None (default), uses exact O(d²) computation.
-            Set to a positive integer (e.g., 1-10) for O(d) stochastic estimation.
-        solver: Diffrax solver for forward/inverse integration (default: Tsit5).
-        augmented_solver: Solver for augmented ODE with log-prob (default: Tsit5).
-        t0: Start time of the flow (default: 0.0).
-        t1: End time of the flow (default: 1.0).
-        dt0: Initial step size (optional, None for adaptive).
-        stepsize_controller: Controller for adaptive stepping (default: PIDController).
-        augmented_stepsize_controller: Controller for augmented ODE.
-        extra_args: Additional kwargs passed to diffrax.diffeqsolve.
-        augmented_extra_args: Additional kwargs for augmented ODE solve.
-
+        bijector: The invertible transformation defining the flow.
+        base_distribution: The base (prior) distribution.  Must provide
+            ``sample(key=...)``, ``log_prob(value)``, and ``event_shape``.
     """
 
-    velocity_field: Callable
+    bijector: AbstractBijector
     base_distribution: eqx.Module
-    dynamic_mask: Callable = eqx.field(
-        default=lambda x: jax.tree.map(eqx.is_inexact_array, x),
-        static=True,
-    )
-    divergence_fn: Optional[Callable] = eqx.field(default=None, static=True)
-    hutchinson_samples: Optional[int] = eqx.field(default=None, static=True)
-    solver: dfx.AbstractSolver = eqx.field(
-        default_factory=lambda: dfx.Tsit5(),
-        static=True,
-    )
-    augmented_solver: dfx.AbstractSolver = eqx.field(
-        default_factory=lambda: dfx.Tsit5(),
-        static=True,
-    )
-    t0: float = 0.0
-    t1: float = 1.0
-    dt0: Optional[float] = None
-    stepsize_controller: dfx.AbstractStepSizeController = eqx.field(
-        default_factory=lambda: dfx.PIDController(rtol=1e-5, atol=1e-5),
-        static=True,
-    )
-    augmented_stepsize_controller: dfx.AbstractStepSizeController = eqx.field(
-        default_factory=lambda: dfx.PIDController(rtol=1e-5, atol=1e-5),
-        static=True,
-    )
-    extra_args: Dict[str, Any] = eqx.field(default_factory=dict, static=True)
-    augmented_extra_args: Dict[str, Any] = eqx.field(default_factory=dict, static=True)
-
-    def __check_init__(self):
-        if self.divergence_fn is not None and self.hutchinson_samples is not None:
-            raise ValueError("Cannot set both divergence_fn and hutchinson_samples. " "Choose one divergence strategy.")
 
     @property
     def event_shape(self):
         return self.base_distribution.event_shape
 
-    def sample(self, key):
-        x0 = self.base_distribution.sample(key=key)
-        x1 = self.apply_map(x0)
-        return x1
-
-    def sample_and_log_prob(self, key):
-        if self.hutchinson_samples is not None:
-            key1, key2 = jax.random.split(key)
-            x0 = self.base_distribution.sample(key=key1)
-            x1, logq1 = self.apply_map_and_log_prob(x0, key=key2)
-        else:
-            x0 = self.base_distribution.sample(key=key)
-            x1, logq1 = self.apply_map_and_log_prob(x0)
-        return x1, logq1
-
-    def _merge_solution(self, ys, ctx):
-        if ys is None:
-            return None
-        leaves = jax.tree.leaves(ys)
-        if not leaves:
-            return ys
-        T = leaves[0].shape[0]
-
-        return jax.tree.map(
-            lambda y, c: y if y is not None else jnp.broadcast_to(c, (T,) + c.shape),
-            ys,
-            ctx,
-            is_leaf=lambda x: x is None,
-        )
-
-    def _make_divergence_fn(self, random_vectors=None):
-        """Resolve the divergence strategy into a single callable.
-
-        Returns a callable with signature (t, x, args) -> (velocity, divergence)
-        that is fully bound and ready to be passed to _augmented_dynamics.
-        """
-        if self.divergence_fn is not None:
-            vf = self.velocity_field
-
-            def analytical(t, x, args):
-                return self.divergence_fn(vf, t, x, args)
-
-            return analytical
-
-        if self.hutchinson_samples is not None:
-            vf = self.velocity_field
-            rv = random_vectors
-
-            def hutchinson(t, x, args):
-                return _divergence_hutchinson(vf, t, x, args, rv)
-
-            return hutchinson
-
-        vf = self.velocity_field
-
-        def exact(t, x, args):
-            return _divergence_exact(vf, t, x, args)
-
-        return exact
-
     @eqx.filter_jit
-    def integrate(self, x0, **kwargs):
-        """Integrate the ODE from t0 to t1 (or as specified in kwargs).
+    def sample(self, key, **kwargs):
+        """Draw a sample from the flow.
 
         Args:
-            x0: Initial state (pytree matching base_distribution.event_shape).
-            **kwargs: Override solver parameters. Common options:
-                - t0, t1: Override integration bounds
-                - dt0: Override initial step size
-                - saveat: diffrax.SaveAt for saving intermediate states
-                - args: User arguments passed to velocity_field
+            key: PRNG key for base-distribution sampling.
+            **kwargs: Forwarded to ``bijector.forward``.
 
         Returns:
-            diffrax solution object with .ys containing the trajectory.
+            A sample from the pushforward distribution.
         """
-        solver_args = dict(
-            solver=self.solver,
-            t0=self.t0,
-            t1=self.t1,
-            dt0=self.dt0,
-            stepsize_controller=self.stepsize_controller,
-            **self.extra_args,
-        )
-        solver_args.update(kwargs)
-        if solver_args["dt0"] is not None:
-            solver_args["dt0"] = jnp.sign(solver_args["t1"] - solver_args["t0"]) * abs(solver_args["dt0"])
-
-        y0, ctx = eqx.partition(x0, self.dynamic_mask)
-
-        user_args = solver_args.get("args")
-        if user_args is not None:
-            solver_args["args"] = (ctx, user_args)
-        else:
-            solver_args["args"] = ctx
-
-        term = dfx.ODETerm(self.velocity_field)
-        sol = dfx.diffeqsolve(term, y0=y0, **solver_args)
-        return eqx.tree_at(lambda s: s.ys, sol, self._merge_solution(sol.ys, ctx))
+        x = self.base_distribution.sample(key=key)
+        return self.bijector.forward(x, **kwargs)
 
     @eqx.filter_jit
-    def apply_map(self, x0, **kwargs):
-        """Apply the forward flow transformation x0 -> x1.
+    def sample_and_log_prob(self, key, **kwargs):
+        """Draw a sample and compute its log-probability under the flow.
 
-        Transforms a sample from the base distribution (at t0) to the
-        target distribution (at t1).
+        More efficient than calling ``sample`` and ``log_prob`` separately
+        because the forward pass computes the log-det in tandem.
 
         Args:
-            x0: Initial state at t0.
-            **kwargs: Override solver parameters (t0, t1, dt0, etc.).
+            key: PRNG key.  When the bijector requires a key (e.g. for
+                Hutchinson trace estimation), a subkey is split automatically.
+            **kwargs: Forwarded to ``bijector.forward_and_log_det``.
 
         Returns:
-            Transformed state x1 at t1.
+            Tuple ``(y, log_prob_y)``.
         """
-        kw = dict(kwargs)
-        saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
-        sol = self.integrate(x0, saveat=saveat, **kw)
-        return jax.tree.map(lambda y: y[-1], sol.ys)
+        key_sample, key_bijector = jax.random.split(key)
+        x = self.base_distribution.sample(key=key_sample)
+        if "key" not in kwargs:
+            kwargs = dict(kwargs, key=key_bijector)
+        return self.push_forward_and_log_prob(x, **kwargs)
 
     @eqx.filter_jit
-    def apply_inverse_map(self, x1, **kwargs):
-        """Apply the inverse flow transformation x1 -> x0.
+    def log_prob(self, value, **kwargs):
+        """Evaluate the log-probability density at ``value``.
 
-        Transforms a sample from the target distribution (at t1) back to
-        the base distribution (at t0).
+        Inverts the bijector to recover the base sample and applies the
+        change-of-variables formula.
 
         Args:
-            x1: State at t1.
-            **kwargs: Override solver parameters.
+            value: A point in the target space.
+            **kwargs: Forwarded to ``bijector.inverse_and_log_det``
+                (e.g. ``key=`` for Hutchinson).
 
         Returns:
-            Reconstructed state x0 at t0.
+            Scalar log-probability density.
         """
-        kw = dict(kwargs)
-        t0 = kw.pop("t0", self.t0)
-        t1 = kw.pop("t1", self.t1)
-        saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
-        sol = self.integrate(x1, t0=t1, t1=t0, saveat=saveat, **kw)
-        return jax.tree.map(lambda y: y[-1], sol.ys)
+        x, inv_logdet = self.bijector.inverse_and_log_det(value, **kwargs)
+        return self.base_distribution.log_prob(x) + inv_logdet
 
     @eqx.filter_jit
-    def integrate_augmented_ode(self, x0, logq0=None, *, key=None, **kwargs):
-        """Integrate the augmented ODE for log-probability computation.
+    def push_forward_and_log_prob(self, x, **kwargs):
+        """Push a base sample through the bijector and return its log-prob.
 
         Args:
-            x0: Initial state.
-            logq0: Optional initial log probability. If None, computed from base_distribution.
-            key: Optional PRNG key for Hutchinson estimator. Required if hutchinson_samples is set.
-            **kwargs: Override solver parameters.
+            x: A sample from the base distribution.
+            **kwargs: Forwarded to ``bijector.forward_and_log_det``.
 
         Returns:
-            diffrax solution object with .ys containing {"x": trajectory, "logq": log_probs}.
+            Tuple ``(y, log_prob_y)``.
         """
-        solver_args = dict(
-            solver=self.augmented_solver,
-            t0=self.t0,
-            t1=self.t1,
-            dt0=self.dt0,
-            stepsize_controller=self.augmented_stepsize_controller,
-            **self.augmented_extra_args,
-        )
-        solver_args.update(kwargs)
-        if solver_args["dt0"] is not None:
-            solver_args["dt0"] = jnp.sign(solver_args["t1"] - solver_args["t0"]) * abs(solver_args["dt0"])
-
-        if logq0 is None:
-            logq0 = self.base_distribution.log_prob(x0)
-
-        y0, ctx = eqx.partition(x0, self.dynamic_mask)
-        u0 = {"x": y0, "logq": logq0}
-
-        random_vectors = None
-        if self.hutchinson_samples is not None:
-            if key is None:
-                raise ValueError("key is required when hutchinson_samples is set")
-            y0_flat, _ = jax.flatten_util.ravel_pytree(y0)
-            d = y0_flat.size
-            random_vectors = jax.random.rademacher(key, shape=(self.hutchinson_samples, d)).astype(y0_flat.dtype)
-
-        user_args = solver_args.get("args")
-        if user_args is not None:
-            solver_args["args"] = (ctx, user_args)
-        else:
-            solver_args["args"] = ctx
-
-        div_fn = self._make_divergence_fn(random_vectors=random_vectors)
-        term_func = jax.tree_util.Partial(_augmented_dynamics, divergence_fn=div_fn)
-
-        term = dfx.ODETerm(term_func)
-        sol = dfx.diffeqsolve(term, y0=u0, **solver_args)
-        return eqx.tree_at(lambda s: s.ys["x"], sol, self._merge_solution(sol.ys["x"], ctx))
+        y, fwd_logdet = self.bijector.forward_and_log_det(x, **kwargs)
+        log_prob_base = self.base_distribution.log_prob(x)
+        return y, log_prob_base - fwd_logdet
 
     @eqx.filter_jit
-    def apply_map_and_log_prob(self, x0, *, key=None, **kwargs):
-        """Apply forward flow and compute log probability simultaneously.
+    def pull_back_and_log_prob(self, y, **kwargs):
+        """Pull a target sample back and return the log-prob at that point.
 
-        More efficient than calling apply_map and log_prob separately
-        when you need both the transformed sample and its log probability.
-
-        Args:
-            x0: Initial state sampled from base_distribution.
-            key: PRNG key for Hutchinson estimator (required if hutchinson_samples is set).
-            **kwargs: Override solver parameters.
-
-        Returns:
-            Tuple of (x1, log_prob) where x1 is the transformed state
-            and log_prob is the log probability density at x1.
-        """
-        kw = dict(kwargs)
-        saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
-        sol = self.integrate_augmented_ode(x0, saveat=saveat, key=key, **kw)
-        x1 = jax.tree.map(lambda y: y[-1], sol.ys["x"])
-        logq1 = sol.ys["logq"][-1]
-        return x1, logq1
-
-    @eqx.filter_jit
-    def log_prob(self, value, *, key=None, **kwargs):
-        """Compute log probability density of a sample under the flow.
-
-        Inverts the flow to map value back to the base distribution and
-        applies the change of variables formula to compute the exact
-        log probability.
+        Symmetric counterpart to :meth:`push_forward_and_log_prob`.
 
         Args:
-            value: Sample from the target distribution.
-            key: PRNG key for Hutchinson estimator (required if hutchinson_samples is set).
-            **kwargs: Override solver parameters.
+            y: A point in the target space.
+            **kwargs: Forwarded to ``bijector.inverse_and_log_det``.
 
         Returns:
-            Log probability density. Shape is ().
+            Tuple ``(x, log_prob_y)`` where ``x`` is the recovered base
+            sample and ``log_prob_y`` is the log-probability density at ``y``.
         """
-        f = jnp.zeros(())
-        kw = dict(kwargs)
-        t0 = kw.pop("t0", self.t0)
-        t1 = kw.pop("t1", self.t1)
-        saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
-        sol = self.integrate_augmented_ode(value, t0=t1, t1=t0, logq0=f, saveat=saveat, key=key, **kw)
-        x0 = jax.tree.map(lambda y: y[-1], sol.ys["x"])
-        f0 = sol.ys["logq"][-1]
-        logq0 = self.base_distribution.log_prob(x0)
-        return logq0 - f0
+        x, inv_logdet = self.bijector.inverse_and_log_det(y, **kwargs)
+        log_prob_base = self.base_distribution.log_prob(x)
+        return x, log_prob_base + inv_logdet

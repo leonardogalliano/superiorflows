@@ -3,7 +3,7 @@
 [![CI](https://github.com/leonardogalliano/superiorflows/actions/workflows/ci.yml/badge.svg)](https://github.com/leonardogalliano/superiorflows/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/leonardogalliano/superiorflows/branch/main/graph/badge.svg)](https://codecov.io/gh/leonardogalliano/superiorflows)
 
-**Superiorflows** is a JAX-based library for sampling physical systems using continuous normalising flows.
+**Superiorflows** is a JAX-based library for sampling physical systems using generic transport maps.
 
 The project is developed at the Centre des Sciences des Données at the École Normale Supérieure (Paris), and is largely inspired by the PyTorch implementation [learndiffeq](https://github.com/h2o64/learndiffeq).
 
@@ -25,7 +25,7 @@ uv sync --extra cuda
 
 ## Design principles
 
-**Superiorflows** is designed to operate on *arbitrary structured inputs*, ranging from arrays of any rank to complex pytrees representing physical systems.
+**Superiorflows** relies on a composable bijector-based architecture designed to operate on *arbitrary structured inputs*, ranging from arrays of any rank to complex pytrees representing physical systems.
 
 While a primary focus is on particle-based systems, the core abstractions are intentionally fully general and not tied to a specific domain. The library provides flexible building blocks rather than fixed pipelines.
 

@@ -3538,7 +3538,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "diffrax", specifier = ">=0.7.0" },
-    { name = "distreqx" },
+    { name = "distreqx", specifier = ">=0.0.3" },
     { name = "equinox", specifier = ">=0.13.2" },
     { name = "grain", specifier = ">=0.2.15" },
     { name = "jax", specifier = ">=0.8.2" },

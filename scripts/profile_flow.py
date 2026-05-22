@@ -13,7 +13,7 @@ import distreqx.distributions as dsx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from superiorflows import Flow
+from superiorflows import Flow, ODEBijector
 
 
 class MLPVelocity(eqx.Module):
@@ -42,7 +42,7 @@ def main():
 
     def loss_fn(vf_arrays, X):
         vf = eqx.combine(vf_arrays, eqx.filter(velocity_field, lambda x: not eqx.is_array(x)))
-        flow = Flow(velocity_field=vf, base_distribution=base_dist)
+        flow = Flow(ODEBijector(vf), base_dist)
         return -jnp.mean(jax.vmap(flow.log_prob)(X))
 
     vf_arrays = eqx.filter(velocity_field, eqx.is_array)
