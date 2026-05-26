@@ -72,7 +72,7 @@ def main():
     t0 = time.perf_counter()
     _ = loss_fn_jit(vf_arrays, X)
     t1 = time.perf_counter()
-    print(f"First call (compilation): {(t1-t0)*1000:.1f}ms")
+    print(f"First call (compilation): {(t1 - t0) * 1000:.1f}ms")
 
     # Subsequent calls (should be fast and consistent)
     times = []

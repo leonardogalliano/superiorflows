@@ -9,6 +9,7 @@ inside loss functions, particularly focusing on:
 
 Run with: uv run python scripts/debug_jax_compilation.py
 """
+
 import time
 
 import diffrax as dfx
@@ -123,13 +124,13 @@ def test_actual_training_pattern():
         t1 = time.perf_counter()
 
         step_times.append((t1 - t0) * 1000)
-        print(f"  Step {i+1:2d}: {step_times[-1]:8.1f}ms, loss={float(loss):.4f}")
+        print(f"  Step {i + 1:2d}: {step_times[-1]:8.1f}ms, loss={float(loss):.4f}")
 
     print("-" * 60)
 
     print("\n2b. Analysis:")
     print(f"  First step (compilation): {step_times[0]:.1f}ms")
-    print(f"  Average of steps 2-{n_steps}: {sum(step_times[1:])/(len(step_times)-1):.2f}ms")
+    print(f"  Average of steps 2-{n_steps}: {sum(step_times[1:]) / (len(step_times) - 1):.2f}ms")
     speedup = step_times[0] / (sum(step_times[1:]) / len(step_times[1:]))
     print(f"  Speedup after warmup: {speedup:.1f}x")
 
@@ -176,9 +177,9 @@ def test_flow_direct():
         jax.block_until_ready(result)
         t1 = time.perf_counter()
         times.append((t1 - t0) * 1000)
-        print(f"  Call {i+1}: {times[-1]:.1f}ms")
+        print(f"  Call {i + 1}: {times[-1]:.1f}ms")
 
-    print(f"\n  First call / avg rest: {times[0] / (sum(times[1:])/len(times[1:])):.1f}x")
+    print(f"\n  First call / avg rest: {times[0] / (sum(times[1:]) / len(times[1:])):.1f}x")
 
     print("\n3b. Testing flow.log_prob compilation...")
 
@@ -189,9 +190,9 @@ def test_flow_direct():
         jax.block_until_ready(result)
         t1 = time.perf_counter()
         times.append((t1 - t0) * 1000)
-        print(f"  Call {i+1}: {times[-1]:.1f}ms")
+        print(f"  Call {i + 1}: {times[-1]:.1f}ms")
 
-    print(f"\n  First call / avg rest: {times[0] / (sum(times[1:])/len(times[1:])):.1f}x")
+    print(f"\n  First call / avg rest: {times[0] / (sum(times[1:]) / len(times[1:])):.1f}x")
 
     print("\n  ✓ Test 3 complete")
 
@@ -299,7 +300,7 @@ def test_training_e2e():
         losses.append(float(loss))
 
         if i < 3 or i >= n_steps - 2:
-            print(f"  Step {i+1:2d}: {step_times[-1]:7.1f}ms, loss={losses[-1]:.4f}")
+            print(f"  Step {i + 1:2d}: {step_times[-1]:7.1f}ms, loss={losses[-1]:.4f}")
         elif i == 3:
             print("  ...")
 
@@ -307,7 +308,7 @@ def test_training_e2e():
 
     print("\n5b. Timing Summary:")
     print(f"  Compilation (step 1):    {step_times[0]:.1f}ms")
-    print(f"  Average (steps 2-{n_steps}): {sum(step_times[1:])/len(step_times[1:]):.2f}ms")
+    print(f"  Average (steps 2-{n_steps}): {sum(step_times[1:]) / len(step_times[1:]):.2f}ms")
     speedup = step_times[0] / (sum(step_times[1:]) / len(step_times[1:]))
     print(f"  Speedup:                 {speedup:.1f}x")
 

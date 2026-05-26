@@ -208,7 +208,7 @@ class TrajectoryDataSource(grain.sources.RandomAccessDataSource):
                     if species_map is None:
                         unique_species = sorted(set(spe_str))
                         species_map = {s: i for i, s in enumerate(unique_species)}
-                        logger.info(f"Species mapping: {species_map} " f"(N={pos.shape[0]}, d={pos.shape[1]})")
+                        logger.info(f"Species mapping: {species_map} (N={pos.shape[0]}, d={pos.shape[1]})")
 
                     # Convert species strings to integer labels
                     spe_int = np.array([species_map[s] for s in spe_str], dtype=np.int32)
@@ -412,7 +412,7 @@ class EquivariantOptimalTransport:
 
         if self.use_box_symmetry:
             if not np.allclose(box[:, 0:1], box):
-                raise ValueError("Box symmetry requires a cubic box, but box sides differ: " f"{box[0]}")
+                raise ValueError(f"Box symmetry requires a cubic box, but box sides differ: {box[0]}")
             group = generate_hyperoctahedral_group(d)
         else:
             group = np.eye(d)[np.newaxis]

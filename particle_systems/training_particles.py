@@ -11,6 +11,7 @@ import json
 import time
 import warnings
 from pathlib import Path
+from typing import Any
 
 import diffrax as dfx
 import equinox as eqx
@@ -150,7 +151,7 @@ def build_velocity(config: dict, N: int, d: int, n_species: int, *, key):
     vtype = config["velocity"]["type"]
     cls = VELOCITY_REGISTRY.get(vtype)
     if cls is None:
-        raise ValueError(f"Unknown velocity type '{vtype}'. " f"Available: {list(VELOCITY_REGISTRY)}")
+        raise ValueError(f"Unknown velocity type '{vtype}'. Available: {list(VELOCITY_REGISTRY)}")
     kwargs = config["velocity"].get("kwargs", {})
     return cls(N=N, d=d, n_species=n_species, **kwargs, key=key)
 
@@ -171,7 +172,7 @@ def build_solver(config: dict) -> dict:
 
     slv = solvers[stype]()
 
-    bijector_kwargs = dict(
+    bijector_kwargs: dict[str, Any] = dict(
         dynamic_mask=ParticleSystem.get_dynamic_mask(),
         solver=slv,
         augmented_solver=slv,
@@ -447,7 +448,7 @@ def train_single_model(config: dict):
         if species_radii is None:
             species_radii = np.full(len(composition), 0.3 * L / np.sqrt(N))
             warnings.warn(
-                "[BoltzmannCallback] No sigma found in model — using estimated radii " "for sample visualization.",
+                "[BoltzmannCallback] No sigma found in model — using estimated radii for sample visualization.",
                 stacklevel=2,
             )
 
@@ -514,7 +515,7 @@ def train_single_model(config: dict):
     model_label = model_file.name if model_file else "none"
     vkwargs = config["velocity"].get("kwargs", {})
     vkwargs_str = ", ".join(f"{k}={v}" for k, v in vkwargs.items())
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Training CNF on particle trajectories")
     print(f"  Data          : {data_path}")
     print(f"  Potential     : {model_label}")
@@ -532,14 +533,14 @@ def train_single_model(config: dict):
         print(f"  Training      : step {trainer.step} \u2192 {nsteps}")
     print(f"  JAX process   : {jax.process_index()}/{jax.process_count()}")
     print(f"  JAX devices   : {jax.devices()}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     t_start = time.time()
     read_options = grain.ReadOptions(num_threads=num_workers, prefetch_buffer_size=prefetch_buffer_size)
     trainer.train(dataset=dataset, max_steps=nsteps, read_options=read_options)
     t_elapsed = time.time() - t_start
 
-    print(f"\nDone in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)\n")
+    print(f"\nDone in {t_elapsed:.1f}s ({1000 * t_elapsed / nsteps:.0f}ms/step)\n")
     return trainer
 
 
@@ -615,7 +616,7 @@ def main(
         missing.append("training.nsteps (--nsteps)")
     if missing:
         raise typer.BadParameter(
-            f"Missing required config: {', '.join(missing)}. " "Provide via --config JSON or CLI arguments."
+            f"Missing required config: {', '.join(missing)}. Provide via --config JSON or CLI arguments."
         )
 
     train_single_model(cfg)

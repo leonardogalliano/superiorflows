@@ -249,16 +249,16 @@ class StochasticInterpolantLoss(eqx.Module):
 
     interpolant: Callable = eqx.field(static=True)
     gamma: Optional[Callable] = eqx.field(static=True)
-    dynamic_mask: Callable = eqx.field(
-        default=lambda x: jax.tree.map(eqx.is_inexact_array, x),
-        static=True,
-    )
     velocity_kwargs: dict = eqx.field(static=True)
     dt_interpolant: Callable = eqx.field(static=True)
     dt_gamma: Optional[Callable] = eqx.field(static=True)
     denoiser_weight: float = eqx.field(static=True)
     _get_velocity: Callable = eqx.field(static=True)
     _get_denoiser: Optional[Callable] = eqx.field(static=True)
+    dynamic_mask: Callable = eqx.field(
+        default=lambda x: jax.tree.map(eqx.is_inexact_array, x),
+        static=True,
+    )
 
     def __init__(
         self,
@@ -329,7 +329,7 @@ class StochasticInterpolantLoss(eqx.Module):
     def __check_init__(self):
         if self._get_denoiser is not None and self.gamma is None:
             raise ValueError(
-                "Denoiser learning requires a noise schedule gamma(t). " "Pass gamma= to StochasticInterpolantLoss."
+                "Denoiser learning requires a noise schedule gamma(t). Pass gamma= to StochasticInterpolantLoss."
             )
 
     @eqx.filter_jit

@@ -178,7 +178,7 @@ def train_single_model(
     import datetime
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{loss_type}_" f"w{width}d{depth}_" f"lr{lr}_" f"b{batch_size}_" f"s{seed}_"
+    run_name = f"{loss_type}_w{width}d{depth}_lr{lr}_b{batch_size}_s{seed}_"
     if denoiser and loss_type == "stochastic_interpolant":
         run_name += "denoiser_"
     run_name += f"{timestamp}"
@@ -237,20 +237,20 @@ def train_single_model(
         callbacks=callbacks,
     )
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Training 8 Gaussians")
     print(f"Run Name: {run_name}")
     print(f"Loss: {loss_type}")
     print(f"Checkpoints: {chkpt_run_path}")
     print(f"TensorBoard: {tb_run_dir}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     t_start = time.time()
     read_options = grain.ReadOptions(num_threads=num_workers, prefetch_buffer_size=prefetch_buffer_size)
     trainer.train(dataset=dataset, max_steps=nsteps, read_options=read_options)
     t_elapsed = time.time() - t_start
 
-    print(f"Done in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)")
+    print(f"Done in {t_elapsed:.1f}s ({1000 * t_elapsed / nsteps:.0f}ms/step)")
     return trainer
 
 

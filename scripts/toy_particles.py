@@ -270,11 +270,11 @@ def train_model(
         callbacks=callbacks,
     )
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Training Toy Particles")
     print(f"Species: {n_species}, L: {L}")
     print(f"Checkpoints: {ckpt_path}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     t_start = time.time()
     # No validation loader for now to keep it simple as in original script,
@@ -282,7 +282,7 @@ def train_model(
     trainer.train(dataset=dataset, max_steps=nsteps)
     t_elapsed = time.time() - t_start
 
-    print(f"Done in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)")
+    print(f"Done in {t_elapsed:.1f}s ({1000 * t_elapsed / nsteps:.0f}ms/step)")
     return trainer
 
 

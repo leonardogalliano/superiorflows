@@ -31,6 +31,14 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
+      - name: Run Ruff checks (Linting & Formatting)
+        run: |
+          uv run ruff check --no-fix
+          uv run ruff format --check
+
+      - name: Run Pyright static type checking
+        run: uv run pyright
+
       - name: Run tests with pytest
         run: uv run pytest --cov=src --cov=particle_systems --cov-report=xml
 

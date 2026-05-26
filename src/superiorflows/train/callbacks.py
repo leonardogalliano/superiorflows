@@ -4,6 +4,7 @@ Callbacks hook into the training loop at key points, enabling logging,
 progress tracking, checkpointing, and custom behaviors without modifying
 the core `Trainer` logic.
 """
+
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -235,7 +236,7 @@ class CheckpointCallback(Callback):
         step = getattr(trainer, "step", 0)
         if step > 0 and step != self.last_saved_step:
             if step in self.checkpointer.all_steps() and not self.overwrite:
-                tqdm.write(f"Checkpoint for step {step} already exists. " "Skipping save on exit (overwrite=False).")
+                tqdm.write(f"Checkpoint for step {step} already exists. Skipping save on exit (overwrite=False).")
                 return
             self._save(trainer, step, force=True)
 
@@ -318,7 +319,7 @@ class ProfilingCallback(Callback):
         elif self.profile_steps is not None and step == self.warmup_steps + self.profile_steps and self._is_profiling:
             jax.profiler.stop_trace()
             self._is_profiling = False
-            tqdm.write(f"[Profiling] Stopped trace at step {step}. " f"Trace saved to {self.log_dir}")
+            tqdm.write(f"[Profiling] Stopped trace at step {step}. Trace saved to {self.log_dir}")
 
     def on_train_end(self, trainer, **kwargs):
         import jax.profiler
@@ -326,7 +327,7 @@ class ProfilingCallback(Callback):
         if self._is_profiling:
             jax.profiler.stop_trace()
             self._is_profiling = False
-            tqdm.write(f"[Profiling] Stopped trace at training end. " f"Trace saved to {self.log_dir}")
+            tqdm.write(f"[Profiling] Stopped trace at training end. Trace saved to {self.log_dir}")
 
 
 class TensorBoardLogger(Callback):

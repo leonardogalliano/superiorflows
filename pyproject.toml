@@ -43,6 +43,7 @@ dev = [
     "pytest-benchmark>=5.2.3",
     "ruff>=0.14.10",
     "pre-commit>=4.0.1",
+    "pyright>=1.1.391",
     "six>=1.16.0",
     "jax-md>=0.2.27",
     "atooms-pp>=4.2.1",

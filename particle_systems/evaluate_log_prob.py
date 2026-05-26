@@ -61,7 +61,7 @@ def main(
     if device is not None:
         jax.config.update("jax_platform_name", device)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Evaluating log-probabilities of pre-generated samples")
     print(f"  Checkpoint      : {ckpt_path}")
     print(f"  Samples path    : {samples_path}")
@@ -83,7 +83,7 @@ def main(
         print(f"  Forward ODE     : {forward_ode}")
     print(f"  JAX process     : {jax.process_index()}/{jax.process_count()}")
     print(f"  JAX devices     : {jax.devices()}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     # ── Load trained flow ─────────────────────────────────────────────
     print("Loading trained model...")

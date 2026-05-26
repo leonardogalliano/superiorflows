@@ -100,7 +100,7 @@ def main(
     if device is not None:
         jax.config.update("jax_platform_name", device)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Sampling from CNF particle model")
     print(f"  Checkpoint     : {ckpt_path}")
     print(f"  Batch size     : {batch_size}")
@@ -118,7 +118,7 @@ def main(
     print(f"  Ignore density : {ignore_density}")
     print(f"  JAX process    : {jax.process_index()}/{jax.process_count()}")
     print(f"  JAX devices    : {jax.devices()}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     print("Loading trained model...")
     t0 = time.time()

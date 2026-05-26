@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, Optional
 import diffrax as dfx
 import equinox as eqx
 import jax
+import jax.flatten_util
 import jax.numpy as jnp
 
 from superiorflows.bijector import AbstractBijector
@@ -182,7 +183,7 @@ class ODEBijector(AbstractBijector):
 
     def __check_init__(self):
         if self.divergence_fn is not None and self.hutchinson_samples is not None:
-            raise ValueError("Cannot set both divergence_fn and hutchinson_samples. " "Choose one divergence strategy.")
+            raise ValueError("Cannot set both divergence_fn and hutchinson_samples. Choose one divergence strategy.")
 
     # --- AbstractBijector interface ---
 

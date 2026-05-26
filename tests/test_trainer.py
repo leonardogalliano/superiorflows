@@ -1,4 +1,5 @@
 """Tests for the Trainer, Callbacks, and Loss functions."""
+
 import importlib.util
 import time
 from typing import Optional
@@ -773,7 +774,7 @@ class TestCompilationEfficiency:
         compilation_time = times[0]
         avg_execution_time = sum(times[1:]) / len(times[1:])
 
-        print(f"Compilation: {compilation_time*1000:.2f}ms, " f"Avg Exec: {avg_execution_time*1000:.2f}ms")
+        print(f"Compilation: {compilation_time * 1000:.2f}ms, Avg Exec: {avg_execution_time * 1000:.2f}ms")
 
         if avg_execution_time > 0.001:
             assert compilation_time > 2.0 * avg_execution_time, "Recompilation likely occurred!"
@@ -1444,7 +1445,7 @@ class TestStochasticInterpolantLoss:
         compilation_time = times[0]
         avg_execution_time = sum(times[1:]) / len(times[1:])
 
-        print(f"SI Compilation: {compilation_time*1000:.2f}ms, " f"Avg Exec: {avg_execution_time*1000:.2f}ms")
+        print(f"SI Compilation: {compilation_time * 1000:.2f}ms, Avg Exec: {avg_execution_time * 1000:.2f}ms")
 
         if avg_execution_time > 0.001:
             assert compilation_time > 2.0 * avg_execution_time, "Recompilation likely occurred!"
@@ -1699,7 +1700,7 @@ class TestDenoiserLearning:
         compilation_time = times[0]
         avg_execution_time = sum(times[1:]) / len(times[1:])
 
-        print(f"SI+Denoiser Compilation: {compilation_time*1000:.2f}ms, " f"Avg Exec: {avg_execution_time*1000:.2f}ms")
+        print(f"SI+Denoiser Compilation: {compilation_time * 1000:.2f}ms, Avg Exec: {avg_execution_time * 1000:.2f}ms")
 
         if avg_execution_time > 0.001:
             assert compilation_time > 2.0 * avg_execution_time, "Recompilation likely occurred!"
