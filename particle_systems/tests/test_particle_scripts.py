@@ -249,9 +249,9 @@ def test_evaluate_log_prob(sampled_with_density, tmp_path):
     ref_lps = np.concatenate([np.loadtxt(f) for f in ref_lp_files])
     eval_lps = np.concatenate([np.loadtxt(f) for f in eval_lp_files])
 
-    assert (
-        ref_lps.shape == eval_lps.shape
-    ), f"Log-prob shape mismatch: reference {ref_lps.shape} vs evaluated {eval_lps.shape}"
+    assert ref_lps.shape == eval_lps.shape, (
+        f"Log-prob shape mismatch: reference {ref_lps.shape} vs evaluated {eval_lps.shape}"
+    )
     np.testing.assert_allclose(eval_lps, ref_lps, atol=0.1, err_msg="Reverse-pass log-probs deviate from forward-pass")
 
 
@@ -292,9 +292,9 @@ def test_evaluate_log_prob_forward(sampled_with_density, tmp_path):
     ref_lps = np.concatenate([np.loadtxt(f) for f in ref_lp_files])
     eval_lps = np.concatenate([np.loadtxt(f) for f in eval_lp_files])
 
-    assert (
-        ref_lps.shape == eval_lps.shape
-    ), f"Log-prob shape mismatch: reference {ref_lps.shape} vs evaluated {eval_lps.shape}"
+    assert ref_lps.shape == eval_lps.shape, (
+        f"Log-prob shape mismatch: reference {ref_lps.shape} vs evaluated {eval_lps.shape}"
+    )
     np.testing.assert_allclose(
         eval_lps, ref_lps, atol=1e-4, err_msg="Forward-pass log-probs deviate from original generated ones"
     )
@@ -338,9 +338,9 @@ def test_evaluate_log_prob_hutchinson(sampled_with_density, tmp_path):
     ref_lps = np.concatenate([np.loadtxt(f) for f in ref_lp_files])
     eval_lps = np.concatenate([np.loadtxt(f) for f in eval_lp_files])
 
-    assert (
-        ref_lps.shape == eval_lps.shape
-    ), f"Log-prob shape mismatch: reference {ref_lps.shape} vs evaluated {eval_lps.shape}"
+    assert ref_lps.shape == eval_lps.shape, (
+        f"Log-prob shape mismatch: reference {ref_lps.shape} vs evaluated {eval_lps.shape}"
+    )
     np.testing.assert_allclose(eval_lps, ref_lps, atol=0.5, err_msg="Hutchinson log-probs deviate from forward-pass")
 
 
@@ -443,7 +443,7 @@ def test_evaluate_log_prob_forward_vs_backward(sampled_with_density, tmp_path):
     bwd_lps = np.concatenate([np.loadtxt(f) for f in bwd_lp_files])
     fwd_lps = np.concatenate([np.loadtxt(f) for f in fwd_lp_files])
 
-    assert (
-        bwd_lps.shape == fwd_lps.shape
-    ), f"Log-prob shape mismatch: backward {bwd_lps.shape} vs forward {fwd_lps.shape}"
+    assert bwd_lps.shape == fwd_lps.shape, (
+        f"Log-prob shape mismatch: backward {bwd_lps.shape} vs forward {fwd_lps.shape}"
+    )
     np.testing.assert_allclose(fwd_lps, bwd_lps, atol=0.1, err_msg="Forward-pass log-probs deviate from backward-pass")

@@ -10,13 +10,13 @@ from typing import Any, Dict
 import jax
 import jax.numpy as jnp
 import numpy as np
-from superiorflows import Flow, ODEBijector
-from superiorflows.train import Callback
 
 from particle_systems.particle_system import (
     ParticleSystem,
     batch_to_trajectory,
 )
+from superiorflows import Flow, ODEBijector
+from superiorflows.train import Callback
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

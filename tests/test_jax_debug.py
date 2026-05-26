@@ -6,6 +6,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
+
 from superiorflows import Flow, ODEBijector
 
 # ============================================================================
@@ -110,9 +111,9 @@ def test_recompilation_check(debug_setup, capsys):
     traced_function(k2)
 
     # Verify we only compiled once
-    assert (
-        recompilation_counter["count"] == 1
-    ), f"Function recompiled {recompilation_counter['count']} times! expected 1."
+    assert recompilation_counter["count"] == 1, (
+        f"Function recompiled {recompilation_counter['count']} times! expected 1."
+    )
 
     print(">>> Recompilation Test Passed: Function compiled exactly once.")
 

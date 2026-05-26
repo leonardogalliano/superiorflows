@@ -10,6 +10,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
+
 from superiorflows import Flow, ODEBijector
 
 # ============================================================================

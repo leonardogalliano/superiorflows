@@ -18,6 +18,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
+
 from superiorflows import Flow, ODEBijector
 from superiorflows.train import MaximumLikelihoodLoss
 from superiorflows.train.trainer import train_step

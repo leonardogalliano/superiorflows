@@ -21,6 +21,19 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import typer
+from typing_extensions import Annotated
+
+from particle_systems.callbacks_particles import BoltzmannCallback
+from particle_systems.particle_system import (
+    BoltzmannDistribution,
+    CoupleBaseSamples,
+    EquivariantOptimalTransport,
+    ParticleSystem,
+    TrajectoryDataSource,
+    UniformParticles,
+    particle_geodesic_interpolant,
+)
+from particle_systems.velocities import ParticlesEGNNVelocity, ParticlesMLPVelocity
 from superiorflows import DistributionDataSource, ODEBijector
 from superiorflows.train import (
     CheckpointCallback,
@@ -37,19 +50,6 @@ from superiorflows.train import (
     Trainer,
     ValidationCallback,
 )
-from typing_extensions import Annotated
-
-from particle_systems.callbacks_particles import BoltzmannCallback
-from particle_systems.particle_system import (
-    BoltzmannDistribution,
-    CoupleBaseSamples,
-    EquivariantOptimalTransport,
-    ParticleSystem,
-    TrajectoryDataSource,
-    UniformParticles,
-    particle_geodesic_interpolant,
-)
-from particle_systems.velocities import ParticlesEGNNVelocity, ParticlesMLPVelocity
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
 

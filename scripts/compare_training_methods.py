@@ -21,6 +21,7 @@ import jax.numpy as jnp
 import matplotlib
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
+
 from superiorflows import Flow, ODEBijector
 
 # Import 8_gaussians module dynamically

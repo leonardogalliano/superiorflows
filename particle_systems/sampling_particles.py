@@ -11,7 +11,6 @@ import jax
 import numpy as np
 import orbax.checkpoint as ocp
 import typer
-from superiorflows import Flow, ODEBijector
 
 from particle_systems.particle_system import (
     TrajectoryDataSource,
@@ -19,6 +18,7 @@ from particle_systems.particle_system import (
     batch_to_trajectory,
 )
 from particle_systems.training_particles import build_solver, build_velocity
+from superiorflows import Flow, ODEBijector
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
 

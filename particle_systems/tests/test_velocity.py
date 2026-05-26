@@ -4,10 +4,10 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
-from superiorflows import Flow, ODEBijector
 
 from particle_systems.particle_system import ParticleSystem, TrajectoryDataSource, UniformParticles
 from particle_systems.velocities import ParticlesMLPVelocity
+from superiorflows import Flow, ODEBijector
 
 DATA_PATH = "particle_systems/data/ss14_T0.1.xyz"
 

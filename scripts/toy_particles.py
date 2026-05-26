@@ -9,6 +9,8 @@ import jax
 import jax.numpy as jnp
 import optax
 import typer
+from typing_extensions import Annotated
+
 from superiorflows import DistributionDataSource, ODEBijector
 from superiorflows.train import (
     CheckpointCallback,
@@ -17,7 +19,6 @@ from superiorflows.train import (
     ProgressBarCallback,
     Trainer,
 )
-from typing_extensions import Annotated
 
 
 class ToyParticles(eqx.Module):

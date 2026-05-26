@@ -5,10 +5,10 @@ import grain
 import jax
 import jax.numpy as jnp
 import pytest
-from superiorflows import Flow, ODEBijector
 
 from particle_systems.particle_system import ParticleSystem, TrajectoryDataSource, UniformParticles
 from particle_systems.velocities import ParticlesMLPVelocity
+from superiorflows import Flow, ODEBijector
 
 # Disable logging from grain/TrajectoryDataSource for cleaner benchmark output
 logging.getLogger("particle_systems.particle_system").setLevel(logging.WARNING)

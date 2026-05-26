@@ -18,7 +18,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from superiorflows import Flow, ODEBijector
 
 from particle_systems.particle_system import (
     ParticleSystem,
@@ -26,6 +25,7 @@ from particle_systems.particle_system import (
     UniformParticles,
 )
 from particle_systems.velocities import ParticlesEGNNVelocity
+from superiorflows import Flow, ODEBijector
 
 logging.getLogger("particle_systems.particle_system").setLevel(logging.WARNING)
 

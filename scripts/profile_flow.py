@@ -13,6 +13,7 @@ import distreqx.distributions as dsx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+
 from superiorflows import Flow, ODEBijector
 
 

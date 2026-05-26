@@ -2,6 +2,7 @@
 
 import equinox as eqx
 import jax.numpy as jnp
+
 from superiorflows.bijector import AbstractBijector, DistreqxBijectorWrapper
 
 
