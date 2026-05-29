@@ -40,7 +40,7 @@ echo "Likelihood evaluation started at: $(date)"
 echo "================================================="
 
 # Dispatch the job via the CLI entry point defined in pyproject.toml
-/usr/bin/time -v srun uv run /lustre/fswork/projects/rech/czd/ulu16wv/superiorflows/particle_systems/evaluate_log_prob.py "$@"
+/usr/bin/time -v srun uv run particle_systems/evaluate_log_prob.py "$@"
 
 echo "================================================="
 echo "Likelihood evaluation finished at: $(date)"
