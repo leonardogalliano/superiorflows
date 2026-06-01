@@ -79,6 +79,7 @@ DEFAULT_CONFIG = {
     "optimizer": {
         "type": "adam",
         "lr_schedule": "1e-3",
+        "clip": None,
     },
     "velocity": {
         "type": "mlp",
@@ -216,6 +217,13 @@ def build_optimizer(config: dict) -> tuple:
     - An **optax expression string** evaluated as Python with ``optax`` in
       scope (e.g. ``"optax.cosine_decay_schedule(1e-3, decay_steps=5000)"``).
 
+    The ``clip`` field, if provided, allows gradient clipping to mitigate numerical instabilities
+    and exploding gradients during flow training. It supports:
+
+    - A **numeric value** (e.g. ``1.0``) → wraps in global norm clipping.
+    - A **dictionary** specifying ``type`` and ``value`` (e.g. ``{"type": "global_norm", "value": 1.0}``
+      or ``{"type": "value", "value": 1.0}``).
+
     Returns:
         A ``(optimizer, schedule)`` tuple where ``schedule`` is the raw optax
         schedule callable (``int -> float``) used by ``LRSchedulerCallback``.
@@ -238,7 +246,31 @@ def build_optimizer(config: dict) -> tuple:
     if otype not in optimizers:
         raise ValueError(f"Unknown optimizer type '{otype}'. Available: {list(optimizers)}")
 
-    return optimizers[otype](learning_rate=schedule), schedule
+    base_opt = optimizers[otype](learning_rate=schedule)
+
+    clip_cfg = ocfg.get("clip")
+    if clip_cfg is not None:
+        if isinstance(clip_cfg, (int, float)):
+            clip_transform = optax.clip_by_global_norm(float(clip_cfg))
+        elif isinstance(clip_cfg, dict):
+            clip_type = clip_cfg.get("type", "global_norm").lower()
+            clip_value = float(clip_cfg["value"])
+            if clip_type == "global_norm":
+                clip_transform = optax.clip_by_global_norm(clip_value)
+            elif clip_type == "value":
+                clip_transform = optax.clip(clip_value)
+            elif clip_type == "block_rms":
+                clip_transform = optax.clip_by_block_rms(clip_value)
+            else:
+                raise ValueError(f"Unknown clipping type '{clip_type}'. Available: 'global_norm', 'value', 'block_rms'")
+        else:
+            raise TypeError("Optimizer 'clip' must be None, a number, or a dictionary.")
+
+        optimizer = optax.chain(clip_transform, base_opt)
+    else:
+        optimizer = base_opt
+
+    return optimizer, schedule
 
 
 # ── Core training logic ──────────────────────────────────────────────────────

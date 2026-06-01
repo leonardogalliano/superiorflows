@@ -22,7 +22,11 @@
     },
     "optimizer": {
         "type": "adam",
-        "lr_schedule": "1e-3"
+        "lr_schedule": "1e-3",
+        "clip": {
+            "type": "value",
+            "value": 0.5
+        }
     },
     "velocity": {
         "type": "mlp",
