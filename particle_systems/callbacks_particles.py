@@ -133,6 +133,7 @@ class BoltzmannCallback(Callback):
         energy_filter_sigma: float = 10.0,
         species_radii: np.ndarray | None = None,
         n_show: int = 10,
+        seed: int = 0,
     ):
         self.energy_fn = energy_fn
         self.base_distribution = base_distribution
@@ -152,6 +153,7 @@ class BoltzmannCallback(Callback):
         self.energy_filter_sigma = energy_filter_sigma
         self.species_radii = species_radii
         self.n_show = n_show
+        self.seed = seed
 
         # Pre-computed target observables
         self._target_energies = None
@@ -173,7 +175,8 @@ class BoltzmannCallback(Callback):
         from atooms.trajectory.decorators import fold
 
         n = min(self.n_target_samples, len(self.target_source))
-        indices = np.random.choice(len(self.target_source), size=n, replace=False)
+        rng = np.random.default_rng(self.seed)
+        indices = rng.choice(len(self.target_source), size=n, replace=False)
 
         # Target energies (batched for speed)
         target_samples = [self.target_source[int(i)] for i in indices]

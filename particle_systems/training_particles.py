@@ -466,6 +466,7 @@ def train_single_model(config: dict):
                 tb_writer=tb_writer,
                 species_radii=species_radii,
                 n_show=bz_cfg.get("n_show", 10),
+                seed=seed,
             )
         )
 
