@@ -1,12 +1,13 @@
 import time
 
 import diffrax as dfx
-import distrax as dsx
+import distreqx.distributions as dsx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
-from superiorflows import Flow
+
+from superiorflows import Flow, ODEBijector
 
 # ============================================================================
 # Setup
@@ -33,7 +34,7 @@ def debug_setup():
     base_dist = dsx.MultivariateNormalDiag(loc=jnp.zeros(d), scale_diag=jnp.ones(d))
 
     # Velocity field parameters
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     k1, k2, k3 = jax.random.split(key, 3)
 
     A = jax.random.normal(k1, (d, d)) * 0.5
@@ -42,11 +43,8 @@ def debug_setup():
     velocity = LinearVelocityField(A=A, b=b)
 
     flow = Flow(
-        velocity_field=velocity,
-        base_distribution=base_dist,
-        t0=0.0,
-        t1=1.0,
-        solver=dfx.Tsit5(),  # Default solver
+        ODEBijector(velocity, t0=0.0, t1=1.0, solver=dfx.Tsit5()),
+        base_dist,
     )
 
     return flow, k3
@@ -65,7 +63,7 @@ def test_recompilation_check(debug_setup, capsys):
     for a given input shape, and not recompiled on subsequent calls.
     """
     flow, key = debug_setup
-    sample_shape = (10,)
+    n_samples = 10
 
     # We use a side-effect (printing) to detect compilation.
     # In JAX, Python side-effects inside a JIT-ed function run ONLY during tracing (compilation).
@@ -73,7 +71,7 @@ def test_recompilation_check(debug_setup, capsys):
     @jax.jit
     def monitored_function(k):
         jax.debug.print("--- TRACING (Compiling) ---")
-        return flow.sample_and_log_prob(seed=k, sample_shape=sample_shape)
+        return jax.vmap(flow.sample_and_log_prob)(jax.random.split(k, n_samples))
 
     print("\n\n>>> Starting Recompilation Test")
 
@@ -104,7 +102,7 @@ def test_recompilation_check(debug_setup, capsys):
         # We can also update a mutable object, but that's a bit "unsafe" in general,
         # though standard for detecting trace-time execution.
         recompilation_counter["count"] += 1
-        return flow.sample_and_log_prob(seed=k, sample_shape=sample_shape)
+        return jax.vmap(flow.sample_and_log_prob)(jax.random.split(k, n_samples))
 
     print("Call A (Compile):")
     traced_function(k1)
@@ -113,9 +111,9 @@ def test_recompilation_check(debug_setup, capsys):
     traced_function(k2)
 
     # Verify we only compiled once
-    assert (
-        recompilation_counter["count"] == 1
-    ), f"Function recompiled {recompilation_counter['count']} times! expected 1."
+    assert recompilation_counter["count"] == 1, (
+        f"Function recompiled {recompilation_counter['count']} times! expected 1."
+    )
 
     print(">>> Recompilation Test Passed: Function compiled exactly once.")
 
@@ -130,11 +128,11 @@ def test_pedagogical_profiling(debug_setup):
     Profiles the flow to show the cost of compilation vs execution.
     """
     flow, key = debug_setup
-    sample_shape = (128,)
+    n_samples = 128
 
     @jax.jit
     def run_step(k):
-        return flow.sample_and_log_prob(seed=k, sample_shape=sample_shape)
+        return jax.vmap(flow.sample_and_log_prob)(jax.random.split(k, n_samples))
 
     print("\n\n>>> Starting Profiling Test")
     k1, k2 = jax.random.split(key)
@@ -188,9 +186,10 @@ def test_numerical_health(debug_setup):
     Checks for NaNs and Infs in the output.
     """
     flow, key = debug_setup
-    sample_shape = (100,)
+    n_samples = 100
 
-    samples, log_probs = flow.sample_and_log_prob(seed=key, sample_shape=sample_shape)
+    keys = jax.random.split(key, n_samples)
+    samples, log_probs = jax.vmap(flow.sample_and_log_prob)(keys)
 
     print("\n\n>>> Numerical Health Check")
     print(f"Sample stats: mean={jnp.mean(samples):.3f}, std={jnp.std(samples):.3f}")
@@ -225,7 +224,7 @@ def test_ode_diagnostics(debug_setup):
     Inspects the internal steps taken by the ODE solver.
     """
     flow, key = debug_setup
-    x0 = flow.base_distribution.sample(seed=key)
+    x0 = flow.base_distribution.sample(key)
 
     # We want to see the trajectory steps.
     # Flow.integrate returns the solution object.
@@ -233,7 +232,7 @@ def test_ode_diagnostics(debug_setup):
     print("\n\n>>> ODE Diagnostics")
 
     # We use SaveAt(steps=True) to save every step taken by the solver
-    sol = flow.integrate(x0, saveat=dfx.SaveAt(steps=True))
+    sol = flow.bijector.integrate(x0, saveat=dfx.SaveAt(steps=True))
 
     ts = sol.ts  # Times at which steps were taken
     # ys = sol.ys  # State values at those times
@@ -256,7 +255,7 @@ def test_ode_diagnostics(debug_setup):
 
     # Check final time
     t_final = ts[jnp.argmax(valid_steps * jnp.arange(ts.shape[0]))]
-    print(f"Final integration time reached: {t_final:.4f} (Target: {flow.t1})")
+    print(f"Final integration time reached: {t_final:.4f} (Target: {flow.bijector.t1})")
 
-    assert jnp.isclose(t_final, flow.t1, atol=1e-3), "Solver did not reach final time t1!"
+    assert jnp.isclose(t_final, flow.bijector.t1, atol=1e-3), "Solver did not reach final time t1!"
     print(">>> ODE Diagnostics Passed.")

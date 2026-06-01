@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import diffrax as dfx
-import distrax as dsx
+import distreqx.distributions as dsx
 import equinox as eqx
 import grain
 import jax
@@ -12,7 +12,8 @@ import numpy as np
 import optax
 from PIL import Image, ImageDraw, ImageFont
 from scipy.optimize import linear_sum_assignment
-from superiorflows import CoupledDataSource, DistributionDataSource, Flow
+
+from superiorflows import CoupledDataSource, DistributionDataSource, Flow, ODEBijector
 from superiorflows.train import (
     CheckpointCallback,
     LoggerCallback,
@@ -220,12 +221,12 @@ save_times = jnp.linspace(0.0, 1.0, n_frames)
 
 # For animation, we transport from Gaussian to Full Logo
 key, subkey = jax.random.split(key)
-x0 = base_dist.sample(seed=subkey, sample_shape=(n_particles,))
+x0 = jax.vmap(base_dist.sample)(jax.random.split(subkey, n_particles))
 
 
 def get_trajectories(model):
-    flow = Flow(velocity_field=model, base_distribution=base_dist)
-    return jax.vmap(lambda x: flow.integrate(x, saveat=dfx.SaveAt(ts=save_times)).ys)(x0)
+    flow = Flow(ODEBijector(model), base_dist)
+    return jax.vmap(lambda x: flow.bijector.integrate(x, saveat=dfx.SaveAt(ts=save_times)).ys)(x0)
 
 
 trajectory = get_trajectories(model)

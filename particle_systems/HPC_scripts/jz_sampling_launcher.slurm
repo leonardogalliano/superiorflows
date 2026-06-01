@@ -40,7 +40,7 @@ echo "Sampling started at: $(date)"
 echo "================================================="
 
 # Dispatch the job via the CLI entry point defined in pyproject.toml
-/usr/bin/time -v srun uv run /lustre/fswork/projects/rech/czd/ulu16wv/superiorflows/particle_systems/sampling_particles.py "$@"
+/usr/bin/time -v srun uv run particle_systems/sampling_particles.py "$@"
 
 echo "================================================="
 echo "Sampling finished at: $(date)"

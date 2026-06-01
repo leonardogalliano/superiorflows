@@ -9,11 +9,12 @@ This script uses JAX's profiling tools to verify that:
 
 import time
 
-import distrax as dsx
+import distreqx.distributions as dsx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from superiorflows import Flow
+
+from superiorflows import Flow, ODEBijector
 
 
 class MLPVelocity(eqx.Module):
@@ -27,11 +28,11 @@ class MLPVelocity(eqx.Module):
 
 
 def main():
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     key, subkey = jax.random.split(key)
     velocity_field = MLPVelocity(subkey)
     base_dist = dsx.MultivariateNormalDiag(jnp.zeros(2), jnp.ones(2))
-    X = jax.random.normal(jax.random.PRNGKey(0), (10, 2))
+    X = jax.random.normal(jax.random.key(0), (10, 2))
 
     # ========================================================================
     # PROOF 1: jax.make_jaxpr shows what's actually traced
@@ -42,8 +43,8 @@ def main():
 
     def loss_fn(vf_arrays, X):
         vf = eqx.combine(vf_arrays, eqx.filter(velocity_field, lambda x: not eqx.is_array(x)))
-        flow = Flow(velocity_field=vf, base_distribution=base_dist)
-        return -jnp.mean(flow.log_prob(X))
+        flow = Flow(ODEBijector(vf), base_dist)
+        return -jnp.mean(jax.vmap(flow.log_prob)(X))
 
     vf_arrays = eqx.filter(velocity_field, eqx.is_array)
     jaxpr = jax.make_jaxpr(loss_fn)(vf_arrays, X)
@@ -72,7 +73,7 @@ def main():
     t0 = time.perf_counter()
     _ = loss_fn_jit(vf_arrays, X)
     t1 = time.perf_counter()
-    print(f"First call (compilation): {(t1-t0)*1000:.1f}ms")
+    print(f"First call (compilation): {(t1 - t0) * 1000:.1f}ms")
 
     # Subsequent calls (should be fast and consistent)
     times = []

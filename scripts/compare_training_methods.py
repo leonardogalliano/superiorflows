@@ -8,18 +8,21 @@ This script trains models using:
 
 And compares their convergence and sample quality.
 """
+
 import importlib.util
 import sys
 from pathlib import Path
 
 import diffrax as dfx
-import distrax as dsx
+import distreqx.distributions as dsx
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import matplotlib
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
-from superiorflows import Flow
+
+from superiorflows import Flow, ODEBijector
 
 # Import 8_gaussians module dynamically
 script_path = Path(__file__).parent / "8_gaussians.py"
@@ -139,7 +142,7 @@ def main():
     locs = 10.0 * jnp.stack([jnp.sin(angles), jnp.cos(angles)], axis=1)
     target_dist = dsx.MixtureSameFamily(
         mixture_distribution=dsx.Categorical(probs=jnp.ones(8) / 8),
-        components_distribution=dsx.MultivariateNormalDiag(loc=locs, scale_diag=jnp.full((8, 2), 0.7)),
+        components_distribution=eqx.filter_vmap(dsx.MultivariateNormalDiag)(locs, jnp.full((8, 2), 0.7)),
     )
     # Base: Standard Gaussian
     base_dist = dsx.MultivariateNormalDiag(jnp.zeros(d), jnp.ones(d))
@@ -161,9 +164,9 @@ def main():
     n_samples = 500
 
     def get_samples(model, key):
-        flow = Flow(velocity_field=model, base_distribution=base_dist)
-        x0 = base_dist.sample(seed=key, sample_shape=(n_samples,))
-        return jax.vmap(flow.apply_map)(x0)
+        flow = Flow(ODEBijector(model), base_dist)
+        x0 = jax.vmap(base_dist.sample)(jax.random.split(key, n_samples))
+        return jax.vmap(flow.bijector.forward)(x0)
 
     samples_mle = get_samples(model_mle, k1)
     samples_energy = get_samples(model_energy, k2)
@@ -204,13 +207,13 @@ def main():
     save_times = jnp.linspace(0.0, 1.0, n_frames)
 
     key, subkey = jax.random.split(key)
-    x0 = base_dist.sample(seed=subkey, sample_shape=(n_particles,))
+    x0 = jax.vmap(base_dist.sample)(jax.random.split(subkey, n_particles))
 
     # Integrate methods
     def get_trajectories(model):
-        flow = Flow(velocity_field=model, base_distribution=base_dist)
+        flow = Flow(ODEBijector(model), base_dist)
         # return shape: (n_particles, n_frames, dim)
-        return jax.vmap(lambda x: flow.integrate(x, saveat=dfx.SaveAt(ts=save_times)).ys)(x0)
+        return jax.vmap(lambda x: flow.bijector.integrate(x, saveat=dfx.SaveAt(ts=save_times)).ys)(x0)
 
     traj_mle = get_trajectories(model_mle)
     traj_energy = get_trajectories(model_energy)

@@ -148,9 +148,9 @@ def test_exhaustive_optimality():
             _, cost_g = _solve_ot_single(p0_g, pos_1[i], species[i], species[i], L)
             best_cost = min(best_cost, cost_g)
 
-        assert np.isclose(
-            class_cost, best_cost, rtol=1e-4
-        ), f"Batch {i}: class cost {class_cost:.4f} != exhaustive best {best_cost:.4f}"
+        assert np.isclose(class_cost, best_cost, rtol=1e-4), (
+            f"Batch {i}: class cost {class_cost:.4f} != exhaustive best {best_cost:.4f}"
+        )
 
     print(f"  [PASS] EquivariantOptimalTransport finds exhaustive optimum for B={B}")
 
@@ -199,9 +199,9 @@ def test_species_preserved():
     for sym in [False, True]:
         ot = EquivariantOptimalTransport(use_box_symmetry=sym)
         (x0_a, _) = ot((x0, x1))
-        assert np.array_equal(
-            np.asarray(x0_a.species), np.asarray(x1.species)
-        ), f"Species mismatch with use_box_symmetry={sym}"
+        assert np.array_equal(np.asarray(x0_a.species), np.asarray(x1.species)), (
+            f"Species mismatch with use_box_symmetry={sym}"
+        )
 
     print("  [PASS] Species preserved after OT (both modes)")
 
@@ -246,9 +246,9 @@ def test_different_species_order():
                 unique_orig = np.unique(orig_p0_s, axis=0)
                 unique_aligned = np.unique(aligned_p0_s, axis=0)
 
-                assert (
-                    np.allclose(unique_orig, unique_aligned, atol=1e-6) or sym
-                ), f"Set of coordinates changed during pure assignment for species {s} and sym={sym}"
+                assert np.allclose(unique_orig, unique_aligned, atol=1e-6) or sym, (
+                    f"Set of coordinates changed during pure assignment for species {s} and sym={sym}"
+                )
 
     print("  [PASS] Explicit species indexing logic matched differently ordered datasets successfully")
 

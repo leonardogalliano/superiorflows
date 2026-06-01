@@ -9,15 +9,17 @@ inside loss functions, particularly focusing on:
 
 Run with: uv run python scripts/debug_jax_compilation.py
 """
+
 import time
 
 import diffrax as dfx
-import distrax as dsx
+import distreqx.distributions as dsx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
-from superiorflows import Flow
+
+from superiorflows import Flow, ODEBijector
 from superiorflows.train import MaximumLikelihoodLoss
 from superiorflows.train.trainer import train_step
 
@@ -52,10 +54,10 @@ class SimpleVelocity(eqx.Module):
 # =============================================================================
 
 
-def test_distrax_pytree_issue():
-    """Investigate distrax distribution pytree stability."""
+def test_distreqx_pytree_issue():
+    """Investigate distreqx distribution pytree stability."""
     print("\n" + "=" * 60)
-    print("TEST 1: Distrax Distribution PyTree Analysis")
+    print("TEST 1: Distreqx Distribution PyTree Analysis")
     print("=" * 60)
 
     dim = 2
@@ -71,7 +73,7 @@ def test_distrax_pytree_issue():
 
     if tree1 != tree2:
         print("\n  ⚠️ CRITICAL ISSUE: Same object gives different tree structures!")
-        print("  This means distrax distributions are NOT stable for JAX tracing.")
+        print("  This means distreqx distributions are NOT stable for JAX tracing.")
     else:
         print("  ✓ Tree structure is stable for the same object")
 
@@ -123,13 +125,13 @@ def test_actual_training_pattern():
         t1 = time.perf_counter()
 
         step_times.append((t1 - t0) * 1000)
-        print(f"  Step {i+1:2d}: {step_times[-1]:8.1f}ms, loss={float(loss):.4f}")
+        print(f"  Step {i + 1:2d}: {step_times[-1]:8.1f}ms, loss={float(loss):.4f}")
 
     print("-" * 60)
 
     print("\n2b. Analysis:")
     print(f"  First step (compilation): {step_times[0]:.1f}ms")
-    print(f"  Average of steps 2-{n_steps}: {sum(step_times[1:])/(len(step_times)-1):.2f}ms")
+    print(f"  Average of steps 2-{n_steps}: {sum(step_times[1:]) / (len(step_times) - 1):.2f}ms")
     speedup = step_times[0] / (sum(step_times[1:]) / len(step_times[1:]))
     print(f"  Speedup after warmup: {speedup:.1f}x")
 
@@ -163,22 +165,22 @@ def test_flow_direct():
     base_dist = dsx.MultivariateNormalDiag(jnp.zeros(dim), jnp.ones(dim))
     velocity = SimpleVelocity(dim=dim, hidden=16, key=key)
 
-    print("\n3a. Testing flow.apply_map compilation...")
+    print("\n3a. Testing flow.bijector.forward compilation...")
 
     # Create flow once
-    flow = Flow(velocity_field=velocity, base_distribution=base_dist)
+    flow = Flow(ODEBijector(velocity), base_dist)
     x = jnp.zeros(dim)
 
     times = []
     for i in range(5):
         t0 = time.perf_counter()
-        result = flow.apply_map(x)
+        result = flow.bijector.forward(x)
         jax.block_until_ready(result)
         t1 = time.perf_counter()
         times.append((t1 - t0) * 1000)
-        print(f"  Call {i+1}: {times[-1]:.1f}ms")
+        print(f"  Call {i + 1}: {times[-1]:.1f}ms")
 
-    print(f"\n  First call / avg rest: {times[0] / (sum(times[1:])/len(times[1:])):.1f}x")
+    print(f"\n  First call / avg rest: {times[0] / (sum(times[1:]) / len(times[1:])):.1f}x")
 
     print("\n3b. Testing flow.log_prob compilation...")
 
@@ -189,9 +191,9 @@ def test_flow_direct():
         jax.block_until_ready(result)
         t1 = time.perf_counter()
         times.append((t1 - t0) * 1000)
-        print(f"  Call {i+1}: {times[-1]:.1f}ms")
+        print(f"  Call {i + 1}: {times[-1]:.1f}ms")
 
-    print(f"\n  First call / avg rest: {times[0] / (sum(times[1:])/len(times[1:])):.1f}x")
+    print(f"\n  First call / avg rest: {times[0] / (sum(times[1:]) / len(times[1:])):.1f}x")
 
     print("\n  ✓ Test 3 complete")
 
@@ -212,13 +214,13 @@ def test_static_fields():
 
     base_dist = dsx.MultivariateNormalDiag(jnp.zeros(dim), jnp.ones(dim))
     velocity = SimpleVelocity(dim=dim, hidden=16, key=key)
-    flow = Flow(velocity_field=velocity, base_distribution=base_dist)
+    flow = Flow(ODEBijector(velocity), base_dist)
 
     print("\n4a. Field categorization:")
 
     fields_info = [
         ("velocity_field", "Contains model weights (traced)"),
-        ("base_distribution", "distrax Distribution (traced arrays)"),
+        ("base_distribution", "distreqx Distribution (traced arrays)"),
         ("dynamic_mask", "Lambda function (static=True)"),
         ("hutchinson_samples", "Optional[int] (static=True)"),
         ("solver", "diffrax Solver (static=True)"),
@@ -248,7 +250,7 @@ def test_static_fields():
     # This is key - the default lambda is shared!
     key2 = jax.random.key(1)
     velocity2 = SimpleVelocity(dim=dim, hidden=16, key=key2)
-    flow2 = Flow(velocity_field=velocity2, base_distribution=base_dist)
+    flow2 = Flow(ODEBijector(velocity2), base_dist)
 
     print(f"  flow1.dynamic_mask is flow2.dynamic_mask: {flow.dynamic_mask is flow2.dynamic_mask}")
 
@@ -299,7 +301,7 @@ def test_training_e2e():
         losses.append(float(loss))
 
         if i < 3 or i >= n_steps - 2:
-            print(f"  Step {i+1:2d}: {step_times[-1]:7.1f}ms, loss={losses[-1]:.4f}")
+            print(f"  Step {i + 1:2d}: {step_times[-1]:7.1f}ms, loss={losses[-1]:.4f}")
         elif i == 3:
             print("  ...")
 
@@ -307,7 +309,7 @@ def test_training_e2e():
 
     print("\n5b. Timing Summary:")
     print(f"  Compilation (step 1):    {step_times[0]:.1f}ms")
-    print(f"  Average (steps 2-{n_steps}): {sum(step_times[1:])/len(step_times[1:]):.2f}ms")
+    print(f"  Average (steps 2-{n_steps}): {sum(step_times[1:]) / len(step_times[1:]):.2f}ms")
     speedup = step_times[0] / (sum(step_times[1:]) / len(step_times[1:]))
     print(f"  Speedup:                 {speedup:.1f}x")
 
@@ -348,7 +350,7 @@ Expected: ONE compilation on first call, then fast cached execution.
 """
     )
 
-    test_distrax_pytree_issue()
+    test_distreqx_pytree_issue()
     test_actual_training_pattern()
     test_flow_direct()
     test_static_fields()

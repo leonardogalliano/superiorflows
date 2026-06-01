@@ -194,7 +194,7 @@ def build_energy_fn(model, box, n_species):
     potentials = model["potential"]
     cutoffs = model["cutoff"]
     if len(potentials) != len(cutoffs):
-        raise ValueError(f"Number of potentials ({len(potentials)}) must match " f"number of cutoffs ({len(cutoffs)})")
+        raise ValueError(f"Number of potentials ({len(potentials)}) must match number of cutoffs ({len(cutoffs)})")
 
     # Build one smap.pair per potential term
     term_fns = []
@@ -203,9 +203,9 @@ def build_energy_fn(model, box, n_species):
         cut_type = cut_spec["type"]
 
         if pot_type not in POTENTIAL_REGISTRY:
-            raise ValueError(f"Unknown potential '{pot_type}'. " f"Available: {list(POTENTIAL_REGISTRY)}")
+            raise ValueError(f"Unknown potential '{pot_type}'. Available: {list(POTENTIAL_REGISTRY)}")
         if cut_type not in CUTOFF_REGISTRY:
-            raise ValueError(f"Unknown cutoff '{cut_type}'. " f"Available: {list(CUTOFF_REGISTRY)}")
+            raise ValueError(f"Unknown cutoff '{cut_type}'. Available: {list(CUTOFF_REGISTRY)}")
 
         raw_fn = POTENTIAL_REGISTRY[pot_type]
         cutoff_wrapper = CUTOFF_REGISTRY[cut_type]

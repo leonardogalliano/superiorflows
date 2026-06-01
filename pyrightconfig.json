@@ -1,0 +1,27 @@
+{
+  "include": [
+    "src/superiorflows",
+    "particle_systems"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    ".venv"
+  ],
+  "typeCheckingMode": "basic",
+  "reportAttributeAccessIssue": "warning",
+  "reportOptionalMemberAccess": "warning",
+  "reportOptionalCall": "warning",
+  "reportOptionalSubscript": "warning",
+  "reportGeneralTypeIssues": "warning",
+  "reportRedeclaration": "warning",
+  "reportArgumentType": "warning",
+  "reportAssignmentType": "warning",
+  "reportReturnType": "warning",
+  "reportOperatorIssue": "warning",
+  "reportCallIssue": "warning",
+  "reportIndexIssue": "warning",
+  "reportOptionalOperand": "warning",
+  "reportOptionalIterable": "warning",
+  "reportPrivateImportUsage": "none"
+}

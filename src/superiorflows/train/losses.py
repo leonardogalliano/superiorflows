@@ -1,11 +1,29 @@
 from typing import Callable, Optional
 
-import distrax as dsx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from superiorflows import Flow
+from superiorflows.flow import Flow
+
+
+def _vmap_log_prob(flow, batch, key=None):
+    """Evaluate flow.log_prob over a batch, splitting keys for Hutchinson."""
+    if key is not None:
+        batch_size = jax.tree.leaves(batch)[0].shape[0]
+        keys = jax.random.split(key, batch_size)
+        return jax.vmap(lambda x, k: flow.log_prob(x, key=k))(batch, keys)
+    return jax.vmap(flow.log_prob)(batch)
+
+
+def _vmap_push_forward_and_log_prob(flow, batch, key=None):
+    """Evaluate flow.push_forward_and_log_prob over a batch, splitting keys for Hutchinson."""
+    if key is not None:
+        batch_size = jax.tree.leaves(batch)[0].shape[0]
+        keys = jax.random.split(key, batch_size)
+        return jax.vmap(lambda x, k: flow.push_forward_and_log_prob(x, key=k))(batch, keys)
+    return jax.vmap(flow.push_forward_and_log_prob)(batch)
+
 
 __all__ = [
     "MaximumLikelihoodLoss",
@@ -16,130 +34,96 @@ __all__ = [
 
 
 class MaximumLikelihoodLoss(eqx.Module):
-    """Negative log-likelihood loss for flow training.
+    """Negative log-likelihood loss for any normalising flow.
 
-    Computes `-mean(log p(x))` where `p` is the flow density. The batch `x`
-    should contain samples from the target distribution.
+    Computes ``−mean(log p(x))`` where ``p`` is the flow density.  The batch
+    ``x`` should contain samples from the target distribution.
+
+    The ``make_bijector`` callable encapsulates all bijector configuration.
+    For a CNF::
+
+        make_bijector = lambda vf: ODEBijector(vf, dt0=0.1, ...)
+
+    For a discrete flow where the model IS the bijector::
+
+        make_bijector = lambda m: m
 
     Attributes:
-        base_distribution: The base (prior) distribution for the flow.
-        flow_kwargs: Additional keyword arguments passed to `Flow(...)`.
-
-    Example:
-        >>> loss_fn = MaximumLikelihoodLoss(base_dist, dt0=0.1)
-        >>> loss = loss_fn(velocity_field, batch, key=jax.random.key(0))
+        base_distribution: The base (prior) distribution.
+        make_bijector: Callable ``model → AbstractBijector``.
     """
 
-    base_distribution: dsx.Distribution
-    flow_kwargs: dict = eqx.field(static=True)
-
-    def __init__(self, base_distribution, **flow_kwargs):
-        """Initialize the loss module.
-
-        Args:
-            base_distribution: A distrax Distribution for the flow base.
-            **flow_kwargs: Passed to `Flow(...)` (e.g., `dt0`, `hutchinson_samples`).
-        """
-        self.base_distribution = base_distribution
-        self.flow_kwargs = flow_kwargs
+    base_distribution: eqx.Module
+    make_bijector: Callable = eqx.field(static=True)
 
     @eqx.filter_jit
-    def __call__(self, velocity_field, batch, key=None):
+    def __call__(self, model, batch, key=None):
         """Compute the NLL loss.
 
         Args:
-            velocity_field: The velocity field module (trainable).
-            batch: Target samples with shape `(batch_size, *event_shape)`.
-            key: Optional PRNG key for Hutchinson estimator.
+            model: The trainable model (e.g., velocity field for a CNF).
+            batch: Target samples with shape ``(batch_size, *event_shape)``.
+            key: Optional PRNG key (e.g., for Hutchinson estimator).
 
         Returns:
-            Tuple of ``(loss, aux)`` where ``loss`` is a scalar and
+            Tuple ``(loss, aux)`` where ``loss`` is a scalar and
             ``aux`` is a dict of per-component metrics (empty here).
         """
-        flow = Flow(
-            velocity_field=velocity_field,
-            base_distribution=self.base_distribution,
-            **self.flow_kwargs,
-        )
-        return -jnp.mean(flow.log_prob(batch, key=key)), {}
+        bijector = self.make_bijector(model)
+        flow = Flow(bijector, self.base_distribution)
+        return -jnp.mean(_vmap_log_prob(flow, batch, key=key)), {}
 
 
 class EnergyBasedLoss(eqx.Module):
-    """Energy-based (reverse KL) loss for flow training.
+    """Energy-based (reverse KL) loss for any normalising flow.
 
-    Minimizes `E_q[log q(x) - log p(x)]` where `q` is the pushforward of the
-    base distribution through the flow, and `p` is the target.
+    Minimises ``E_q[log q(x) − log p(x)]`` where ``q`` is the pushforward of
+    the base distribution through the flow, and ``p`` is the target.
 
     **Important**: The batch should contain samples from the BASE distribution,
     not the target.
 
     Attributes:
-        base_distribution: The base distribution for the flow.
-        target_distribution: The target distribution with known `log_prob`.
-        flow_kwargs: Additional keyword arguments passed to `Flow(...)`.
-
-    Example:
-        >>> loss_fn = EnergyBasedLoss(base_dist, target_dist)
-        >>> loss = loss_fn(velocity_field, base_samples, key=jax.random.key(0))
+        base_distribution: The base distribution.
+        target_distribution: The target distribution with known ``log_prob``.
+        make_bijector: Callable ``model → AbstractBijector``.
     """
 
-    base_distribution: dsx.Distribution
-    target_distribution: dsx.Distribution
-    flow_kwargs: dict = eqx.field(static=True)
-
-    def __init__(self, base_distribution, target_distribution, **flow_kwargs):
-        """Initialize the loss module.
-
-        Args:
-            base_distribution: A distrax Distribution for the flow base.
-            target_distribution: A distrax Distribution for the target.
-            **flow_kwargs: Passed to `Flow(...)`.
-        """
-        self.base_distribution = base_distribution
-        self.target_distribution = target_distribution
-        self.flow_kwargs = flow_kwargs
+    base_distribution: eqx.Module
+    target_distribution: eqx.Module
+    make_bijector: Callable = eqx.field(static=True)
 
     @eqx.filter_jit
-    def __call__(self, velocity_field, batch, key=None):
+    def __call__(self, model, batch, key=None):
         """Compute the energy-based loss.
 
         Args:
-            velocity_field: The velocity field module (trainable).
-            batch: Base distribution samples with shape `(batch_size, *event_shape)`.
-            key: Optional PRNG key for Hutchinson estimator.
+            model: The trainable model.
+            batch: Base distribution samples.
+            key: Optional PRNG key.
 
         Returns:
-            Scalar loss value.
+            Tuple ``(loss, aux)``.
         """
-        flow = Flow(
-            velocity_field=velocity_field,
-            base_distribution=self.base_distribution,
-            **self.flow_kwargs,
-        )
+        bijector = self.make_bijector(model)
+        flow = Flow(bijector, self.base_distribution)
 
         x0 = batch
-
-        if key is not None:
-            batch_size = jax.tree.leaves(batch)[0].shape[0]
-            keys = jax.random.split(key, batch_size)
-            x1, logq = jax.vmap(lambda x, k: flow.apply_map_and_log_prob(x, key=k))(x0, keys)
-        else:
-            x1, logq = jax.vmap(flow.apply_map_and_log_prob)(x0)
-
+        x1, logq = _vmap_push_forward_and_log_prob(flow, x0, key=key)
         logp = jax.vmap(self.target_distribution.log_prob)(x1)
         return jnp.mean(logq - logp), {}
 
 
 class KullbackLeiblerLoss(eqx.Module):
-    """Hybrid forward/reverse KL loss for flow training.
+    """Hybrid forward/reverse KL loss for any normalising flow.
 
     Combines maximum likelihood (forward KL) and energy-based (reverse KL)
-    losses with a blending coefficient alpha:
+    losses with a blending coefficient ``alpha``:
 
-        loss = alpha * NLL + (1 - alpha) * EnergyLoss
+        ``loss = alpha * NLL + (1 − alpha) * EnergyLoss``
 
-    - alpha=1.0: Pure maximum likelihood (forward KL).
-    - alpha=0.0: Pure energy-based (reverse KL).
+    - ``alpha=1.0``: Pure maximum likelihood (forward KL).
+    - ``alpha=0.0``: Pure energy-based (reverse KL).
 
     **Note**: The batch should contain samples from the TARGET distribution.
     Base samples for the energy term are generated internally.
@@ -149,49 +133,46 @@ class KullbackLeiblerLoss(eqx.Module):
         energy_loss: The EnergyBasedLoss component.
         base_distribution: The base distribution (for internal sampling).
         alpha: Blending coefficient in [0, 1].
-
-    Example:
-        >>> loss_fn = KullbackLeiblerLoss(base_dist, target_dist, alpha=0.5)
-        >>> loss = loss_fn(velocity_field, target_samples, key=jax.random.key(0))
     """
 
     mle_loss: MaximumLikelihoodLoss
     energy_loss: EnergyBasedLoss
-    base_distribution: dsx.Distribution
+    base_distribution: eqx.Module
     alpha: float
 
-    def __init__(self, base_distribution, target_distribution, alpha=0.5, **flow_kwargs):
-        """Initialize the hybrid loss.
+    def __init__(self, base_distribution, target_distribution, make_bijector, alpha=0.5):
+        """Initialise the hybrid loss.
 
         Args:
-            base_distribution: A distrax Distribution for the flow base.
-            target_distribution: A distrax Distribution for the target.
+            base_distribution: The base distribution.
+            target_distribution: The target distribution.
+            make_bijector: Callable ``model → AbstractBijector``.
             alpha: Blending coefficient. 1.0 = pure MLE, 0.0 = pure energy-based.
-            **flow_kwargs: Passed to both component losses.
         """
-        self.mle_loss = MaximumLikelihoodLoss(base_distribution, **flow_kwargs)
-        self.energy_loss = EnergyBasedLoss(base_distribution, target_distribution, **flow_kwargs)
+        self.mle_loss = MaximumLikelihoodLoss(base_distribution, make_bijector)
+        self.energy_loss = EnergyBasedLoss(base_distribution, target_distribution, make_bijector)
         self.base_distribution = base_distribution
         self.alpha = alpha
 
     @eqx.filter_jit
-    def __call__(self, velocity_field, batch, key):
+    def __call__(self, model, batch, key):
         """Compute the hybrid KL loss.
 
         Args:
-            velocity_field: The velocity field module (trainable).
+            model: The trainable model.
             batch: Target distribution samples.
-            key: PRNG key (required for internal sampling and Hutchinson).
+            key: PRNG key (required for internal sampling).
 
         Returns:
-            Scalar loss value.
+            Tuple ``(loss, aux)``.
         """
         x1 = batch
         batch_size = jax.tree.leaves(batch)[0].shape[0]
         key1, key2, key3 = jax.random.split(key, 3)
-        x0 = self.base_distribution.sample(seed=key1, sample_shape=(batch_size,))
-        mle_term, _ = self.mle_loss(velocity_field, x1, key=key2)
-        energy_term, _ = self.energy_loss(velocity_field, x0, key=key3)
+        keys = jax.random.split(key1, batch_size)
+        x0 = jax.vmap(self.base_distribution.sample)(keys)
+        mle_term, _ = self.mle_loss(model, x1, key=key2)
+        energy_term, _ = self.energy_loss(model, x0, key=key3)
         return self.alpha * mle_term + (1 - self.alpha) * energy_term, {}
 
 
@@ -268,16 +249,16 @@ class StochasticInterpolantLoss(eqx.Module):
 
     interpolant: Callable = eqx.field(static=True)
     gamma: Optional[Callable] = eqx.field(static=True)
-    dynamic_mask: Callable = eqx.field(
-        default=lambda x: jax.tree.map(eqx.is_inexact_array, x),
-        static=True,
-    )
     velocity_kwargs: dict = eqx.field(static=True)
     dt_interpolant: Callable = eqx.field(static=True)
     dt_gamma: Optional[Callable] = eqx.field(static=True)
     denoiser_weight: float = eqx.field(static=True)
     _get_velocity: Callable = eqx.field(static=True)
     _get_denoiser: Optional[Callable] = eqx.field(static=True)
+    dynamic_mask: Callable = eqx.field(
+        default=lambda x: jax.tree.map(eqx.is_inexact_array, x),
+        static=True,
+    )
 
     def __init__(
         self,
@@ -348,7 +329,7 @@ class StochasticInterpolantLoss(eqx.Module):
     def __check_init__(self):
         if self._get_denoiser is not None and self.gamma is None:
             raise ValueError(
-                "Denoiser learning requires a noise schedule gamma(t). " "Pass gamma= to StochasticInterpolantLoss."
+                "Denoiser learning requires a noise schedule gamma(t). Pass gamma= to StochasticInterpolantLoss."
             )
 
     @eqx.filter_jit

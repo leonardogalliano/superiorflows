@@ -2,14 +2,16 @@ import time
 from pathlib import Path
 
 import diffrax as dfx
-import distrax as dsx
+import distreqx.distributions as dsx
 import equinox as eqx
 import grain
 import jax
 import jax.numpy as jnp
 import optax
 import typer
-from superiorflows import CoupledDataSource, DistributionDataSource
+from typing_extensions import Annotated
+
+from superiorflows import CoupledDataSource, DistributionDataSource, ODEBijector
 from superiorflows.train import (
     CheckpointCallback,
     EnergyBasedLoss,
@@ -24,7 +26,6 @@ from superiorflows.train import (
     Trainer,
     ValidationCallback,
 )
-from typing_extensions import Annotated
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
 
@@ -91,7 +92,7 @@ def train_single_model(
     locs = 10.0 * jnp.stack([jnp.sin(angles), jnp.cos(angles)], axis=1)
     target_dist = dsx.MixtureSameFamily(
         mixture_distribution=dsx.Categorical(probs=jnp.ones(8) / 8),
-        components_distribution=dsx.MultivariateNormalDiag(loc=locs, scale_diag=jnp.full((8, 2), 0.7)),
+        components_distribution=eqx.filter_vmap(dsx.MultivariateNormalDiag)(locs, jnp.full((8, 2), 0.7)),
     )
     # Base: Standard Gaussian
     base_dist = dsx.MultivariateNormalDiag(jnp.zeros(d), jnp.ones(d))
@@ -99,18 +100,23 @@ def train_single_model(
     # Loss Setup
     flow_kwargs = dict(stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5))
 
+    def make_bijector(vf):
+        return ODEBijector(vf, **flow_kwargs)
+
     if loss_type == "maximum_likelihood":
-        loss_fn = MaximumLikelihoodLoss(base_distribution=base_dist, **flow_kwargs)
+        loss_fn = MaximumLikelihoodLoss(base_distribution=base_dist, make_bijector=make_bijector)
         dataset = grain.MapDataset.source(DistributionDataSource(target_dist, batch_size, seed=seed)).repeat()
     elif loss_type == "energy_based":
-        loss_fn = EnergyBasedLoss(base_distribution=base_dist, target_distribution=target_dist, **flow_kwargs)
+        loss_fn = EnergyBasedLoss(
+            base_distribution=base_dist, target_distribution=target_dist, make_bijector=make_bijector
+        )
         dataset = grain.MapDataset.source(DistributionDataSource(base_dist, batch_size, seed=seed)).repeat()
     elif loss_type == "hybrid":
         loss_fn = KullbackLeiblerLoss(
             base_distribution=base_dist,
             target_distribution=target_dist,
+            make_bijector=make_bijector,
             alpha=0.5,
-            **flow_kwargs,
         )
         dataset = grain.MapDataset.source(DistributionDataSource(target_dist, batch_size, seed=seed)).repeat()
     elif loss_type == "stochastic_interpolant":
@@ -161,19 +167,19 @@ def train_single_model(
         val_key1, val_key2 = jax.random.split(val_key)
         val_data = [
             (
-                base_dist.sample(seed=val_key1, sample_shape=(1000,)),
-                target_dist.sample(seed=val_key2, sample_shape=(1000,)),
+                jax.vmap(base_dist.sample)(jax.random.split(val_key1, 1000)),
+                jax.vmap(target_dist.sample)(jax.random.split(val_key2, 1000)),
             )
         ]
     else:
-        val_data = [target_dist.sample(seed=val_key, sample_shape=(1000,))]
+        val_data = [jax.vmap(target_dist.sample)(jax.random.split(val_key, 1000))]
 
     # Construct unique run name for TensorBoard
     # Convention: {loss_type}_w{width}d{depth}_lr{lr}_s{seed}_{timestamp}
     import datetime
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{loss_type}_" f"w{width}d{depth}_" f"lr{lr}_" f"b{batch_size}_" f"s{seed}_"
+    run_name = f"{loss_type}_w{width}d{depth}_lr{lr}_b{batch_size}_s{seed}_"
     if denoiser and loss_type == "stochastic_interpolant":
         run_name += "denoiser_"
     run_name += f"{timestamp}"
@@ -199,7 +205,7 @@ def train_single_model(
             ESSCallback(
                 target_log_prob=target_dist.log_prob,
                 base_distribution=base_dist,
-                flow_kwargs=flow_kwargs,
+                make_bijector=make_bijector,
                 n_samples=ess_samples,
                 eval_freq=ess_freq,
             )
@@ -232,20 +238,20 @@ def train_single_model(
         callbacks=callbacks,
     )
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Training 8 Gaussians")
     print(f"Run Name: {run_name}")
     print(f"Loss: {loss_type}")
     print(f"Checkpoints: {chkpt_run_path}")
     print(f"TensorBoard: {tb_run_dir}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     t_start = time.time()
     read_options = grain.ReadOptions(num_threads=num_workers, prefetch_buffer_size=prefetch_buffer_size)
     trainer.train(dataset=dataset, max_steps=nsteps, read_options=read_options)
     t_elapsed = time.time() - t_start
 
-    print(f"Done in {t_elapsed:.1f}s ({1000*t_elapsed/nsteps:.0f}ms/step)")
+    print(f"Done in {t_elapsed:.1f}s ({1000 * t_elapsed / nsteps:.0f}ms/step)")
     return trainer
 
 

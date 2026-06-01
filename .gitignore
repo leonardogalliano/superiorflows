@@ -34,3 +34,5 @@ log_output/
 
 # Other files
 .DS_Store
+.coverage
+coverage.xml

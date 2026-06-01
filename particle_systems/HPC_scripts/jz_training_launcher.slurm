@@ -40,7 +40,7 @@ echo "Training started at: $(date)"
 echo "================================================="
 
 # Dispatch the job via the CLI entry point defined in pyproject.toml
-/usr/bin/time -v srun uv run /lustre/fswork/projects/rech/czd/ulu16wv/superiorflows/particle_systems/training_particles.py "$@"
+/usr/bin/time -v srun uv run particle_systems/training_particles.py "$@"
 
 echo "================================================="
 echo "Training finished at: $(date)"

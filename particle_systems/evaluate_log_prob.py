@@ -61,7 +61,7 @@ def main(
     if device is not None:
         jax.config.update("jax_platform_name", device)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Evaluating log-probabilities of pre-generated samples")
     print(f"  Checkpoint      : {ckpt_path}")
     print(f"  Samples path    : {samples_path}")
@@ -83,7 +83,7 @@ def main(
         print(f"  Forward ODE     : {forward_ode}")
     print(f"  JAX process     : {jax.process_index()}/{jax.process_count()}")
     print(f"  JAX devices     : {jax.devices()}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     # ── Load trained flow ─────────────────────────────────────────────
     print("Loading trained model...")
@@ -211,7 +211,7 @@ def main(
         ]
 
     # ── JIT-compile log_prob ──────────────────────────────────────────
-    key = jax.random.PRNGKey(seed)
+    key = jax.random.key(seed)
 
     print("Precompiling JAX graph...")
     t_comp = time.time()
@@ -221,23 +221,26 @@ def main(
         if forward_ode:
             if hutchinson_samples is not None:
                 keys = jax.random.split(rng, batch_size)
-                return jax.vmap(lambda x, k: flow.apply_map_and_log_prob(x, key=k))(batch, keys)
-            return jax.vmap(flow.apply_map_and_log_prob)(batch)
+                return jax.vmap(lambda x, k: flow.push_forward_and_log_prob(x, key=k))(batch, keys)
+            return jax.vmap(flow.push_forward_and_log_prob)(batch)
         else:
             if hutchinson_samples is not None:
-                return batch, flow.log_prob(batch, key=rng)
-            return batch, flow.log_prob(batch)
+                keys = jax.random.split(rng, batch_size)
+                lp = jax.vmap(lambda x, k: flow.log_prob(x, key=k))(batch, keys)
+            else:
+                lp = jax.vmap(flow.log_prob)(batch)
+            return batch, lp
 
     comp_sys = systems_base[0] if forward_ode else systems[0]
     compiled_eval = eval_log_prob.lower(comp_sys, key).compile()
     print(f"Compiled in {time.time() - t_comp:.1f}s")
 
     # ── Build output directory ────────────────────────────────────────
-    s_name = type(flow.solver).__name__.lower()
-    if isinstance(flow.stepsize_controller, dfx.PIDController):
-        suffix = f"tol{flow.stepsize_controller.atol}"
-    elif isinstance(flow.stepsize_controller, dfx.ConstantStepSize):
-        dt0_val = getattr(flow, "dt0", None)
+    s_name = type(flow.bijector.solver).__name__.lower()
+    if isinstance(flow.bijector.stepsize_controller, dfx.PIDController):
+        suffix = f"tol{flow.bijector.stepsize_controller.atol}"
+    elif isinstance(flow.bijector.stepsize_controller, dfx.ConstantStepSize):
+        dt0_val = flow.bijector.dt0
         if dt0_val is not None and dt0_val > 0:
             steps = int(round(1.0 / dt0_val))
             suffix = f"steps{steps}"

@@ -18,7 +18,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from superiorflows import Flow
 
 from particle_systems.particle_system import (
     ParticleSystem,
@@ -26,6 +25,7 @@ from particle_systems.particle_system import (
     UniformParticles,
 )
 from particle_systems.velocities import ParticlesEGNNVelocity
+from superiorflows import Flow, ODEBijector
 
 logging.getLogger("particle_systems.particle_system").setLevel(logging.WARNING)
 
@@ -85,13 +85,15 @@ def single_frame():
 @pytest.fixture(scope="module")
 def flow(egnn_velocity, base_dist):
     return Flow(
-        velocity_field=egnn_velocity,
-        base_distribution=base_dist,
-        dynamic_mask=ParticleSystem.get_dynamic_mask(),
-        solver=dfx.Tsit5(),
-        augmented_solver=dfx.Tsit5(),
-        stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
-        augmented_stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
+        ODEBijector(
+            egnn_velocity,
+            dynamic_mask=ParticleSystem.get_dynamic_mask(),
+            solver=dfx.Tsit5(),
+            augmented_solver=dfx.Tsit5(),
+            stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
+            augmented_stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
+        ),
+        base_dist,
     )
 
 
@@ -128,7 +130,8 @@ def test_egnn_velocity_t0_t1(egnn_velocity, single_frame):
 def test_flow_sample(flow, base_dist):
     """Flow.sample should return a ParticleSystem with the right shape and finite values."""
     key = jax.random.key(42)
-    samples = flow.sample(seed=key, sample_shape=(4,))
+    keys = jax.random.split(key, 4)
+    samples = jax.vmap(flow.sample)(keys)
     assert samples.positions.shape == (4, N, d)
     assert jnp.all(jnp.isfinite(samples.positions))
 
@@ -136,11 +139,12 @@ def test_flow_sample(flow, base_dist):
 def test_flow_sample_and_log_prob(flow, base_dist):
     """Flow.sample_and_log_prob should return finite samples and finite log-probs."""
     key = jax.random.key(7)
-    samples, lps = flow.sample_and_log_prob(seed=key, sample_shape=(4,))
+    keys = jax.random.split(key, 4)
+    samples, lps = jax.vmap(flow.sample_and_log_prob)(keys)
     assert samples.positions.shape == (4, N, d)
     assert lps.shape == (4,)
-    assert jnp.all(jnp.isfinite(samples.positions)), "Non-finite sample positions"
-    assert jnp.all(jnp.isfinite(lps)), "Non-finite log-probs"
+    assert jnp.all(jnp.isfinite(samples.positions))
+    assert jnp.all(jnp.isfinite(lps))
 
 
 def test_flow_log_prob_single(flow, single_frame):
@@ -158,9 +162,9 @@ def test_flow_log_prob_batched(flow):
         species=jnp.stack([jnp.array(f.species) for f in frames]),
         box=jnp.stack([jnp.array(f.box) for f in frames]),
     )
-    lps = flow.log_prob(batch)
+    lps = jax.vmap(flow.log_prob)(batch)
     assert lps.shape == (4,)
-    assert jnp.all(jnp.isfinite(lps)), f"Non-finite log-probs: {lps}"
+    assert jnp.all(jnp.isfinite(lps))
 
 
 # ── Parameter count ───────────────────────────────────────────────────────────

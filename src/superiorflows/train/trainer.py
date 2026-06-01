@@ -3,6 +3,7 @@
 This module provides a `Trainer` class that wraps the standard training loop,
 handling optimizer state, PRNG key management, and callback dispatch.
 """
+
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -93,7 +94,7 @@ class Trainer:
             model: The Equinox model to train.
             optimizer: An Optax optimizer (e.g., `optax.adam(1e-3)`).
             loss_module: Loss callable with signature `(model, batch, key) -> loss`.
-            seed: Integer seed or `jax.random.PRNGKey` for initialization.
+            seed: Integer seed or ``jax.random.key`` for initialization.
             callbacks: Optional list of `Callback` instances.
         """
         self.model = model
@@ -198,12 +199,12 @@ class Trainer:
         Returns:
             True if restoration succeeded, False otherwise.
         """
-        ckpt_path = Path(ckpt_path).resolve()
-        checkpointer = ocp.CheckpointManager(ckpt_path, item_names=("model", "optimizer", "metadata"))
+        path = Path(ckpt_path).resolve()
+        checkpointer = ocp.CheckpointManager(path, item_names=("model", "optimizer", "metadata"))
 
         available_steps = checkpointer.all_steps()
         if not available_steps:
-            print(f"No checkpoint found at {ckpt_path}")
+            print(f"No checkpoint found at {path}")
             return False
 
         print(f"Found checkpoints for steps: {available_steps}")

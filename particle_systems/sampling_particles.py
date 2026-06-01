@@ -11,7 +11,6 @@ import jax
 import numpy as np
 import orbax.checkpoint as ocp
 import typer
-from superiorflows import Flow
 
 from particle_systems.particle_system import (
     TrajectoryDataSource,
@@ -19,6 +18,7 @@ from particle_systems.particle_system import (
     batch_to_trajectory,
 )
 from particle_systems.training_particles import build_solver, build_velocity
+from superiorflows import Flow, ODEBijector
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
 
@@ -51,7 +51,7 @@ def load_trained_flow(
     base_dist = UniformParticles(N=N, d=d, L=L, composition=composition)
 
     # Model structure and Restore weights
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     velocity_field = build_velocity(config, N, d, n_species, key=key)
 
     model_params = eqx.filter(velocity_field, eqx.is_array)
@@ -69,7 +69,8 @@ def load_trained_flow(
     # Bind into Flow
     base_flow_kwargs = build_solver(config)
     base_flow_kwargs.update(flow_kwargs)
-    flow = Flow(velocity_field=trained_velocity_field, base_distribution=base_dist, **base_flow_kwargs)
+    bijector = ODEBijector(trained_velocity_field, **base_flow_kwargs)
+    flow = Flow(bijector, base_dist)
 
     return flow, N, d, L, composition
 
@@ -99,7 +100,7 @@ def main(
     if device is not None:
         jax.config.update("jax_platform_name", device)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Sampling from CNF particle model")
     print(f"  Checkpoint     : {ckpt_path}")
     print(f"  Batch size     : {batch_size}")
@@ -117,7 +118,7 @@ def main(
     print(f"  Ignore density : {ignore_density}")
     print(f"  JAX process    : {jax.process_index()}/{jax.process_count()}")
     print(f"  JAX devices    : {jax.devices()}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     print("Loading trained model...")
     t0 = time.time()
@@ -145,11 +146,11 @@ def main(
     print(f"Loaded successfully in {t1 - t0:.1f}s. Model handles N={N}, d={d}, L={L:.4f}")
 
     # Extract solver info from Flow for naming
-    s_name = type(flow.solver).__name__.lower()
-    if isinstance(flow.stepsize_controller, dfx.PIDController):
-        suffix = f"tol{flow.stepsize_controller.atol}"
-    elif isinstance(flow.stepsize_controller, dfx.ConstantStepSize):
-        dt0 = getattr(flow, "dt0", None)
+    s_name = type(flow.bijector.solver).__name__.lower()
+    if isinstance(flow.bijector.stepsize_controller, dfx.PIDController):
+        suffix = f"tol{flow.bijector.stepsize_controller.atol}"
+    elif isinstance(flow.bijector.stepsize_controller, dfx.ConstantStepSize):
+        dt0 = getattr(flow.bijector, "dt0", None)
         if dt0 is not None and dt0 > 0:
             steps = int(round(1.0 / dt0))
             suffix = f"steps{steps}"
@@ -171,7 +172,7 @@ def main(
     )
     run_output_dir.mkdir(parents=True, exist_ok=True)
 
-    key = jax.random.PRNGKey(seed)
+    key = jax.random.key(seed)
 
     print("Precompiling JAX graph...")
     t_comp = time.time()
@@ -179,18 +180,21 @@ def main(
     @jax.jit
     def sample_batch(rng):
         if ignore_density:
-            x0 = flow.base_distribution.sample(seed=rng, sample_shape=(batch_size,))
-            x1 = jax.vmap(flow.apply_map)(x0)
+            sample_keys = jax.random.split(rng, batch_size)
+            x0 = jax.vmap(flow.base_distribution.sample)(sample_keys)
+            x1 = jax.vmap(flow.bijector.forward)(x0)
             return x0, x1
 
-        if flow.hutchinson_samples is not None:
+        if flow.bijector.hutchinson_samples is not None:
             key1, key2 = jax.random.split(rng)
-            x0 = flow.base_distribution.sample(seed=key1, sample_shape=(batch_size,))
+            sample_keys = jax.random.split(key1, batch_size)
+            x0 = jax.vmap(flow.base_distribution.sample)(sample_keys)
             keys = jax.random.split(key2, batch_size)
-            x1, log_probs = jax.vmap(lambda x, k: flow.apply_map_and_log_prob(x, key=k))(x0, keys)
+            x1, log_probs = jax.vmap(lambda x, k: flow.push_forward_and_log_prob(x, key=k))(x0, keys)
         else:
-            x0 = flow.base_distribution.sample(seed=rng, sample_shape=(batch_size,))
-            x1, log_probs = jax.vmap(flow.apply_map_and_log_prob)(x0)
+            sample_keys = jax.random.split(rng, batch_size)
+            x0 = jax.vmap(flow.base_distribution.sample)(sample_keys)
+            x1, log_probs = jax.vmap(flow.push_forward_and_log_prob)(x0)
         return x0, x1, log_probs
 
     compiled_sample = sample_batch.lower(key).compile()

@@ -4,10 +4,10 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
-from superiorflows import Flow
 
 from particle_systems.particle_system import ParticleSystem, TrajectoryDataSource, UniformParticles
 from particle_systems.velocities import ParticlesMLPVelocity
+from superiorflows import Flow, ODEBijector
 
 DATA_PATH = "particle_systems/data/ss14_T0.1.xyz"
 
@@ -75,11 +75,13 @@ def flow(velocity_field, base_distribution):
     import diffrax as dfx
 
     return Flow(
-        velocity_field=velocity_field,
-        base_distribution=base_distribution,
-        dynamic_mask=ParticleSystem.get_dynamic_mask(),
-        stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
-        augmented_stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
+        ODEBijector(
+            velocity_field,
+            dynamic_mask=ParticleSystem.get_dynamic_mask(),
+            stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
+            augmented_stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-3),
+        ),
+        base_distribution,
     )
 
 
@@ -97,6 +99,6 @@ def test_flow_log_prob_single(flow, trajectory_batch):
 
 def test_flow_log_prob_batched(flow, trajectory_batch):
     """log_prob on a batch of frames should return finite values for each."""
-    lp = flow.log_prob(trajectory_batch)
+    lp = jax.vmap(flow.log_prob)(trajectory_batch)
     assert lp.shape == (8,)
     assert jnp.all(jnp.isfinite(lp))

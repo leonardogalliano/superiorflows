@@ -4,6 +4,7 @@ Callbacks hook into the training loop at key points, enabling logging,
 progress tracking, checkpointing, and custom behaviors without modifying
 the core `Trainer` logic.
 """
+
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -235,7 +236,7 @@ class CheckpointCallback(Callback):
         step = getattr(trainer, "step", 0)
         if step > 0 and step != self.last_saved_step:
             if step in self.checkpointer.all_steps() and not self.overwrite:
-                tqdm.write(f"Checkpoint for step {step} already exists. " "Skipping save on exit (overwrite=False).")
+                tqdm.write(f"Checkpoint for step {step} already exists. Skipping save on exit (overwrite=False).")
                 return
             self._save(trainer, step, force=True)
 
@@ -318,7 +319,7 @@ class ProfilingCallback(Callback):
         elif self.profile_steps is not None and step == self.warmup_steps + self.profile_steps and self._is_profiling:
             jax.profiler.stop_trace()
             self._is_profiling = False
-            tqdm.write(f"[Profiling] Stopped trace at step {step}. " f"Trace saved to {self.log_dir}")
+            tqdm.write(f"[Profiling] Stopped trace at step {step}. Trace saved to {self.log_dir}")
 
     def on_train_end(self, trainer, **kwargs):
         import jax.profiler
@@ -326,7 +327,7 @@ class ProfilingCallback(Callback):
         if self._is_profiling:
             jax.profiler.stop_trace()
             self._is_profiling = False
-            tqdm.write(f"[Profiling] Stopped trace at training end. " f"Trace saved to {self.log_dir}")
+            tqdm.write(f"[Profiling] Stopped trace at training end. Trace saved to {self.log_dir}")
 
 
 class TensorBoardLogger(Callback):
@@ -438,11 +439,9 @@ class ESSCallback(Callback):
     (``LoggerCallback``, ``TensorBoardLogger``) automatically pick it up.
 
     Args:
-        target_log_prob: Callable ``(x) -> log_prob``. Can be a distrax
-            distribution's ``.log_prob`` method, an unnormalised energy
-            function, or any ``(batch,) -> (batch,)`` callable.
+        target_log_prob: Callable ``(x) -> log_prob``.
         base_distribution: The base/prior distribution for the flow.
-        flow_kwargs: Extra kwargs passed to ``Flow(...)`` (e.g., ``dt0``).
+        make_bijector: Callable ``model -> AbstractBijector``.
         n_samples: Number of samples for ESS estimation.
         eval_freq: Compute ESS every N steps.
     """
@@ -451,13 +450,13 @@ class ESSCallback(Callback):
         self,
         target_log_prob: Callable,
         base_distribution,
-        flow_kwargs: dict | None = None,
+        make_bijector: Callable,
         n_samples: int = 1000,
         eval_freq: int = 250,
     ):
         self.target_log_prob = target_log_prob
         self.base_distribution = base_distribution
-        self.flow_kwargs = flow_kwargs or {}
+        self.make_bijector = make_bijector
         self.n_samples = n_samples
         self.eval_freq = eval_freq
 
@@ -472,18 +471,16 @@ class ESSCallback(Callback):
         import jax
         import jax.numpy as jnp
 
-        from superiorflows import Flow
+        from superiorflows.flow import Flow
 
-        flow = Flow(
-            velocity_field=trainer.model,
-            base_distribution=self.base_distribution,
-            **self.flow_kwargs,
-        )
+        bijector = self.make_bijector(trainer.model)
+        flow = Flow(bijector, self.base_distribution)
 
         key, subkey = jax.random.split(trainer.key)
-        X, log_q = flow.sample_and_log_prob(seed=subkey, sample_shape=(self.n_samples,))
+        keys = jax.random.split(subkey, self.n_samples)
+        X, log_q = jax.vmap(flow.sample_and_log_prob)(keys)
 
-        log_p = self.target_log_prob(X)
+        log_p = jax.vmap(self.target_log_prob)(X)
         log_weights = log_p - log_q
         weights = jax.nn.softmax(log_weights)
 

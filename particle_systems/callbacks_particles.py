@@ -10,13 +10,13 @@ from typing import Any, Dict
 import jax
 import jax.numpy as jnp
 import numpy as np
-from superiorflows import Flow
-from superiorflows.train import Callback
 
 from particle_systems.particle_system import (
     ParticleSystem,
     batch_to_trajectory,
 )
+from superiorflows import Flow, ODEBijector
+from superiorflows.train import Callback
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -125,6 +125,7 @@ class BoltzmannCallback(Callback):
         ref_species,
         target_source,
         flow_kwargs: dict | None = None,
+        make_bijector=None,
         n_samples: int = 20,
         n_target_samples: int = 256,
         eval_freq: int = 250,
@@ -132,12 +133,19 @@ class BoltzmannCallback(Callback):
         energy_filter_sigma: float = 10.0,
         species_radii: np.ndarray | None = None,
         n_show: int = 10,
+        seed: int = 0,
     ):
         self.energy_fn = energy_fn
         self.base_distribution = base_distribution
         self.ref_species = ref_species
         self.target_source = target_source
-        self.flow_kwargs = flow_kwargs or {}
+        if make_bijector is not None:
+            self.make_bijector = make_bijector
+        elif flow_kwargs is not None:
+            fk = dict(flow_kwargs)
+            self.make_bijector = lambda model: ODEBijector(model, **fk)
+        else:
+            self.make_bijector = lambda model: ODEBijector(model)
         self.n_samples = n_samples
         self.n_target_samples = n_target_samples
         self.eval_freq = eval_freq
@@ -145,6 +153,7 @@ class BoltzmannCallback(Callback):
         self.energy_filter_sigma = energy_filter_sigma
         self.species_radii = species_radii
         self.n_show = n_show
+        self.seed = seed
 
         # Pre-computed target observables
         self._target_energies = None
@@ -166,7 +175,8 @@ class BoltzmannCallback(Callback):
         from atooms.trajectory.decorators import fold
 
         n = min(self.n_target_samples, len(self.target_source))
-        indices = np.random.choice(len(self.target_source), size=n, replace=False)
+        rng = np.random.default_rng(self.seed)
+        indices = rng.choice(len(self.target_source), size=n, replace=False)
 
         # Target energies (batched for speed)
         target_samples = [self.target_source[int(i)] for i in indices]
@@ -220,15 +230,13 @@ class BoltzmannCallback(Callback):
         if step % self.eval_freq != 0 and step != 1 and not is_last:
             return
 
-        flow = Flow(
-            velocity_field=trainer.model,
-            base_distribution=self.base_distribution,
-            **self.flow_kwargs,
-        )
+        bijector = self.make_bijector(trainer.model)
+        flow = Flow(bijector, self.base_distribution)
 
         try:
             key, subkey = jax.random.split(trainer.key)
-            samples = flow.sample(seed=subkey, sample_shape=(self.n_samples,))
+            keys = jax.random.split(subkey, self.n_samples)
+            samples = jax.vmap(flow.sample)(keys)
 
             def single_energy(sample: ParticleSystem):
                 return self.energy_fn(sample.positions, sample.species)
