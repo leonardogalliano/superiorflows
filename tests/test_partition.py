@@ -1,8 +1,9 @@
-"""Tests for the state_context_partition mechanism.
+"""Tests for the state_context_partition mechanism and bijector integration.
 
 Validates that the extended partition supports scalar-bool masks
 (backwards compatibility with eqx.partition), integer index-array masks
-(element-level selection), and their integration with the ODEBijector.
+(element-level selection), and their integration with the AbstractBijector
+partition/merge layer and the ODEBijector backend.
 """
 
 import diffrax as dfx
@@ -12,10 +13,10 @@ import jax.numpy as jnp
 import pytest
 
 from superiorflows import Flow, ODEBijector
+from superiorflows.bijector import AbstractBijector
 from superiorflows.partition import (
     _compute_complement,
     merge_state,
-    merge_trajectory,
     state_context_partition,
 )
 
@@ -256,58 +257,85 @@ class TestMergeState:
 
 
 # ======================================================================
-# merge_trajectory
+# AbstractBijector — partition/merge at the bijector level
 # ======================================================================
 
 
-class TestMergeTrajectory:
-    def test_scalar_bool_trajectory(self, particle_state):
-        mask = MockParticleSystem(positions=True, species=False, box=False)
-        dyn, ctx, spec = state_context_partition(particle_state, mask)
+class ScaleBijector(AbstractBijector):
+    """Trivial bijector for testing: y = scale * x, log|det| = d * log|scale|."""
 
-        T = 3
-        traj_dyn = MockParticleSystem(
-            positions=jnp.stack([dyn.positions, dyn.positions + 1, dyn.positions + 2]),
-            species=None,
-            box=None,
-        )
-        merged = merge_trajectory(traj_dyn, ctx, spec)
-        assert merged.positions.shape == (T, 8, 2)
-        assert merged.species.shape == (T, 8)
-        assert merged.box.shape == (T, 2)
-        assert jnp.array_equal(merged.positions[0], particle_state.positions)
+    scale: float
 
-    def test_index_mask_trajectory(self, particle_state):
-        patch_indices = jnp.array([1, 3, 5, 7])
-        complement = jnp.array([0, 2, 4, 6])
-        mask = MockParticleSystem(positions=patch_indices, species=False, box=False)
-        dyn, ctx, spec = state_context_partition(particle_state, mask)
+    def _forward_and_log_det(self, x, *, args=None, **kwargs):
+        y = jax.tree.map(lambda leaf: self.scale * leaf, x)
+        d = sum(leaf.size for leaf in jax.tree.leaves(x))
+        return y, d * jnp.log(jnp.abs(self.scale))
 
-        T = 2
-        traj_dyn = MockParticleSystem(
-            positions=jnp.stack([dyn.positions, dyn.positions + 100.0]),
-            species=None,
-            box=None,
-        )
-        merged = merge_trajectory(traj_dyn, ctx, spec)
-        assert merged.positions.shape == (T, 8, 2)
+    def _inverse_and_log_det(self, y, *, args=None, **kwargs):
+        x = jax.tree.map(lambda leaf: leaf / self.scale, y)
+        d = sum(leaf.size for leaf in jax.tree.leaves(y))
+        return x, -d * jnp.log(jnp.abs(self.scale))
 
-        # Time step 0: patch positions unchanged
-        assert jnp.array_equal(
-            merged.positions[0, patch_indices],
-            particle_state.positions[patch_indices],
+
+class TestAbstractBijectorPartition:
+    """Test that partition/merge works at the AbstractBijector level,
+    independently of any ODE mechanism."""
+
+    def test_plain_array_forward_inverse(self):
+        """Plain array, default mask: everything is dynamic."""
+        b = ScaleBijector(scale=2.0)
+        x = jnp.array([1.0, 2.0, 3.0])
+        y = b.forward(x)
+        assert jnp.allclose(y, 2.0 * x)
+        x_recovered = b.inverse(y)
+        assert jnp.allclose(x_recovered, x, atol=1e-6)
+
+    def test_plain_array_log_det(self):
+        b = ScaleBijector(scale=3.0)
+        x = jnp.array([1.0, 2.0, 3.0])
+        y, logdet = b.forward_and_log_det(x)
+        assert jnp.allclose(y, 3.0 * x)
+        assert jnp.allclose(logdet, 3.0 * jnp.log(3.0))
+
+    def test_pytree_with_scalar_bool_mask(self, particle_state):
+        """PyTree state with standard bool mask — positions scaled, rest static."""
+        b = ScaleBijector(
+            scale=2.0,
+            dynamic_mask=MockParticleSystem(positions=True, species=False, box=False),
         )
-        # Time step 1: patch positions shifted by 100
-        assert jnp.allclose(
-            merged.positions[1, patch_indices],
-            particle_state.positions[patch_indices] + 100.0,
+        y = b.forward(particle_state)
+        assert jnp.allclose(y.positions, 2.0 * particle_state.positions)
+        assert jnp.array_equal(y.species, particle_state.species)
+        assert jnp.array_equal(y.box, particle_state.box)
+
+    def test_pytree_with_index_mask(self, particle_state):
+        """Index mask: only selected elements are transformed."""
+        patch_indices = jnp.array([1, 3, 5])
+        complement = jnp.array([0, 2, 4, 6, 7])
+        b = ScaleBijector(
+            scale=2.0,
+            dynamic_mask=MockParticleSystem(positions=patch_indices, species=False, box=False),
         )
-        # Context positions unchanged at both time steps
-        for t in range(T):
-            assert jnp.array_equal(
-                merged.positions[t, complement],
-                particle_state.positions[complement],
-            )
+        y = b.forward(particle_state)
+
+        assert jnp.allclose(y.positions[patch_indices], 2.0 * particle_state.positions[patch_indices])
+        assert jnp.array_equal(y.positions[complement], particle_state.positions[complement])
+        assert jnp.array_equal(y.species, particle_state.species)
+
+    def test_per_call_mask_override(self, particle_state):
+        """dynamic_mask kwarg overrides the default on each call."""
+        b = ScaleBijector(scale=3.0)
+        mask_a = MockParticleSystem(positions=jnp.array([0, 1]), species=False, box=False)
+        mask_b = MockParticleSystem(positions=jnp.array([6, 7]), species=False, box=False)
+
+        y_a = b.forward(particle_state, dynamic_mask=mask_a)
+        y_b = b.forward(particle_state, dynamic_mask=mask_b)
+
+        assert jnp.allclose(y_a.positions[:2], 3.0 * particle_state.positions[:2])
+        assert jnp.array_equal(y_a.positions[2:], particle_state.positions[2:])
+
+        assert jnp.array_equal(y_b.positions[:6], particle_state.positions[:6])
+        assert jnp.allclose(y_b.positions[6:], 3.0 * particle_state.positions[6:])
 
 
 # ======================================================================

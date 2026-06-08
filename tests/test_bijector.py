@@ -14,14 +14,14 @@ class ScaleBijector(AbstractBijector):
 
     scale: float
 
-    def forward_and_log_det(self, x, **kwargs):
+    def _forward_and_log_det(self, x, *, args=None, **kwargs):
         y = self.scale * x
         # log|det J_f(x)| = log|scale| * dimension
         dimension = x.size
         logdet = jnp.sum(jnp.log(jnp.abs(self.scale))) * dimension
         return y, logdet
 
-    def inverse_and_log_det(self, y, **kwargs):
+    def _inverse_and_log_det(self, y, *, args=None, **kwargs):
         x = y / self.scale
         dimension = y.size
         logdet = -jnp.sum(jnp.log(jnp.abs(self.scale))) * dimension

@@ -22,7 +22,7 @@ to ``eqx.partition`` — zero overhead, zero behavioural change.
 import jax
 import jax.numpy as jnp
 
-__all__ = ["state_context_partition", "merge_state", "merge_trajectory"]
+__all__ = ["state_context_partition", "merge_state"]
 
 
 def _compute_complement(indices, total_size):
@@ -70,8 +70,7 @@ def state_context_partition(x, mask):
           mirrors ``eqx.partition``. For index masks, the static leaf
           contains the complement elements ``leaf[complement_indices]``.
         - ``spec``: opaque partition specification used by
-          :func:`merge_state` and :func:`merge_trajectory` to reassemble
-          the full state.
+          :func:`merge_state` to reassemble the full state.
     """
     x_flat, x_treedef = jax.tree.flatten(x)
 
@@ -142,52 +141,3 @@ def merge_state(new_dynamic, original_x, spec):
             merged.append(orig_leaf.at[indices].set(new_leaf))
 
     return treedef.unflatten(merged)
-
-
-def merge_trajectory(ys, static, spec):
-    """Merge an ODE trajectory (with leading time axis) with static context.
-
-    Handles all three partition types:
-
-    - ``full_dynamic``: trajectory leaf is kept as-is.
-    - ``full_static``: static leaf is broadcast to ``(T, ...)`` shape.
-    - ``indexed``: trajectory leaf ``(T, n, ...)`` and static complement
-      ``(N-n, ...)`` are scattered into a full ``(T, N, ...)`` array.
-
-    Args:
-        ys: Trajectory PyTree from ``diffrax.diffeqsolve``.  Each
-            dynamic leaf has shape ``(T, ...)``.  Static leaves are
-            ``None``.
-        static: Static context PyTree from :func:`state_context_partition`.
-        spec: Partition specification.
-
-    Returns:
-        Merged trajectory PyTree with full state at each time step.
-    """
-    _treedef, leaf_info = spec
-
-    ys_flat = jax.tree.flatten(ys, is_leaf=lambda n: n is None)[0]
-    non_none = [leaf for leaf in ys_flat if leaf is not None]
-    if not non_none:
-        return ys
-    T = non_none[0].shape[0]
-
-    ctx_flat = jax.tree.flatten(static, is_leaf=lambda n: n is None)[0]
-
-    merged = []
-    for y_leaf, c_leaf, (kind, data) in zip(ys_flat, ctx_flat, leaf_info):
-        if kind == "full_dynamic":
-            merged.append(y_leaf)
-        elif kind == "full_static":
-            merged.append(jnp.broadcast_to(c_leaf, (T,) + c_leaf.shape))
-        elif kind == "indexed":
-            indices, complement = data
-            total = indices.shape[0] + complement.shape[0]
-            rest_shape = y_leaf.shape[2:]
-            c_broadcast = jnp.broadcast_to(c_leaf, (T,) + c_leaf.shape)
-            full = jnp.zeros((T, total) + rest_shape, dtype=y_leaf.dtype)
-            full = full.at[:, indices].set(y_leaf)
-            full = full.at[:, complement].set(c_broadcast)
-            merged.append(full)
-
-    return _treedef.unflatten(merged)

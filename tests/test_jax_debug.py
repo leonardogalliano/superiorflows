@@ -232,7 +232,7 @@ def test_ode_diagnostics(debug_setup):
     print("\n\n>>> ODE Diagnostics")
 
     # We use SaveAt(steps=True) to save every step taken by the solver
-    sol = flow.bijector.integrate(x0, saveat=dfx.SaveAt(steps=True))
+    sol = flow.bijector._integrate(x0, saveat=dfx.SaveAt(steps=True))
 
     ts = sol.ts  # Times at which steps were taken
     # ys = sol.ys  # State values at those times

@@ -64,7 +64,7 @@ def test_flow_extra_args(uniform_distribution_setup, velocity_field_setup):
     key = jax.random.key(0)
     key, subkey = jax.random.split(key)
     x = uniform_dist.sample(key=subkey)
-    x1 = flow.bijector.integrate(x, dt0=0.01).ys[-1]
+    x1 = flow.bijector._integrate(x, dt0=0.01).ys[-1]
     x2 = flow.bijector.forward(x)
     x3 = flow.bijector.inverse(x2)
     assert jnp.allclose(x1, x2, atol=1e-5, rtol=1e-5)
