@@ -27,6 +27,7 @@ import jax.flatten_util
 import jax.numpy as jnp
 
 from superiorflows.bijector import AbstractBijector
+from superiorflows.partition import merge_trajectory, state_context_partition
 
 __all__ = ["ODEBijector"]
 
@@ -125,14 +126,22 @@ class ODEBijector(AbstractBijector):
     The forward map integrates the ODE ``dx/dt = v(t, x)`` from ``t₀`` to
     ``t₁``; the inverse integrates backward from ``t₁`` to ``t₀``.
 
-    Supports arbitrary pytree states: the ``dynamic_mask`` selects which
-    leaves are integrated (dynamic) vs. passed as context (static) via
-    ``eqx.partition``.
+    Supports arbitrary pytree states via ``state_context_partition``:
+    the ``dynamic_mask`` selects which leaves (or which elements within a
+    leaf) are integrated as dynamic degrees of freedom.  Everything else
+    is passed as static context to the velocity field via ``args``.
+
+    The ``dynamic_mask`` can be **overridden per call** by passing
+    ``dynamic_mask=...`` as a keyword argument to any public method
+    (``forward``, ``inverse``, ``integrate``, etc.).  This enables
+    varying patch selection (e.g. in an MCMC loop) without rebuilding
+    the bijector.
 
     Attributes:
         velocity_field: Callable ``(t, x_dynamic, args) → velocity_pytree``.
-        dynamic_mask: Callable ``x → pytree_of_bools`` selecting dynamic
-            leaves.  Defaults to ``eqx.is_inexact_array``.
+        dynamic_mask: Default mask selecting dynamic leaves.  Can be a
+            callable ``leaf → bool``, or a PyTree of booleans / integer
+            index arrays (see :func:`state_context_partition`).
         divergence_fn: Optional callable
             ``(velocity_field, t, x, args) → (v, div_v)`` providing an
             analytical divergence.  Mutually exclusive with
@@ -282,12 +291,16 @@ class ODEBijector(AbstractBijector):
         Args:
             x0: Initial state pytree.
             **kwargs: Override solver parameters (``t0``, ``t1``, ``dt0``,
-                ``saveat``, ``args``).
+                ``saveat``, ``args``).  Pass ``dynamic_mask=...`` to
+                override the default mask for this call.
 
         Returns:
             Diffrax solution object with ``.ys`` containing the trajectory.
             Static context leaves are broadcast along the time axis.
         """
+        kw = dict(kwargs)
+        mask_override = kw.pop("dynamic_mask", None)
+
         solver_args = dict(
             solver=self.solver,
             t0=self.t0,
@@ -296,11 +309,12 @@ class ODEBijector(AbstractBijector):
             stepsize_controller=self.stepsize_controller,
             **self.extra_args,
         )
-        solver_args.update(kwargs)
+        solver_args.update(kw)
         if solver_args["dt0"] is not None:
             solver_args["dt0"] = jnp.sign(solver_args["t1"] - solver_args["t0"]) * abs(solver_args["dt0"])
 
-        y0, ctx = eqx.partition(x0, self.dynamic_mask)
+        mask = mask_override if mask_override is not None else self.dynamic_mask
+        y0, ctx, spec = state_context_partition(x0, mask)
 
         user_args = solver_args.get("args")
         if user_args is not None:
@@ -310,7 +324,7 @@ class ODEBijector(AbstractBijector):
 
         term = dfx.ODETerm(self.velocity_field)
         sol = dfx.diffeqsolve(term, y0=y0, **solver_args)
-        return eqx.tree_at(lambda s: s.ys, sol, self._merge_solution(sol.ys, ctx))
+        return eqx.tree_at(lambda s: s.ys, sol, merge_trajectory(sol.ys, ctx, spec))
 
     @eqx.filter_jit
     def integrate_augmented_ode(self, x0, logq0, *, key=None, **kwargs):
@@ -323,12 +337,16 @@ class ODEBijector(AbstractBijector):
                 computation (bijector level), pass ``jnp.zeros(())``.
             key: PRNG key for Hutchinson estimator.  Required when
                 ``hutchinson_samples`` is set.
-            **kwargs: Override solver parameters.
+            **kwargs: Override solver parameters.  Pass
+                ``dynamic_mask=...`` to override the default mask.
 
         Returns:
             Diffrax solution with ``.ys`` containing
             ``{"x": trajectory, "logq": accumulated_logdet}``.
         """
+        kw = dict(kwargs)
+        mask_override = kw.pop("dynamic_mask", None)
+
         solver_args = dict(
             solver=self.augmented_solver,
             t0=self.t0,
@@ -337,11 +355,12 @@ class ODEBijector(AbstractBijector):
             stepsize_controller=self.augmented_stepsize_controller,
             **self.augmented_extra_args,
         )
-        solver_args.update(kwargs)
+        solver_args.update(kw)
         if solver_args["dt0"] is not None:
             solver_args["dt0"] = jnp.sign(solver_args["t1"] - solver_args["t0"]) * abs(solver_args["dt0"])
 
-        y0, ctx = eqx.partition(x0, self.dynamic_mask)
+        mask = mask_override if mask_override is not None else self.dynamic_mask
+        y0, ctx, spec = state_context_partition(x0, mask)
         u0 = {"x": y0, "logq": logq0}
 
         random_vectors = None
@@ -363,24 +382,9 @@ class ODEBijector(AbstractBijector):
 
         term = dfx.ODETerm(term_func)
         sol = dfx.diffeqsolve(term, y0=u0, **solver_args)
-        return eqx.tree_at(lambda s: s.ys["x"], sol, self._merge_solution(sol.ys["x"], ctx))
+        return eqx.tree_at(lambda s: s.ys["x"], sol, merge_trajectory(sol.ys["x"], ctx, spec))
 
     # --- Private helpers ---
-
-    def _merge_solution(self, ys, ctx):
-        if ys is None:
-            return None
-        leaves = jax.tree.leaves(ys)
-        if not leaves:
-            return ys
-        T = leaves[0].shape[0]
-
-        return jax.tree.map(
-            lambda y, c: y if y is not None else jnp.broadcast_to(c, (T,) + c.shape),
-            ys,
-            ctx,
-            is_leaf=lambda x: x is None,
-        )
 
     def _make_divergence_fn(self, random_vectors=None):
         """Resolve the divergence strategy into a single callable.

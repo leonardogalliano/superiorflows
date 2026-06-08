@@ -1,0 +1,193 @@
+"""State-context partition for conditional normalising flows.
+
+Generalises equinox's ``eqx.partition`` to support element-level index
+masks, enabling conditional updates on subsets of degrees of freedom
+(patches).
+
+Three mask types at each leaf of the mask PyTree:
+
+- ``True`` (bool scalar): entire leaf is dynamic — identical to
+  ``eqx.partition``.
+- ``False`` (bool scalar): entire leaf is static — identical to
+  ``eqx.partition``.
+- ``jnp.ndarray`` (1-D integer array): element-level selection along the
+  first axis of the corresponding leaf. Dynamic gets ``leaf[indices]``
+  (shape ``(n, ...)``), static gets ``leaf[complement]`` (shape
+  ``(N-n, ...)``).
+
+When all mask leaves are scalar booleans, the output is exactly equivalent
+to ``eqx.partition`` — zero overhead, zero behavioural change.
+"""
+
+import jax
+import jax.numpy as jnp
+
+__all__ = ["state_context_partition", "merge_state", "merge_trajectory"]
+
+
+def _compute_complement(indices, total_size):
+    """Compute the complement of ``indices`` within ``range(total_size)``.
+
+    JIT-compatible: the output shape ``(total_size - len(indices),)`` is
+    static because both ``total_size`` and ``len(indices)`` are known at
+    trace time.
+    """
+    is_selected = jnp.zeros(total_size, dtype=bool).at[indices].set(True)
+    marked = jnp.where(is_selected, total_size, jnp.arange(total_size))
+    return jnp.sort(marked)[: total_size - indices.shape[0]]
+
+
+def _is_scalar_bool(m):
+    """Check whether ``m`` is a scalar boolean (Python bool or 0-d array)."""
+    if isinstance(m, bool):
+        return True
+    if hasattr(m, "shape") and m.shape == ():
+        return True
+    return False
+
+
+def state_context_partition(x, mask):
+    """Partition a state PyTree into dynamic and static (context) parts.
+
+    This is a drop-in generalisation of ``eqx.partition`` that additionally
+    supports **index-array masks** for element-level selection within
+    array leaves.
+
+    Args:
+        x: State PyTree.
+        mask: Either a **PyTree** matching the structure of ``x`` with
+            leaves that are scalar booleans or 1-D integer index arrays,
+            or a **callable** ``leaf → bool`` applied to each leaf (for
+            backwards compatibility with the default ``dynamic_mask``).
+
+    Returns:
+        ``(dynamic, static, spec)`` where:
+
+        - ``dynamic``: PyTree with same structure as ``x``. Leaves
+          selected by the mask contain the dynamic data; others are
+          ``None``.
+        - ``static``: complementary PyTree. For scalar-bool masks this
+          mirrors ``eqx.partition``. For index masks, the static leaf
+          contains the complement elements ``leaf[complement_indices]``.
+        - ``spec``: opaque partition specification used by
+          :func:`merge_state` and :func:`merge_trajectory` to reassemble
+          the full state.
+    """
+    x_flat, x_treedef = jax.tree.flatten(x)
+
+    if callable(mask) and not hasattr(mask, "__jax_tree_flatten__"):
+        m_flat = [mask(leaf) for leaf in x_flat]
+    else:
+        m_flat, m_treedef = jax.tree.flatten(mask)
+        if m_treedef != x_treedef:
+            raise ValueError(f"Mask tree structure does not match state. State has {x_treedef}, mask has {m_treedef}.")
+
+    dyn_leaves = []
+    ctx_leaves = []
+    leaf_info = []
+
+    for leaf, m in zip(x_flat, m_flat):
+        if _is_scalar_bool(m):
+            if bool(m):
+                dyn_leaves.append(leaf)
+                ctx_leaves.append(None)
+                leaf_info.append(("full_dynamic", None))
+            else:
+                dyn_leaves.append(None)
+                ctx_leaves.append(leaf)
+                leaf_info.append(("full_static", None))
+        else:
+            indices = jnp.asarray(m)
+            complement = _compute_complement(indices, leaf.shape[0])
+            dyn_leaves.append(leaf[indices])
+            ctx_leaves.append(leaf[complement])
+            leaf_info.append(("indexed", (indices, complement)))
+
+    dynamic = x_treedef.unflatten(dyn_leaves)
+    static = x_treedef.unflatten(ctx_leaves)
+    return dynamic, static, (x_treedef, leaf_info)
+
+
+def merge_state(new_dynamic, original_x, spec):
+    """Scatter updated dynamic leaves back into the original state.
+
+    For scalar-bool partitions this is equivalent to
+    ``eqx.combine(new_dynamic, original_static)``.  For index-mask
+    partitions, the updated elements are scattered at their original
+    positions within the full array.
+
+    Args:
+        new_dynamic: PyTree with the same structure as ``original_x``.
+            Dynamic leaves contain updated values; static leaves are
+            ``None``.
+        original_x: The original (un-partitioned) state.
+        spec: Partition specification returned by
+            :func:`state_context_partition`.
+
+    Returns:
+        Merged state PyTree with updated dynamic values.
+    """
+    treedef, leaf_info = spec
+    new_flat = jax.tree.flatten(new_dynamic, is_leaf=lambda n: n is None)[0]
+    orig_flat = jax.tree.flatten(original_x)[0]
+
+    merged = []
+    for new_leaf, orig_leaf, (kind, data) in zip(new_flat, orig_flat, leaf_info):
+        if kind == "full_dynamic":
+            merged.append(new_leaf)
+        elif kind == "full_static":
+            merged.append(orig_leaf)
+        elif kind == "indexed":
+            indices, _complement = data
+            merged.append(orig_leaf.at[indices].set(new_leaf))
+
+    return treedef.unflatten(merged)
+
+
+def merge_trajectory(ys, static, spec):
+    """Merge an ODE trajectory (with leading time axis) with static context.
+
+    Handles all three partition types:
+
+    - ``full_dynamic``: trajectory leaf is kept as-is.
+    - ``full_static``: static leaf is broadcast to ``(T, ...)`` shape.
+    - ``indexed``: trajectory leaf ``(T, n, ...)`` and static complement
+      ``(N-n, ...)`` are scattered into a full ``(T, N, ...)`` array.
+
+    Args:
+        ys: Trajectory PyTree from ``diffrax.diffeqsolve``.  Each
+            dynamic leaf has shape ``(T, ...)``.  Static leaves are
+            ``None``.
+        static: Static context PyTree from :func:`state_context_partition`.
+        spec: Partition specification.
+
+    Returns:
+        Merged trajectory PyTree with full state at each time step.
+    """
+    _treedef, leaf_info = spec
+
+    ys_flat = jax.tree.flatten(ys, is_leaf=lambda n: n is None)[0]
+    non_none = [leaf for leaf in ys_flat if leaf is not None]
+    if not non_none:
+        return ys
+    T = non_none[0].shape[0]
+
+    ctx_flat = jax.tree.flatten(static, is_leaf=lambda n: n is None)[0]
+
+    merged = []
+    for y_leaf, c_leaf, (kind, data) in zip(ys_flat, ctx_flat, leaf_info):
+        if kind == "full_dynamic":
+            merged.append(y_leaf)
+        elif kind == "full_static":
+            merged.append(jnp.broadcast_to(c_leaf, (T,) + c_leaf.shape))
+        elif kind == "indexed":
+            indices, complement = data
+            total = indices.shape[0] + complement.shape[0]
+            rest_shape = y_leaf.shape[2:]
+            c_broadcast = jnp.broadcast_to(c_leaf, (T,) + c_leaf.shape)
+            full = jnp.zeros((T, total) + rest_shape, dtype=y_leaf.dtype)
+            full = full.at[:, indices].set(y_leaf)
+            full = full.at[:, complement].set(c_broadcast)
+            merged.append(full)
+
+    return _treedef.unflatten(merged)
