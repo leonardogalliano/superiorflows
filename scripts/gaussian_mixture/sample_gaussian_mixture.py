@@ -15,6 +15,7 @@ import typer
 
 from scripts.gaussian_mixture.train_gaussian_mixture import build_model, build_solver
 from superiorflows import Flow, ODEBijector
+from superiorflows.bijector import AbstractBijector
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
 
@@ -50,12 +51,17 @@ def load_trained_flow(ckpt_path: Path, **flow_kwargs):
     restored = checkpointer.restore(step, args=restore_args)
     trained_model = eqx.combine(restored.model, static_model)
 
-    trained_velocity_field = trained_model.velocity_field if hasattr(trained_model, "velocity_field") else trained_model
-
     # Bind into Flow
-    base_flow_kwargs = build_solver(config)
-    base_flow_kwargs.update(flow_kwargs)
-    bijector = ODEBijector(trained_velocity_field, **base_flow_kwargs)
+    if isinstance(trained_model, AbstractBijector):
+        bijector = trained_model
+    else:
+        trained_velocity_field = (
+            trained_model.velocity_field if hasattr(trained_model, "velocity_field") else trained_model
+        )
+        base_flow_kwargs = build_solver(config)
+        base_flow_kwargs.update(flow_kwargs)
+        bijector = ODEBijector(trained_velocity_field, **base_flow_kwargs)
+
     flow = Flow(bijector, base_dist)
 
     return flow, d, a, config

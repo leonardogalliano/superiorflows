@@ -21,6 +21,7 @@ import typer
 from typing_extensions import Annotated
 
 from superiorflows import CoupledDataSource, DistributionDataSource, ODEBijector
+from superiorflows.bijector import AbstractBijector
 from superiorflows.train import (
     CheckpointCallback,
     EnergyBasedLoss,
@@ -149,6 +150,55 @@ def sinusoidal_time_embedding(t: float, dim: int, max_period: float = 10000.0) -
     return embedding
 
 
+class RealNVPLayer(AbstractBijector):
+    s_net: eqx.nn.MLP
+    t_net: eqx.nn.MLP
+    mask: jnp.ndarray
+
+    def __init__(self, d: int, width: int, depth: int, mask: jnp.ndarray, *, key):
+        self.mask = mask
+        s_key, t_key = jax.random.split(key)
+        self.s_net = eqx.nn.MLP(d, d, width, depth, activation=jax.nn.tanh, key=s_key)
+        self.t_net = eqx.nn.MLP(d, d, width, depth, activation=jax.nn.tanh, key=t_key)
+
+    def _forward_and_log_det(self, x, *, args=None, **kwargs):
+        x_A = x * self.mask
+        s = self.s_net(x_A) * (1 - self.mask)
+        # Use tanh to stabilize scaling
+        s = jax.nn.tanh(s)
+        t = self.t_net(x_A) * (1 - self.mask)
+        y = x_A + (x * (1 - self.mask)) * jnp.exp(s) + t
+        log_det = jnp.sum(s)
+        return y, log_det
+
+    def _inverse_and_log_det(self, y, *, args=None, **kwargs):
+        y_A = y * self.mask
+        s = self.s_net(y_A) * (1 - self.mask)
+        s = jax.nn.tanh(s)
+        t = self.t_net(y_A) * (1 - self.mask)
+        x = y_A + (y * (1 - self.mask) - t) * jnp.exp(-s)
+        log_det = -jnp.sum(s)
+        return x, log_det
+
+
+class RealNVPBijector(AbstractBijector):
+    layers: list
+
+    def _forward_and_log_det(self, x, *, args=None, **kwargs):
+        log_det_total = 0.0
+        for layer in self.layers:
+            x, log_det = layer._forward_and_log_det(x, args=args, **kwargs)
+            log_det_total += log_det
+        return x, log_det_total
+
+    def _inverse_and_log_det(self, y, *, args=None, **kwargs):
+        log_det_total = 0.0
+        for layer in reversed(self.layers):
+            y, log_det = layer._inverse_and_log_det(y, args=args, **kwargs)
+            log_det_total += log_det
+        return y, log_det_total
+
+
 class VelocityDenoiserPair(eqx.Module):
     """Container holding a velocity field and a denoiser for joint training."""
 
@@ -193,11 +243,25 @@ class MLPVelocity(eqx.Module):
 
 def build_model(config: dict, d: int, *, key):
     vcfg = config["velocity"]
+    loss_type = config["training"]["loss_type"]
+
+    if vcfg["type"] == "realnvp":
+        if loss_type == "stochastic_interpolant":
+            raise ValueError("Stochastic Interpolant loss requires a velocity field. RealNVP is a discrete flow.")
+
+        num_layers = vcfg.get("num_layers", 4)
+        layers = []
+        for i in range(num_layers):
+            key, subkey = jax.random.split(key)
+            # Alternate mask
+            mask = jnp.array([1.0 if (j % 2 == i % 2) else 0.0 for j in range(d)])
+            layers.append(RealNVPLayer(d=d, width=vcfg["width"], depth=vcfg["depth"], mask=mask, key=subkey))
+        return RealNVPBijector(layers=layers)
+
     if vcfg["type"] != "mlp":
         raise ValueError(f"Only mlp velocity is supported for now, got {vcfg['type']}")
 
     time_emb_dim = vcfg.get("time_embedding_dim", 0)
-    loss_type = config["training"]["loss_type"]
     learn_denoiser = config["stochastic_interpolant"].get("learn_denoiser", False)
 
     if learn_denoiser and loss_type == "stochastic_interpolant":
@@ -329,6 +393,8 @@ def train_single_model(config: dict):
     bijector_kwargs = build_solver(config)
 
     def make_bijector(m):
+        if isinstance(m, AbstractBijector):
+            return m
         vf = m.velocity_field if isinstance(m, VelocityDenoiserPair) else m
         return ODEBijector(vf, **bijector_kwargs)
 
@@ -502,8 +568,12 @@ def train_single_model(config: dict):
     print(f"  Target        : d={d}, a={a}, w={weight}")
     print(f"  Batch size    : {batch_size}")
     print(f"  Loss          : {loss_type}")
-    t_emb = vcfg.get("time_embedding_dim", 0)
-    print(f"  Velocity      : MLP (width={vcfg['width']}, depth={vcfg['depth']}, time_emb_dim={t_emb})")
+    if vcfg["type"] == "realnvp":
+        n_layers = vcfg.get("num_layers", 4)
+        print(f"  Model         : RealNVP (layers={n_layers}, width={vcfg['width']}, depth={vcfg['depth']})")
+    else:
+        t_emb = vcfg.get("time_embedding_dim", 0)
+        print(f"  Velocity      : MLP (width={vcfg['width']}, depth={vcfg['depth']}, time_emb_dim={t_emb})")
     print(f"  Parameters    : {num_params:,}")
     print(f"  Optimizer     : {config['optimizer']['type']} | lr_schedule = {lr_schedule_str}")
     print(f"  Run           : {run_name}")
