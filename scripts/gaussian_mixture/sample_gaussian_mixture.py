@@ -13,7 +13,7 @@ import numpy as np
 import orbax.checkpoint as ocp
 import typer
 
-from scripts.gaussian_mixture.train_gaussian_mixture import build_solver, build_velocity
+from scripts.gaussian_mixture.train_gaussian_mixture import build_model, build_solver
 from superiorflows import Flow, ODEBijector
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
@@ -36,10 +36,10 @@ def load_trained_flow(ckpt_path: Path, **flow_kwargs):
 
     # Model structure and Restore weights
     key = jax.random.key(0)
-    velocity_field = build_velocity(config, d, key=key)
+    model_template = build_model(config, d, key=key)
 
-    model_params = eqx.filter(velocity_field, eqx.is_array)
-    static_model = eqx.filter(velocity_field, eqx.is_array, inverse=True)
+    model_params = eqx.filter(model_template, eqx.is_array)
+    static_model = eqx.filter(model_template, eqx.is_array, inverse=True)
 
     checkpointer = ocp.CheckpointManager(ckpt_path.resolve(), item_names=("model", "optimizer", "metadata"))
     step = checkpointer.latest_step()
@@ -48,7 +48,9 @@ def load_trained_flow(ckpt_path: Path, **flow_kwargs):
 
     restore_args = ocp.args.Composite(model=ocp.args.StandardRestore(model_params))
     restored = checkpointer.restore(step, args=restore_args)
-    trained_velocity_field = eqx.combine(restored.model, static_model)
+    trained_model = eqx.combine(restored.model, static_model)
+
+    trained_velocity_field = trained_model.velocity_field if hasattr(trained_model, "velocity_field") else trained_model
 
     # Bind into Flow
     base_flow_kwargs = build_solver(config)

@@ -73,7 +73,7 @@ DEFAULT_CONFIG = {
         "type": "mlp",
         "width": 64,
         "depth": 3,
-        "sinusoidal_emb": False,
+        "time_embedding_dim": 0,
     },
     "solver": {
         "type": "tsit5",
@@ -84,6 +84,8 @@ DEFAULT_CONFIG = {
     "stochastic_interpolant": {
         "interpolant_scheduler": "t",
         "noise_scheduler": "None",
+        "learn_denoiser": False,
+        "denoiser_weight": 1.0,
     },
     "callbacks": {
         "ess": {
@@ -137,17 +139,33 @@ def build_louis_mixture(d: int, a: float, sigma2_max=0.2, sigma2_min=0.01, weigh
     return target_distribution
 
 
+def sinusoidal_time_embedding(t: float, dim: int, max_period: float = 10000.0) -> jnp.ndarray:
+    half_dim = dim // 2
+    frequencies = jnp.exp(-jnp.log(max_period) * jnp.arange(half_dim) / (half_dim - 1))
+    angles = t * frequencies
+    embedding = jnp.concatenate([jnp.sin(angles), jnp.cos(angles)], axis=-1)
+    if dim % 2 == 1:
+        embedding = jnp.concatenate([embedding, jnp.zeros((1,))], axis=-1)
+    return embedding
+
+
+class VelocityDenoiserPair(eqx.Module):
+    """Container holding a velocity field and a denoiser for joint training."""
+
+    velocity_field: eqx.Module
+    denoiser: eqx.Module
+
+
 class MLPVelocity(eqx.Module):
-    """MLP velocity field for unbounded domains, with optional sinusoidal time embedding."""
+    """MLP velocity field for unbounded domains, with optional time embedding."""
 
     mlp: eqx.nn.MLP
-    sinusoidal_emb: bool = eqx.field(static=True)
+    time_embedding_dim: int = eqx.field(static=True)
 
-    def __init__(self, d: int, width: int, depth: int, sinusoidal_emb: bool = False, *, key):
-        self.sinusoidal_emb = sinusoidal_emb
-        if sinusoidal_emb:
-            # 1 scalar time mapped to sin and cos -> 2 features
-            in_features = d + 2
+    def __init__(self, d: int, width: int, depth: int, time_embedding_dim: int = 0, *, key):
+        self.time_embedding_dim = time_embedding_dim
+        if time_embedding_dim > 0:
+            in_features = d + time_embedding_dim
         else:
             in_features = d + 1
 
@@ -161,10 +179,8 @@ class MLPVelocity(eqx.Module):
         )
 
     def __call__(self, t: float, x: jnp.ndarray, args=None) -> jnp.ndarray:
-        if self.sinusoidal_emb:
-            # simple fixed frequency embedding: sin(pi*t), cos(pi*t)
-            # assuming t in [0, 1] for flow
-            t_emb = jnp.array([jnp.sin(jnp.pi * t), jnp.cos(jnp.pi * t)])
+        if self.time_embedding_dim > 0:
+            t_emb = sinusoidal_time_embedding(t, self.time_embedding_dim)
         else:
             t_emb = jnp.array([t])
 
@@ -175,13 +191,24 @@ class MLPVelocity(eqx.Module):
         return self.mlp(features)
 
 
-def build_velocity(config: dict, d: int, *, key):
+def build_model(config: dict, d: int, *, key):
     vcfg = config["velocity"]
     if vcfg["type"] != "mlp":
         raise ValueError(f"Only mlp velocity is supported for now, got {vcfg['type']}")
-    return MLPVelocity(
-        d=d, width=vcfg["width"], depth=vcfg["depth"], sinusoidal_emb=vcfg.get("sinusoidal_emb", False), key=key
-    )
+
+    time_emb_dim = vcfg.get("time_embedding_dim", 0)
+    loss_type = config["training"]["loss_type"]
+    learn_denoiser = config["stochastic_interpolant"].get("learn_denoiser", False)
+
+    if learn_denoiser and loss_type == "stochastic_interpolant":
+        vel_key, den_key = jax.random.split(key)
+        vel = MLPVelocity(d=d, width=vcfg["width"], depth=vcfg["depth"], time_embedding_dim=time_emb_dim, key=vel_key)
+        den = MLPVelocity(d=d, width=vcfg["width"], depth=vcfg["depth"], time_embedding_dim=time_emb_dim, key=den_key)
+        return VelocityDenoiserPair(velocity_field=vel, denoiser=den)
+    else:
+        if learn_denoiser:
+            print("Warning: learn_denoiser=True is only supported for loss_type='stochastic_interpolant'. Ignoring.")
+        return MLPVelocity(d=d, width=vcfg["width"], depth=vcfg["depth"], time_embedding_dim=time_emb_dim, key=key)
 
 
 def build_solver(config: dict) -> dict:
@@ -301,7 +328,8 @@ def train_single_model(config: dict):
     base_dist = dsx.MultivariateNormalDiag(jnp.zeros(d), jnp.ones(d))
     bijector_kwargs = build_solver(config)
 
-    def make_bijector(vf):
+    def make_bijector(m):
+        vf = m.velocity_field if isinstance(m, VelocityDenoiserPair) else m
         return ODEBijector(vf, **bijector_kwargs)
 
     # Data pipeline uses infinite DistributionDataSource
@@ -342,7 +370,19 @@ def train_single_model(config: dict):
             return (1 - s_t) * x0 + s_t * x1
 
         si_kwargs = {k: v for k, v in bijector_kwargs.items() if k in ("dynamic_mask",)}
-        loss_fn = StochasticInterpolantLoss(interpolant=interpolant, gamma=gamma_fn, **si_kwargs)
+
+        if config["stochastic_interpolant"].get("learn_denoiser", False):
+            loss_fn = StochasticInterpolantLoss(
+                interpolant=interpolant,
+                gamma=gamma_fn,
+                get_velocity=lambda m: m.velocity_field,
+                get_denoiser=lambda m: m.denoiser,
+                denoiser_weight=config["stochastic_interpolant"].get("denoiser_weight", 1.0),
+                **si_kwargs,
+            )
+        else:
+            loss_fn = StochasticInterpolantLoss(interpolant=interpolant, gamma=gamma_fn, **si_kwargs)
+
         source = CoupledDataSource(
             DistributionDataSource(base_dist, batch_size, seed=seed),
             DistributionDataSource(target_dist, batch_size, seed=seed + 1),
@@ -353,7 +393,7 @@ def train_single_model(config: dict):
 
     # Model
     key, model_key = jax.random.split(key)
-    model = build_velocity(config, d, key=model_key)
+    model = build_model(config, d, key=model_key)
     num_params = sum(x.size for x in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_inexact_array)))
 
     # Optimizer
@@ -462,9 +502,8 @@ def train_single_model(config: dict):
     print(f"  Target        : d={d}, a={a}, w={weight}")
     print(f"  Batch size    : {batch_size}")
     print(f"  Loss          : {loss_type}")
-    print(
-        f"  Velocity      : MLP (width={vcfg['width']}, depth={vcfg['depth']}, sin={vcfg.get('sinusoidal_emb', False)})"
-    )
+    t_emb = vcfg.get("time_embedding_dim", 0)
+    print(f"  Velocity      : MLP (width={vcfg['width']}, depth={vcfg['depth']}, time_emb_dim={t_emb})")
     print(f"  Parameters    : {num_params:,}")
     print(f"  Optimizer     : {config['optimizer']['type']} | lr_schedule = {lr_schedule_str}")
     print(f"  Run           : {run_name}")
