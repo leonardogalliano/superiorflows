@@ -15,7 +15,7 @@ class DistributionDataSource(grain.sources.RandomAccessDataSource):
 
     Args:
         distribution: Any object with a ``.sample(key)`` method
-            (e.g. a ``distreqx.AbstractDistribution``).
+            (e.g. a duck-typed distribution object).
         batch_size: Number of samples per batch.
         seed: Base PRNG seed for deterministic sampling.
         length: Number of batches per epoch (only affects grain epoch boundaries).

@@ -23,7 +23,7 @@ import jax
 
 from superiorflows.partition import merge_state, state_context_partition
 
-__all__ = ["AbstractBijector", "DistreqxBijectorWrapper"]
+__all__ = ["AbstractBijector"]
 
 
 def _pack_args(ctx, user_args):
@@ -151,27 +151,3 @@ class AbstractBijector(eqx.Module):
         **Must be implemented by subclasses.**
         """
         raise NotImplementedError
-
-
-class DistreqxBijectorWrapper(AbstractBijector):
-    """Adapt a distreqx bijector to the superiorflows interface.
-
-    Wraps any object that exposes the distreqx bijector protocol
-    (``forward``, ``inverse``, ``forward_and_log_det``,
-    ``inverse_and_log_det``) so that it can be used wherever an
-    :class:`AbstractBijector` is expected.
-    """
-
-    _bijector: eqx.Module
-
-    def _forward(self, x, *, args=None, **kwargs):
-        return self._bijector.forward(x)
-
-    def _inverse(self, y, *, args=None, **kwargs):
-        return self._bijector.inverse(y)
-
-    def _forward_and_log_det(self, x, *, args=None, **kwargs):
-        return self._bijector.forward_and_log_det(x)
-
-    def _inverse_and_log_det(self, y, *, args=None, **kwargs):
-        return self._bijector.inverse_and_log_det(y)

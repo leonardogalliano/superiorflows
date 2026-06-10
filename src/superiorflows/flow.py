@@ -3,7 +3,7 @@
 A :class:`Flow` composes an invertible transformation (bijector) with a base
 distribution to define a new distribution via the change-of-variables formula.
 It is agnostic to the nature of the bijector — ODE-based continuous flows,
-discrete invertible architectures, or wrapped distreqx bijectors all work.
+discrete invertible architectures, or custom wrapped bijectors all work.
 
 The class operates on arbitrary pytree states; all leaf-level handling
 (dynamic/static partitioning, divergence computation) is delegated to the
