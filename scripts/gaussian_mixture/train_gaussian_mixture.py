@@ -22,6 +22,7 @@ from typing_extensions import Annotated
 
 from superiorflows import CoupledDataSource, DistributionDataSource, ODEBijector
 from superiorflows.bijector import AbstractBijector
+from superiorflows.partition import reconstruct_state
 from superiorflows.train import (
     CheckpointCallback,
     EnergyBasedLoss,
@@ -64,6 +65,7 @@ DEFAULT_CONFIG = {
         "overwrite": True,
         "num_checkpoints": 1,
         "load_from_checkpoint": None,
+        "partial_dofs": None,
     },
     "optimizer": {
         "type": "adam",
@@ -150,6 +152,68 @@ def sinusoidal_time_embedding(t: float, dim: int, max_period: float = 10000.0) -
     return embedding
 
 
+def _is_index_meta(tree):
+    if tree is None:
+        return False
+
+    def is_leaf_meta(x):
+        if x is None:
+            return True
+        if isinstance(x, tuple) and len(x) == 2 and not isinstance(x[0], tuple):
+            return True
+        return False
+
+    leaves = jax.tree.flatten(tree, is_leaf=is_leaf_meta)[0]
+    for leaf in leaves:
+        if isinstance(leaf, tuple) and len(leaf) == 2:
+            if isinstance(leaf[0], jnp.ndarray) and isinstance(leaf[1], jnp.ndarray):
+                return True
+    return False
+
+
+def unwrap_partition_args(args):
+    if isinstance(args, tuple) and len(args) == 2:
+        ctx, second = args
+        if _is_index_meta(second):
+            return ctx, second, None
+        elif isinstance(second, tuple) and len(second) == 2 and _is_index_meta(second[0]):
+            return ctx, second[0], second[1]
+    return None, None, args
+
+
+def extract_dynamic_part(v_full, x_dyn, index_meta):
+    if index_meta is None:
+        return jax.tree.map(
+            lambda vf, xd: vf if xd is not None else None,
+            v_full,
+            x_dyn,
+            is_leaf=lambda x: x is None,
+        )
+
+    def extract_leaf(vf, xd, meta):
+        if xd is None:
+            return None
+        if meta is None:
+            return vf
+        indices, _ = meta
+        return vf[indices]
+
+    def is_leaf_meta(x):
+        if x is None:
+            return True
+        if isinstance(x, tuple) and len(x) == 2 and not isinstance(x[0], tuple):
+            return True
+        return False
+
+    return jax.tree.map(
+        extract_leaf,
+        v_full,
+        x_dyn,
+        index_meta,
+        is_leaf=is_leaf_meta,
+    )
+
+
 class RealNVPLayer(AbstractBijector):
     s_net: eqx.nn.MLP
     t_net: eqx.nn.MLP
@@ -162,23 +226,54 @@ class RealNVPLayer(AbstractBijector):
         self.t_net = eqx.nn.MLP(d, d, width, depth, activation=jax.nn.tanh, key=t_key)
 
     def _forward_and_log_det(self, x, *, args=None, **kwargs):
-        x_A = x * self.mask
-        s = self.s_net(x_A) * (1 - self.mask)
-        # Use tanh to stabilize scaling
-        s = jax.nn.tanh(s)
-        t = self.t_net(x_A) * (1 - self.mask)
-        y = x_A + (x * (1 - self.mask)) * jnp.exp(s) + t
-        log_det = jnp.sum(s)
-        return y, log_det
+        ctx, index_meta, user_args = unwrap_partition_args(args)
+        if index_meta is not None:
+            x_full = reconstruct_state(x, ctx, index_meta)
+            indices, _ = index_meta
+            partition_mask = jnp.zeros(x_full.shape, dtype=bool).at[indices].set(True)
+
+            x_A = x_full * self.mask
+            s = self.s_net(x_A) * (1 - self.mask)
+            s = jax.nn.tanh(s)
+            t = self.t_net(x_A) * (1 - self.mask)
+            y_full = x_A + (x_full * (1 - self.mask)) * jnp.exp(s) + t
+
+            log_det = jnp.sum(s * partition_mask)
+            y = extract_dynamic_part(y_full, x, index_meta)
+            return y, log_det
+        else:
+            x_A = x * self.mask
+            s = self.s_net(x_A) * (1 - self.mask)
+            s = jax.nn.tanh(s)
+            t = self.t_net(x_A) * (1 - self.mask)
+            y = x_A + (x * (1 - self.mask)) * jnp.exp(s) + t
+            log_det = jnp.sum(s)
+            return y, log_det
 
     def _inverse_and_log_det(self, y, *, args=None, **kwargs):
-        y_A = y * self.mask
-        s = self.s_net(y_A) * (1 - self.mask)
-        s = jax.nn.tanh(s)
-        t = self.t_net(y_A) * (1 - self.mask)
-        x = y_A + (y * (1 - self.mask) - t) * jnp.exp(-s)
-        log_det = -jnp.sum(s)
-        return x, log_det
+        ctx, index_meta, user_args = unwrap_partition_args(args)
+        if index_meta is not None:
+            y_full = reconstruct_state(y, ctx, index_meta)
+            indices, _ = index_meta
+            partition_mask = jnp.zeros(y_full.shape, dtype=bool).at[indices].set(True)
+
+            y_A = y_full * self.mask
+            s = self.s_net(y_A) * (1 - self.mask)
+            s = jax.nn.tanh(s)
+            t = self.t_net(y_A) * (1 - self.mask)
+            x_full = y_A + (y_full * (1 - self.mask) - t) * jnp.exp(-s)
+
+            log_det = -jnp.sum(s * partition_mask)
+            x = extract_dynamic_part(x_full, y, index_meta)
+            return x, log_det
+        else:
+            y_A = y * self.mask
+            s = self.s_net(y_A) * (1 - self.mask)
+            s = jax.nn.tanh(s)
+            t = self.t_net(y_A) * (1 - self.mask)
+            x = y_A + (y * (1 - self.mask) - t) * jnp.exp(-s)
+            log_det = -jnp.sum(s)
+            return x, log_det
 
 
 class RealNVPBijector(AbstractBijector):
@@ -228,7 +323,7 @@ class MLPVelocity(eqx.Module):
             key=key,
         )
 
-    def __call__(self, t: float, x: jnp.ndarray, args=None) -> jnp.ndarray:
+    def _eval_mlp(self, t: float, x: jnp.ndarray) -> jnp.ndarray:
         if self.time_embedding_dim > 0:
             t_emb = sinusoidal_time_embedding(t, self.time_embedding_dim)
         else:
@@ -239,6 +334,14 @@ class MLPVelocity(eqx.Module):
 
         features = jnp.concatenate([x, t_feat], axis=-1)
         return self.mlp(features)
+
+    def __call__(self, t: float, x: jnp.ndarray, args=None) -> jnp.ndarray:
+        ctx, index_meta, user_args = unwrap_partition_args(args)
+        if index_meta is not None:
+            x_full = reconstruct_state(x, ctx, index_meta)
+            v_full = self._eval_mlp(t, x_full)
+            return extract_dynamic_part(v_full, x, index_meta)
+        return self._eval_mlp(t, x)
 
 
 def build_model(config: dict, d: int, *, key):
@@ -398,28 +501,58 @@ def train_single_model(config: dict):
         vf = m.velocity_field if isinstance(m, VelocityDenoiserPair) else m
         return ODEBijector(vf, **bijector_kwargs)
 
+    # Setup partial updates config and selection protocol
+    partial_dofs = tcfg.get("partial_dofs")
+    if partial_dofs is not None:
+        if not (1 <= partial_dofs < d):
+            raise ValueError(
+                f"partial_dofs must satisfy 1 <= partial_dofs < d, got partial_dofs={partial_dofs} for d={d}"
+            )
+
+        from superiorflows.selection import uniform_index_selection
+
+        selection_protocol = uniform_index_selection(partial_dofs)
+        base_dist_partial = dsx.MultivariateNormalDiag(jnp.zeros(partial_dofs), jnp.ones(partial_dofs))
+
+        # Disable ESSCallback if enabled
+        if config["callbacks"]["ess"]["enabled"]:
+            print("Warning: ESSCallback is not supported for partial update flows. Disabling it.")
+            config["callbacks"]["ess"]["enabled"] = False
+    else:
+        selection_protocol = None
+        base_dist_partial = base_dist
+
     # Data pipeline uses infinite DistributionDataSource
     # Depending on loss type, we source from base or target or both
     if loss_type == "maximum_likelihood":
-        loss_fn = MaximumLikelihoodLoss(base_distribution=base_dist, make_bijector=make_bijector)
+        loss_fn = MaximumLikelihoodLoss(
+            base_distribution=base_dist_partial,
+            make_bijector=make_bijector,
+            selection_protocol=selection_protocol,
+        )
         source = DistributionDataSource(target_dist, batch_size, seed=seed)
         dataset = grain.MapDataset.source(source).repeat()
 
     elif loss_type == "energy_based":
         loss_fn = EnergyBasedLoss(
-            base_distribution=base_dist,
+            base_distribution=base_dist_partial,
             target_distribution=target_dist,
             make_bijector=make_bijector,
+            selection_protocol=selection_protocol,
         )
-        source = DistributionDataSource(base_dist, batch_size, seed=seed)
+        if selection_protocol is not None:
+            source = DistributionDataSource(target_dist, batch_size, seed=seed)
+        else:
+            source = DistributionDataSource(base_dist, batch_size, seed=seed)
         dataset = grain.MapDataset.source(source).repeat()
 
     elif loss_type == "hybrid":
         loss_fn = KullbackLeiblerLoss(
-            base_distribution=base_dist,
+            base_distribution=base_dist_partial,
             target_distribution=target_dist,
             make_bijector=make_bijector,
             alpha=0.5,
+            selection_protocol=selection_protocol,
         )
         source = DistributionDataSource(target_dist, batch_size, seed=seed)
         dataset = grain.MapDataset.source(source).repeat()
@@ -444,10 +577,16 @@ def train_single_model(config: dict):
                 get_velocity=lambda m: m.velocity_field,
                 get_denoiser=lambda m: m.denoiser,
                 denoiser_weight=config["stochastic_interpolant"].get("denoiser_weight", 1.0),
+                selection_protocol=selection_protocol,
                 **si_kwargs,
             )
         else:
-            loss_fn = StochasticInterpolantLoss(interpolant=interpolant, gamma=gamma_fn, **si_kwargs)
+            loss_fn = StochasticInterpolantLoss(
+                interpolant=interpolant,
+                gamma=gamma_fn,
+                selection_protocol=selection_protocol,
+                **si_kwargs,
+            )
 
         source = CoupledDataSource(
             DistributionDataSource(base_dist, batch_size, seed=seed),
@@ -474,7 +613,10 @@ def train_single_model(config: dict):
             jax.vmap(target_dist.sample)(jax.random.split(val_k2, batch_size)),
         )
     elif loss_type == "energy_based":
-        val_batch = jax.vmap(base_dist.sample)(jax.random.split(val_key, batch_size))
+        if selection_protocol is not None:
+            val_batch = jax.vmap(target_dist.sample)(jax.random.split(val_key, batch_size))
+        else:
+            val_batch = jax.vmap(base_dist.sample)(jax.random.split(val_key, batch_size))
     else:
         val_batch = jax.vmap(target_dist.sample)(jax.random.split(val_key, batch_size))
 
@@ -617,6 +759,7 @@ def main(
     load_from_checkpoint: Annotated[
         str | None, typer.Option("--load-from-checkpoint", help="Checkpoint directory to resume from")
     ] = None,
+    partial_dofs: Annotated[int | None, typer.Option("--partial-dofs", help="Number of partial DOFs to select")] = None,
 ):
     """Train a CNF on the Louis Gaussian Mixture target."""
     cfg = copy.deepcopy(DEFAULT_CONFIG)
@@ -651,6 +794,8 @@ def main(
         cfg["training"]["ckpt_path"] = ckpt_path
     if load_from_checkpoint is not None:
         cfg["training"]["load_from_checkpoint"] = load_from_checkpoint
+    if partial_dofs is not None:
+        cfg["training"]["partial_dofs"] = partial_dofs
 
     if cfg["training"]["nsteps"] is None:
         raise typer.BadParameter("Missing required config: training.nsteps (--nsteps)")

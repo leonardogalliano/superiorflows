@@ -481,8 +481,8 @@ class StochasticInterpolantLoss(eqx.Module):
 
             def _sample_loss(ti, x0i, x1i, sel_key_i):
                 mask_i = self.selection_protocol(sel_key_i, x1i)
-                y0i, ctxi, spec_i = state_context_partition(x0i, mask_i)
-                y1i, _, _ = state_context_partition(x1i, mask_i)
+                y0i, _, _ = state_context_partition(x0i, mask_i)
+                y1i, ctxi, spec_i = state_context_partition(x1i, mask_i)
 
                 yt = self.interpolant(ti, y0i, y1i)
                 target = self.dt_interpolant(ti, y0i, y1i)
@@ -530,8 +530,8 @@ class StochasticInterpolantLoss(eqx.Module):
 
             def _sample_loss(ti, x0i, x1i, sel_key_i, noise_key_i):
                 mask_i = self.selection_protocol(sel_key_i, x1i)
-                y0i, ctxi, spec_i = state_context_partition(x0i, mask_i)
-                y1i, _, _ = state_context_partition(x1i, mask_i)
+                y0i, _, _ = state_context_partition(x0i, mask_i)
+                y1i, ctxi, spec_i = state_context_partition(x1i, mask_i)
 
                 y0i_leaves, y0i_treedef = jax.tree.flatten(y0i)
                 nk = jax.random.split(noise_key_i, len(y0i_leaves))
@@ -599,8 +599,8 @@ class StochasticInterpolantLoss(eqx.Module):
 
             def _sample_loss(ti, x0i, x1i, sel_key_i, noise_key_i):
                 mask_i = self.selection_protocol(sel_key_i, x1i)
-                y0i, ctxi, spec_i = state_context_partition(x0i, mask_i)
-                y1i, _, _ = state_context_partition(x1i, mask_i)
+                y0i, _, _ = state_context_partition(x0i, mask_i)
+                y1i, ctxi, spec_i = state_context_partition(x1i, mask_i)
 
                 y0i_leaves, y0i_treedef = jax.tree.flatten(y0i)
                 nk = jax.random.split(noise_key_i, len(y0i_leaves))
