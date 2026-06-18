@@ -2,7 +2,7 @@ from .bijector import AbstractBijector
 from .data import CoupledDataSource, DistributionDataSource
 from .flow import Flow
 from .ode import ODEBijector
-from .partial import PartialBase, PartialUpdater
+from .partial import PartialBase, PartialFlowUpdater
 from .partition import merge_state, state_context_partition
 from .selection import fixed_selection, uniform_index_selection
 
@@ -12,7 +12,7 @@ __all__ = [
     "Flow",
     "ODEBijector",
     "PartialBase",
-    "PartialUpdater",
+    "PartialFlowUpdater",
     "DistributionDataSource",
     "CoupledDataSource",
     "state_context_partition",

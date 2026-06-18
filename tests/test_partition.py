@@ -628,21 +628,21 @@ class TestPartialBase:
 
 
 # ======================================================================
-# PartialUpdater — integration tests
+# PartialFlowUpdater — integration tests
 # ======================================================================
 
 
-class TestPartialUpdater:
+class TestPartialFlowUpdater:
     def test_update_preserves_context(self, patch_bijector, full_state):
         """update changes only dynamic DOFs; context is preserved."""
-        from superiorflows.partial import PartialUpdater
+        from superiorflows.partial import PartialFlowUpdater
 
         patch_indices = jnp.array([1, 3, 5, 7])
         complement = jnp.array([0, 2, 4, 6])
         mask = MockParticleSystem(positions=patch_indices, species=False, box=False)
         base = MockDynBase(n=4, d=2)
 
-        updater = PartialUpdater(patch_bijector, base)
+        updater = PartialFlowUpdater(patch_bijector, base)
         x_new = updater.update(full_state, mask, key=jax.random.key(0))
 
         assert jnp.array_equal(x_new.positions[complement], full_state.positions[complement])
@@ -651,25 +651,25 @@ class TestPartialUpdater:
 
     def test_log_prob_finite(self, patch_bijector, full_state):
         """log_prob returns a finite scalar."""
-        from superiorflows.partial import PartialUpdater
+        from superiorflows.partial import PartialFlowUpdater
 
         patch_indices = jnp.array([1, 3, 5, 7])
         mask = MockParticleSystem(positions=patch_indices, species=False, box=False)
         base = MockDynBase(n=4, d=2)
 
-        updater = PartialUpdater(patch_bijector, base)
+        updater = PartialFlowUpdater(patch_bijector, base)
         lp = updater.log_prob(full_state, mask)
         assert jnp.isfinite(lp)
 
     def test_update_and_log_prob_consistency(self, patch_bijector, full_state):
         """update_and_log_prob returns a log-prob consistent with log_prob."""
-        from superiorflows.partial import PartialUpdater
+        from superiorflows.partial import PartialFlowUpdater
 
         patch_indices = jnp.array([1, 3, 5, 7])
         mask = MockParticleSystem(positions=patch_indices, species=False, box=False)
         base = MockDynBase(n=4, d=2)
 
-        updater = PartialUpdater(patch_bijector, base)
+        updater = PartialFlowUpdater(patch_bijector, base)
         x_new, lp = updater.update_and_log_prob(full_state, mask, key=jax.random.key(0))
 
         lp_check = updater.log_prob(x_new, mask)
@@ -677,13 +677,13 @@ class TestPartialUpdater:
 
     def test_push_forward_consistency(self, patch_bijector, full_state):
         """push_forward_and_log_prob is consistent with log_prob."""
-        from superiorflows.partial import PartialUpdater
+        from superiorflows.partial import PartialFlowUpdater
 
         patch_indices = jnp.array([1, 3, 5, 7])
         mask = MockParticleSystem(positions=patch_indices, species=False, box=False)
         base = MockDynBase(n=4, d=2)
 
-        updater = PartialUpdater(patch_bijector, base)
+        updater = PartialFlowUpdater(patch_bijector, base)
 
         _ = updater.update(full_state, mask, key=jax.random.key(1))
 
@@ -787,13 +787,13 @@ class TestVmapStress:
             assert jnp.array_equal(result.positions[i, complement], batch_positions[i, complement])
 
     def test_partial_updater_vmap_different_masks(self, patch_bijector, full_state):
-        """PartialUpdater.log_prob vmapped with different masks per sample."""
-        from superiorflows.partial import PartialUpdater
+        """PartialFlowUpdater.log_prob vmapped with different masks per sample."""
+        from superiorflows.partial import PartialFlowUpdater
 
         B = 4
         n_patch = 3
         base = MockDynBase(n=n_patch, d=2)
-        updater = PartialUpdater(patch_bijector, base)
+        updater = PartialFlowUpdater(patch_bijector, base)
 
         keys_pos = jax.random.split(jax.random.key(0), B)
         batch_positions = jax.vmap(lambda k: jax.random.normal(k, (8, 2)))(keys_pos)
@@ -889,6 +889,43 @@ class TestAnalyticalGaussian:
         lp = flow.log_prob(x_sampled, dynamic_mask=mask)
         lp_expected = marginal_base.log_prob(x_sampled[dyn_indices])
         assert jnp.allclose(lp, lp_expected, atol=1e-5)
+
+    def test_gaussian_marginal_with_scale_bijector(self):
+        """Verify that scaling the dynamic DOFs computes log_prob correctly using change of variables."""
+        import distreqx.distributions as dsx
+
+        d_total = 6
+        d_dyn = 3
+        dyn_indices = jnp.array([0, 2, 4])
+        scale = 2.0
+
+        marginal_base = dsx.MultivariateNormalDiag(jnp.zeros(d_dyn), jnp.ones(d_dyn))
+
+        class ScaleBijector(AbstractBijector):
+            def _forward_and_log_det(self, x, *, args=None, **kwargs):
+                return x * scale, x.shape[0] * jnp.log(scale)
+
+            def _inverse_and_log_det(self, y, *, args=None, **kwargs):
+                return y / scale, -y.shape[0] * jnp.log(scale)
+
+        bijector = ScaleBijector()
+        x_template = jax.random.normal(jax.random.key(0), (d_total,))
+        mask = dyn_indices
+
+        from superiorflows.partial import PartialBase
+
+        pb = PartialBase(marginal_base, x_template, mask)
+        flow = Flow(bijector, pb)
+
+        x_target = x_template.copy()
+        x_target = x_target.at[dyn_indices].set(x_template[dyn_indices] * scale)
+
+        lp_flow = flow.log_prob(x_target, dynamic_mask=mask)
+
+        # Expected: base_log_prob(x_target_dyn / scale) - d_dyn * log(scale)
+        lp_expected = marginal_base.log_prob(x_target[dyn_indices] / scale) - d_dyn * jnp.log(scale)
+
+        assert jnp.allclose(lp_flow, lp_expected, atol=1e-5)
 
 
 # ======================================================================
@@ -1133,3 +1170,202 @@ class TestGradientFlow:
 
         grad_norm = jnp.sum(jnp.abs(grads.weight))
         assert grad_norm > 0, "Gradient should be non-zero"
+
+
+class TestAdditionalLossesPartialUpdate:
+    def test_energy_loss_partial_update(self):
+        """Verify EnergyBasedLoss with partial updates runs and yields finite loss/gradient."""
+        import distreqx.distributions as dsx
+
+        from superiorflows.selection import fixed_selection
+        from superiorflows.train.losses import EnergyBasedLoss
+
+        dim = 6
+        n_dyn = 3
+        dyn_indices = jnp.array([0, 2, 4])
+
+        base = dsx.MultivariateNormalDiag(jnp.zeros(n_dyn), jnp.ones(n_dyn))
+        target = dsx.MultivariateNormalDiag(jnp.zeros(dim), jnp.ones(dim))
+
+        class ScaleVelocity(eqx.Module):
+            scale: jax.Array
+
+            def __call__(self, t, x, args):
+                return self.scale * (-t * x)
+
+        vf = ScaleVelocity(scale=jnp.array(1.0))
+
+        def make_bijector(m):
+            return ODEBijector(
+                m,
+                dt0=0.1,
+                solver=dfx.Euler(),
+                stepsize_controller=dfx.ConstantStepSize(),
+                augmented_solver=dfx.Euler(),
+                augmented_stepsize_controller=dfx.ConstantStepSize(),
+                extra_args={"max_steps": 100},
+                augmented_extra_args={"max_steps": 100},
+            )
+
+        protocol = fixed_selection(dyn_indices)
+        loss_fn = EnergyBasedLoss(base, target, make_bijector, selection_protocol=protocol)
+
+        B = 4
+        # Batch of full states acting as template contexts
+        batch = jax.random.normal(jax.random.key(0), (B, dim))
+
+        loss, _ = loss_fn(vf, batch, key=jax.random.key(1))
+        assert jnp.isfinite(loss)
+
+        grads = eqx.filter_grad(lambda m, b, k: loss_fn(m, b, k)[0])(vf, batch, jax.random.key(1))
+        assert jnp.sum(jnp.abs(grads.scale)) > 0
+
+    def test_kl_loss_partial_update(self):
+        """Verify KullbackLeiblerLoss with partial updates runs and yields finite loss/gradient."""
+        import distreqx.distributions as dsx
+
+        from superiorflows.selection import fixed_selection
+        from superiorflows.train.losses import KullbackLeiblerLoss
+
+        dim = 6
+        n_dyn = 3
+        dyn_indices = jnp.array([0, 2, 4])
+
+        base = dsx.MultivariateNormalDiag(jnp.zeros(n_dyn), jnp.ones(n_dyn))
+        target = dsx.MultivariateNormalDiag(jnp.zeros(dim), jnp.ones(dim))
+
+        class ScaleVelocity(eqx.Module):
+            scale: jax.Array
+
+            def __call__(self, t, x, args):
+                return self.scale * (-t * x)
+
+        vf = ScaleVelocity(scale=jnp.array(1.0))
+
+        def make_bijector(m):
+            return ODEBijector(
+                m,
+                dt0=0.1,
+                solver=dfx.Euler(),
+                stepsize_controller=dfx.ConstantStepSize(),
+                augmented_solver=dfx.Euler(),
+                augmented_stepsize_controller=dfx.ConstantStepSize(),
+                extra_args={"max_steps": 100},
+                augmented_extra_args={"max_steps": 100},
+            )
+
+        protocol = fixed_selection(dyn_indices)
+        loss_fn = KullbackLeiblerLoss(
+            base_distribution=base,
+            target_distribution=target,
+            make_bijector=make_bijector,
+            alpha=0.5,
+            selection_protocol=protocol,
+        )
+
+        B = 4
+        # Batch of target samples (full states)
+        batch = jax.random.normal(jax.random.key(0), (B, dim))
+
+        loss, _ = loss_fn(vf, batch, key=jax.random.key(1))
+        assert jnp.isfinite(loss)
+
+        grads = eqx.filter_grad(lambda m, b, k: loss_fn(m, b, k)[0])(vf, batch, jax.random.key(1))
+        assert jnp.sum(jnp.abs(grads.scale)) > 0
+
+    def test_si_noisy_partial_update(self):
+        """Verify StochasticInterpolantLoss with noisy path (gamma) and partial updates."""
+        from superiorflows.selection import fixed_selection
+        from superiorflows.train.losses import StochasticInterpolantLoss
+
+        N, d = 6, 2
+
+        class PatchVelocity(eqx.Module):
+            weight: jax.Array
+
+            def __call__(self, t, x, args):
+                return -t * x * self.weight
+
+        vf = PatchVelocity(weight=jnp.ones((3, d)))
+
+        dyn_indices = jnp.array([0, 2, 4])
+        protocol = fixed_selection(dyn_indices)
+
+        def interpolant(t, x0, x1):
+            return (1 - t) * x0 + t * x1
+
+        def gamma(t):
+            return jnp.sqrt(2 * t * (1 - t) + 1e-8)
+
+        loss_fn = StochasticInterpolantLoss(interpolant, gamma=gamma, selection_protocol=protocol)
+
+        B = 4
+        key = jax.random.key(0)
+        k1, k2 = jax.random.split(key)
+        x0 = jax.random.normal(k1, (B, N, d))
+        x1 = jax.random.normal(k2, (B, N, d))
+        batch = (x0, x1)
+
+        loss, _ = loss_fn(vf, batch, key=jax.random.key(1))
+        assert jnp.isfinite(loss)
+
+        grads = eqx.filter_grad(lambda m, b, k: loss_fn(m, b, k)[0])(vf, batch, jax.random.key(1))
+        assert jnp.sum(jnp.abs(grads.weight)) > 0
+
+    def test_si_denoiser_partial_update(self):
+        """Verify StochasticInterpolantLoss with denoiser path and partial updates."""
+        from superiorflows.selection import fixed_selection
+        from superiorflows.train.losses import StochasticInterpolantLoss
+
+        N, d = 6, 2
+
+        class JointModel(eqx.Module):
+            velocity_weight: jax.Array
+            denoiser_weight: jax.Array
+
+        class VelocityField(eqx.Module):
+            weight: jax.Array
+
+            def __call__(self, t, x, args):
+                return -t * x * self.weight
+
+        class Denoiser(eqx.Module):
+            weight: jax.Array
+
+            def __call__(self, t, x, args):
+                return x * self.weight
+
+        model = JointModel(velocity_weight=jnp.ones((3, d)), denoiser_weight=jnp.ones((3, d)))
+
+        dyn_indices = jnp.array([0, 2, 4])
+        protocol = fixed_selection(dyn_indices)
+
+        def interpolant(t, x0, x1):
+            return (1 - t) * x0 + t * x1
+
+        def gamma(t):
+            return jnp.sqrt(2 * t * (1 - t) + 1e-8)
+
+        loss_fn = StochasticInterpolantLoss(
+            interpolant,
+            gamma=gamma,
+            get_velocity=lambda m: VelocityField(m.velocity_weight),
+            get_denoiser=lambda m: Denoiser(m.denoiser_weight),
+            selection_protocol=protocol,
+        )
+
+        B = 4
+        key = jax.random.key(0)
+        k1, k2 = jax.random.split(key)
+        x0 = jax.random.normal(k1, (B, N, d))
+        x1 = jax.random.normal(k2, (B, N, d))
+        batch = (x0, x1)
+
+        loss, aux = loss_fn(model, batch, key=jax.random.key(1))
+        assert jnp.isfinite(loss)
+        assert "velocity_loss" in aux
+        assert "denoiser_loss" in aux
+
+        grads = eqx.filter_grad(lambda m, b, k: loss_fn(m, b, k)[0])(model, batch, jax.random.key(1))
+        assert jnp.sum(jnp.abs(grads.velocity_weight)) > 0
+        assert jnp.sum(jnp.abs(grads.denoiser_weight)) > 0

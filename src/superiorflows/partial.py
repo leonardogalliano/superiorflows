@@ -7,7 +7,7 @@ whilst holding the context ``c`` fixed.
 The :class:`PartialBase` wraps an unconditional base distribution and
 a context template, producing full-dimensional samples where the dynamic
 DOFs are drawn from the base and the static DOFs are copied from the
-context.  :class:`PartialUpdater` composes a bijector with a base
+context.  :class:`PartialFlowUpdater` composes a bijector with a base
 distribution to provide ``update``, ``log_prob``, and
 ``update_and_log_prob`` for MCMC inner loops and training losses.
 
@@ -20,7 +20,7 @@ import equinox as eqx
 from superiorflows.flow import Flow
 from superiorflows.partition import merge_state, state_context_partition
 
-__all__ = ["PartialBase", "PartialUpdater"]
+__all__ = ["PartialBase", "PartialFlowUpdater"]
 
 
 class PartialBase(eqx.Module):
@@ -70,7 +70,7 @@ class PartialBase(eqx.Module):
         return x, self.log_prob(x)
 
 
-class PartialUpdater(eqx.Module):
+class PartialFlowUpdater(eqx.Module):
     """Partial updater: update state ``s`` whilst conditioning on context ``c``.
 
     Composes a bijector with a base distribution.  Each method receives

@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 
 from superiorflows.flow import Flow
-from superiorflows.partial import PartialUpdater
+from superiorflows.partial import PartialFlowUpdater
 from superiorflows.partition import state_context_partition
 
 
@@ -92,7 +92,7 @@ class MaximumLikelihoodLoss(eqx.Module):
             flow = Flow(bijector, self.base_distribution)
             return -jnp.mean(_vmap_log_prob(flow, batch, key=key)), {}
 
-        updater = PartialUpdater(bijector, self.base_distribution)
+        updater = PartialFlowUpdater(bijector, self.base_distribution)
         batch_size = jax.tree.leaves(batch)[0].shape[0]
         keys = jax.random.split(key, batch_size)
 
@@ -153,15 +153,14 @@ class EnergyBasedLoss(eqx.Module):
             logp = jax.vmap(self.target_distribution.log_prob)(x1)
             return jnp.mean(logq - logp), {}
 
-        updater = PartialUpdater(bijector, self.base_distribution)
+        updater = PartialFlowUpdater(bijector, self.base_distribution)
         batch_size = jax.tree.leaves(batch)[0].shape[0]
         keys = jax.random.split(key, batch_size)
 
         def energy_single(xi, key_i):
             k_sel, k_rest = jax.random.split(key_i)
-            k_sample, k_lp = jax.random.split(k_rest)
             mask = self.selection_protocol(k_sel, xi)
-            x1_i, logq_i = updater.update_and_log_prob(xi, mask, k_sample, key=k_lp)
+            x1_i, logq_i = updater.update_and_log_prob(xi, mask, key=k_rest)
             logp_i = self.target_distribution.log_prob(x1_i)
             return logq_i - logp_i
 
@@ -230,10 +229,16 @@ class KullbackLeiblerLoss(eqx.Module):
         x1 = batch
         batch_size = jax.tree.leaves(batch)[0].shape[0]
         key1, key2, key3 = jax.random.split(key, 3)
-        keys = jax.random.split(key1, batch_size)
-        x0 = jax.vmap(self.base_distribution.sample)(keys)
         mle_term, _ = self.mle_loss(model, x1, key=key2)
-        energy_term, _ = self.energy_loss(model, x0, key=key3)
+
+        if self.mle_loss.selection_protocol is not None:
+            # In partial update mode, target samples x1 act as the context templates
+            energy_term, _ = self.energy_loss(model, x1, key=key3)
+        else:
+            keys = jax.random.split(key1, batch_size)
+            x0 = jax.vmap(self.base_distribution.sample)(keys)
+            energy_term, _ = self.energy_loss(model, x0, key=key3)
+
         return self.alpha * mle_term + (1 - self.alpha) * energy_term, {}
 
 
