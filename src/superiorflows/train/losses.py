@@ -6,7 +6,7 @@ import jax.numpy as jnp
 
 from superiorflows.flow import Flow
 from superiorflows.partial import PartialFlowUpdater
-from superiorflows.partition import state_context_partition
+from superiorflows.partition import PartitionSpec, state_context_partition
 
 
 def _vmap_log_prob(flow, batch, key=None):
@@ -27,11 +27,11 @@ def _vmap_push_forward_and_log_prob(flow, batch, key=None):
     return jax.vmap(flow.push_forward_and_log_prob)(batch)
 
 
-def _pack_args(ctx, user_args):
-    """Combine partition context with user-supplied args."""
-    if user_args is not None:
-        return (ctx, user_args)
-    return ctx
+def _pack_args(ctx, index_meta, user_args=None):
+    """Combine partition context, index mapping metadata, and user-supplied args."""
+    if index_meta is None:
+        return (ctx, user_args) if user_args is not None else ctx
+    return (ctx, (index_meta, user_args)) if user_args is not None else (ctx, index_meta)
 
 
 __all__ = [
@@ -465,13 +465,14 @@ class StochasticInterpolantLoss(eqx.Module):
         if sel_keys is None:
 
             def _sample_loss(ti, x0i, x1i):
-                y0i, ctxi, _ = state_context_partition(x0i, self.dynamic_mask)
+                y0i, ctxi, spec_i = state_context_partition(x0i, self.dynamic_mask)
                 y1i, _, _ = state_context_partition(x1i, self.dynamic_mask)
 
                 yt = self.interpolant(ti, y0i, y1i)
                 target = self.dt_interpolant(ti, y0i, y1i)
 
-                pred = velocity_field(ti, yt, _pack_args(ctxi, user_args))
+                index_meta = spec_i.index_meta if isinstance(spec_i, PartitionSpec) else None
+                pred = velocity_field(ti, yt, _pack_args(ctxi, index_meta, user_args))
                 sq_res = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), pred, target))
                 return sum(sq_res)
 
@@ -480,13 +481,14 @@ class StochasticInterpolantLoss(eqx.Module):
 
             def _sample_loss(ti, x0i, x1i, sel_key_i):
                 mask_i = self.selection_protocol(sel_key_i, x1i)
-                y0i, ctxi, _ = state_context_partition(x0i, mask_i)
+                y0i, ctxi, spec_i = state_context_partition(x0i, mask_i)
                 y1i, _, _ = state_context_partition(x1i, mask_i)
 
                 yt = self.interpolant(ti, y0i, y1i)
                 target = self.dt_interpolant(ti, y0i, y1i)
 
-                pred = velocity_field(ti, yt, _pack_args(ctxi, user_args))
+                index_meta = spec_i.index_meta if isinstance(spec_i, PartitionSpec) else None
+                pred = velocity_field(ti, yt, _pack_args(ctxi, index_meta, user_args))
                 sq_res = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), pred, target))
                 return sum(sq_res)
 
@@ -498,7 +500,7 @@ class StochasticInterpolantLoss(eqx.Module):
         """Noisy interpolant without denoiser."""
 
         if sel_keys is None:
-            y0, ctx = state_context_partition(x0, self.dynamic_mask)[:2]
+            y0, ctx, spec = state_context_partition(x0, self.dynamic_mask)
             y1 = state_context_partition(x1, self.dynamic_mask)[0]
 
             y0_leaves, y0_treedef = jax.tree.flatten(y0)
@@ -507,6 +509,8 @@ class StochasticInterpolantLoss(eqx.Module):
                 y0_treedef,
                 [jax.random.normal(k, leaf.shape) for k, leaf in zip(noise_keys, y0_leaves)],
             )
+
+            index_meta = spec.index_meta if isinstance(spec, PartitionSpec) else None
 
             def _sample_loss(ti, y0i, y1i, ctxi, zi):
                 interp = self.interpolant(ti, y0i, y1i)
@@ -517,7 +521,7 @@ class StochasticInterpolantLoss(eqx.Module):
                 dt_gamma_t = self.dt_gamma(ti)
                 target = jax.tree.map(lambda d, zp: d + dt_gamma_t * zp, dt_interp, zi)
 
-                pred = velocity_field(ti, yt, _pack_args(ctxi, user_args))
+                pred = velocity_field(ti, yt, _pack_args(ctxi, index_meta, user_args))
                 sq_res = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), pred, target))
                 return sum(sq_res)
 
@@ -526,7 +530,7 @@ class StochasticInterpolantLoss(eqx.Module):
 
             def _sample_loss(ti, x0i, x1i, sel_key_i, noise_key_i):
                 mask_i = self.selection_protocol(sel_key_i, x1i)
-                y0i, ctxi, _ = state_context_partition(x0i, mask_i)
+                y0i, ctxi, spec_i = state_context_partition(x0i, mask_i)
                 y1i, _, _ = state_context_partition(x1i, mask_i)
 
                 y0i_leaves, y0i_treedef = jax.tree.flatten(y0i)
@@ -544,7 +548,8 @@ class StochasticInterpolantLoss(eqx.Module):
                 dt_gamma_t = self.dt_gamma(ti)
                 target = jax.tree.map(lambda d, zp: d + dt_gamma_t * zp, dt_interp, zi)
 
-                pred = velocity_field(ti, yt, _pack_args(ctxi, user_args))
+                index_meta = spec_i.index_meta if isinstance(spec_i, PartitionSpec) else None
+                pred = velocity_field(ti, yt, _pack_args(ctxi, index_meta, user_args))
                 sq_res = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), pred, target))
                 return sum(sq_res)
 
@@ -558,7 +563,7 @@ class StochasticInterpolantLoss(eqx.Module):
         """Noisy interpolant with denoiser."""
 
         if sel_keys is None:
-            y0, ctx = state_context_partition(x0, self.dynamic_mask)[:2]
+            y0, ctx, spec = state_context_partition(x0, self.dynamic_mask)
             y1 = state_context_partition(x1, self.dynamic_mask)[0]
 
             y0_leaves, y0_treedef = jax.tree.flatten(y0)
@@ -567,6 +572,8 @@ class StochasticInterpolantLoss(eqx.Module):
                 y0_treedef,
                 [jax.random.normal(k, leaf.shape) for k, leaf in zip(noise_keys, y0_leaves)],
             )
+
+            index_meta = spec.index_meta if isinstance(spec, PartitionSpec) else None
 
             def _sample_loss(ti, y0i, y1i, ctxi, zi):
                 interp = self.interpolant(ti, y0i, y1i)
@@ -577,7 +584,7 @@ class StochasticInterpolantLoss(eqx.Module):
                 dt_gamma_t = self.dt_gamma(ti)
                 vel_target = jax.tree.map(lambda d, zp: d + dt_gamma_t * zp, dt_interp, zi)
 
-                args_i = _pack_args(ctxi, user_args)
+                args_i = _pack_args(ctxi, index_meta, user_args)
 
                 v_pred = velocity_field(ti, yt, args_i)
                 vel_sq = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), v_pred, vel_target))
@@ -592,7 +599,7 @@ class StochasticInterpolantLoss(eqx.Module):
 
             def _sample_loss(ti, x0i, x1i, sel_key_i, noise_key_i):
                 mask_i = self.selection_protocol(sel_key_i, x1i)
-                y0i, ctxi, _ = state_context_partition(x0i, mask_i)
+                y0i, ctxi, spec_i = state_context_partition(x0i, mask_i)
                 y1i, _, _ = state_context_partition(x1i, mask_i)
 
                 y0i_leaves, y0i_treedef = jax.tree.flatten(y0i)
@@ -610,7 +617,8 @@ class StochasticInterpolantLoss(eqx.Module):
                 dt_gamma_t = self.dt_gamma(ti)
                 vel_target = jax.tree.map(lambda d, zp: d + dt_gamma_t * zp, dt_interp, zi)
 
-                args_i = _pack_args(ctxi, user_args)
+                index_meta = spec_i.index_meta if isinstance(spec_i, PartitionSpec) else None
+                args_i = _pack_args(ctxi, index_meta, user_args)
 
                 v_pred = velocity_field(ti, yt, args_i)
                 vel_sq = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), v_pred, vel_target))

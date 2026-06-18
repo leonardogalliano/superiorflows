@@ -19,10 +19,23 @@ When all mask leaves are scalar booleans, the output is exactly equivalent
 to ``eqx.partition`` — zero overhead, zero behavioural change.
 """
 
+from typing import Any, List, NamedTuple, Tuple
+
 import jax
 import jax.numpy as jnp
 
-__all__ = ["state_context_partition", "merge_state"]
+__all__ = ["state_context_partition", "merge_state", "reconstruct_state", "PartitionSpec"]
+
+
+class PartitionSpec(NamedTuple):
+    """Specification of a state-context partition.
+
+    Used by :func:`merge_state` and :func:`reconstruct_state`.
+    """
+
+    treedef: Any
+    leaf_info: List[Tuple[str, Any]]
+    index_meta: Any
 
 
 def _compute_complement(indices, total_size):
@@ -84,6 +97,7 @@ def state_context_partition(x, mask):
     dyn_leaves = []
     ctx_leaves = []
     leaf_info = []
+    meta_leaves = []
 
     for leaf, m in zip(x_flat, m_flat):
         if _is_scalar_bool(m):
@@ -91,20 +105,28 @@ def state_context_partition(x, mask):
                 dyn_leaves.append(leaf)
                 ctx_leaves.append(None)
                 leaf_info.append(("full_dynamic", None))
+                meta_leaves.append(None)
             else:
                 dyn_leaves.append(None)
                 ctx_leaves.append(leaf)
                 leaf_info.append(("full_static", None))
+                meta_leaves.append(None)
         else:
             indices = jnp.asarray(m)
             complement = _compute_complement(indices, leaf.shape[0])
             dyn_leaves.append(leaf[indices])
             ctx_leaves.append(leaf[complement])
             leaf_info.append(("indexed", (indices, complement)))
+            meta_leaves.append((indices, complement))
 
     dynamic = x_treedef.unflatten(dyn_leaves)
     static = x_treedef.unflatten(ctx_leaves)
-    return dynamic, static, (x_treedef, leaf_info)
+    if all(meta is None for meta in meta_leaves):
+        index_meta = None
+    else:
+        index_meta = x_treedef.unflatten(meta_leaves)
+
+    return dynamic, static, PartitionSpec(x_treedef, leaf_info, index_meta)
 
 
 def merge_state(new_dynamic, original_x, spec):
@@ -126,7 +148,11 @@ def merge_state(new_dynamic, original_x, spec):
     Returns:
         Merged state PyTree with updated dynamic values.
     """
-    treedef, leaf_info = spec
+    if isinstance(spec, PartitionSpec):
+        treedef = spec.treedef
+        leaf_info = spec.leaf_info
+    else:
+        treedef, leaf_info = spec
     new_flat = jax.tree.flatten(new_dynamic, is_leaf=lambda n: n is None)[0]
     orig_flat = jax.tree.flatten(original_x)[0]
 
@@ -141,3 +167,44 @@ def merge_state(new_dynamic, original_x, spec):
             merged.append(orig_leaf.at[indices].set(new_leaf))
 
     return treedef.unflatten(merged)
+
+
+def reconstruct_state(dynamic, static, index_meta):
+    """Reconstruct the full state from partitioned dynamic and static parts.
+
+    Uses ``index_meta`` to scatter dynamic and static elements back into their
+    original positions.
+
+    Args:
+        dynamic: Dynamic PyTree.
+        static: Static PyTree.
+        index_meta: PyTree matching the state structure with ``None`` or
+            ``(indices, complement)`` leaves.
+
+    Returns:
+        Reconstructed state PyTree.
+    """
+    if index_meta is None:
+
+        def combine_leaf(d, c):
+            return d if d is not None else c
+
+        return jax.tree.map(combine_leaf, dynamic, static, is_leaf=lambda x: x is None)
+
+    def reconstruct_leaf(d, c, meta):
+        if meta is None:
+            return d if d is not None else c
+        indices, complement = meta
+        total_size = d.shape[0] + c.shape[0]
+        out_shape = (total_size,) + d.shape[1:]
+        out = jnp.zeros(out_shape, dtype=d.dtype)
+        return out.at[indices].set(d).at[complement].set(c)
+
+    def is_leaf_meta(x):
+        if x is None:
+            return True
+        if isinstance(x, tuple) and len(x) == 2 and not isinstance(x[0], tuple):
+            return True
+        return False
+
+    return jax.tree.map(reconstruct_leaf, dynamic, static, index_meta, is_leaf=is_leaf_meta)

@@ -400,7 +400,8 @@ class ConditionalVelocity(eqx.Module):
 
     def __call__(self, t, x_dynamic, args):
         patch_pos = x_dynamic.positions
-        ctx_pos = args.positions
+        ctx = args[0] if isinstance(args, tuple) and len(args) == 2 else args
+        ctx_pos = ctx.positions
         if ctx_pos is not None:
             ctx_effect = 0.1 * jnp.mean(ctx_pos, axis=0, keepdims=True)
         else:
@@ -1369,3 +1370,264 @@ class TestAdditionalLossesPartialUpdate:
         grads = eqx.filter_grad(lambda m, b, k: loss_fn(m, b, k)[0])(model, batch, jax.random.key(1))
         assert jnp.sum(jnp.abs(grads.velocity_weight)) > 0
         assert jnp.sum(jnp.abs(grads.denoiser_weight)) > 0
+
+
+# ======================================================================
+# New tests for PartitionSpec and reconstruct_state
+# ======================================================================
+
+
+class TestPartitionSpecAndReconstruct:
+    def test_partition_spec_fields(self):
+        from superiorflows.partition import PartitionSpec, state_context_partition
+
+        x = MockParticleSystem(
+            positions=jnp.arange(10, dtype=float).reshape(5, 2),
+            species=jnp.array([0, 1, 0, 1, 0]),
+            box=jnp.array([10.0, 10.0]),
+        )
+
+        # Test 1: all scalar-bool mask -> index_meta should be None
+        mask_bool = MockParticleSystem(positions=True, species=False, box=False)
+        dyn, ctx, spec = state_context_partition(x, mask_bool)
+        assert isinstance(spec, PartitionSpec)
+        assert spec.index_meta is None
+
+        # Test 2: index mask -> index_meta should be PyTree with index tuples
+        mask_idx = MockParticleSystem(positions=jnp.array([1, 3]), species=False, box=False)
+        dyn, ctx, spec = state_context_partition(x, mask_idx)
+        assert isinstance(spec, PartitionSpec)
+        assert spec.index_meta is not None
+        assert spec.index_meta.positions is not None
+        assert isinstance(spec.index_meta.positions, tuple)
+        assert len(spec.index_meta.positions) == 2
+        assert jnp.array_equal(spec.index_meta.positions[0], jnp.array([1, 3]))
+        assert spec.index_meta.species is None
+        assert spec.index_meta.box is None
+
+    def test_reconstruct_state_roundtrip(self):
+        from superiorflows.partition import reconstruct_state, state_context_partition
+
+        x = MockParticleSystem(
+            positions=jnp.arange(10, dtype=float).reshape(5, 2),
+            species=jnp.array([0, 1, 0, 1, 0]),
+            box=jnp.array([10.0, 10.0]),
+        )
+
+        # Scalar bool reconstruction
+        mask_bool = MockParticleSystem(positions=True, species=False, box=False)
+        dyn_b, ctx_b, spec_b = state_context_partition(x, mask_bool)
+        recon_b = reconstruct_state(dyn_b, ctx_b, spec_b.index_meta)
+        assert jnp.allclose(recon_b.positions, x.positions)
+        assert jnp.allclose(recon_b.species, x.species)
+        assert jnp.allclose(recon_b.box, x.box)
+
+        # Index mask reconstruction
+        mask_idx = MockParticleSystem(positions=jnp.array([1, 3]), species=False, box=False)
+        dyn_i, ctx_i, spec_i = state_context_partition(x, mask_idx)
+        recon_i = reconstruct_state(dyn_i, ctx_i, spec_i.index_meta)
+        assert jnp.allclose(recon_i.positions, x.positions)
+        assert jnp.allclose(recon_i.species, x.species)
+        assert jnp.allclose(recon_i.box, x.box)
+
+    def test_reconstruct_state_jit(self):
+        from superiorflows.partition import reconstruct_state, state_context_partition
+
+        x = MockParticleSystem(
+            positions=jnp.arange(10, dtype=float).reshape(5, 2),
+            species=jnp.array([0, 1, 0, 1, 0]),
+            box=jnp.array([10.0, 10.0]),
+        )
+        mask_idx = MockParticleSystem(positions=jnp.array([1, 3]), species=False, box=False)
+        dyn, ctx, spec = state_context_partition(x, mask_idx)
+
+        @jax.jit
+        def run_reconstruction(d, c, meta):
+            return reconstruct_state(d, c, meta)
+
+        recon = run_reconstruction(dyn, ctx, spec.index_meta)
+        assert jnp.allclose(recon.positions, x.positions)
+        assert jnp.allclose(recon.species, x.species)
+
+    def test_reconstruct_state_vmap(self):
+        from superiorflows.partition import reconstruct_state, state_context_partition
+
+        B = 3
+        positions = jnp.arange(30, dtype=float).reshape(B, 5, 2)
+        species = jnp.stack([jnp.array([0, 1, 0, 1, 0])] * B)
+        box = jnp.stack([jnp.array([10.0, 10.0])] * B)
+
+        batch_x = MockParticleSystem(positions=positions, species=species, box=box)
+
+        # Use vmap to partition and reconstruct with different random masks per sample
+        keys = jax.random.split(jax.random.key(42), B)
+
+        def process_sample(xi, key_i):
+            indices = jax.random.choice(key_i, 5, shape=(2,), replace=False)
+            indices = jnp.sort(indices)
+            mask_i = MockParticleSystem(positions=indices, species=False, box=False)
+            dyn_i, ctx_i, spec_i = state_context_partition(xi, mask_i)
+            recon_i = reconstruct_state(dyn_i, ctx_i, spec_i.index_meta)
+            return recon_i
+
+        recon_batch = jax.vmap(process_sample)(batch_x, keys)
+        assert jnp.allclose(recon_batch.positions, batch_x.positions)
+
+
+# ======================================================================
+# New tests for index_meta packing and loss integration
+# ======================================================================
+
+
+class TestIndexMetaLossesAndBijectors:
+    def test_bijector_threads_index_meta(self):
+
+        class MockTrackingVelocity(eqx.Module):
+            def __call__(self, t, x, args):
+                # Static assertions during JIT trace to avoid tracer leaks.
+                assert isinstance(args, tuple)
+                assert len(args) == 2
+                ctx, index_meta = args
+                assert index_meta is not None
+                assert index_meta.positions is not None
+                assert isinstance(index_meta.positions, tuple)
+                assert len(index_meta.positions) == 2
+                assert index_meta.positions[0].shape == (2,)
+                return MockParticleSystem(positions=jnp.zeros_like(x.positions), species=None, box=None)
+
+        vel = MockTrackingVelocity()
+        bijector = ODEBijector(
+            vel,
+            dt0=0.1,
+            solver=dfx.Euler(),
+            stepsize_controller=dfx.ConstantStepSize(),
+            augmented_solver=dfx.Euler(),
+            augmented_stepsize_controller=dfx.ConstantStepSize(),
+        )
+
+        x = MockParticleSystem(
+            positions=jnp.arange(10, dtype=float).reshape(5, 2),
+            species=jnp.array([0, 1, 0, 1, 0]),
+            box=jnp.array([10.0, 10.0]),
+        )
+        mask = MockParticleSystem(positions=jnp.array([1, 3]), species=False, box=False)
+
+        # Trigger forward run
+        _ = bijector.forward(x, dynamic_mask=mask)
+
+    def test_all_losses_partial_runs(self):
+        # Verify that all 4 losses run successfully with partial updates and selection protocols
+        from superiorflows.train.losses import (
+            EnergyBasedLoss,
+            KullbackLeiblerLoss,
+            MaximumLikelihoodLoss,
+            StochasticInterpolantLoss,
+        )
+
+        N, d = 6, 2
+
+        class SimpleVelocity(eqx.Module):
+            def __call__(self, t, x, args):
+                # Unpack and verify structure
+                _ = args[0] if isinstance(args, tuple) and len(args) == 2 else args
+                vel = -t * x.positions
+                return MockParticleSystem(positions=vel, species=None, box=None)
+
+        model = SimpleVelocity()
+
+        dyn_indices = jnp.array([1, 3, 5])
+
+        def protocol(key, x):
+            return MockParticleSystem(positions=dyn_indices, species=False, box=False)
+
+        # Construct a base distribution matching size of the active subset (n = 3, d = 2)
+        base = MockDynBase(n=3, d=2)
+
+        # Define mock target distribution
+        class MockTargetDist(eqx.Module):
+            def log_prob(self, value):
+                return -0.5 * jnp.sum(value.positions**2)
+
+        target_dist = MockTargetDist()
+
+        # Define 4 loss types
+        # 1. MLE
+        mle_loss = MaximumLikelihoodLoss(
+            make_bijector=lambda m: ODEBijector(
+                m,
+                dt0=0.1,
+                solver=dfx.Euler(),
+                stepsize_controller=dfx.ConstantStepSize(),
+                dynamic_mask=MockParticleSystem(positions=True, species=False, box=False),
+            ),
+            base_distribution=base,
+            selection_protocol=protocol,
+        )
+
+        # 2. Energy
+        energy_loss = EnergyBasedLoss(
+            base_distribution=base,
+            target_distribution=target_dist,
+            make_bijector=lambda m: ODEBijector(
+                m,
+                dt0=0.1,
+                solver=dfx.Euler(),
+                stepsize_controller=dfx.ConstantStepSize(),
+                dynamic_mask=MockParticleSystem(positions=True, species=False, box=False),
+            ),
+            selection_protocol=protocol,
+        )
+
+        # 3. KL
+        kl_loss = KullbackLeiblerLoss(
+            base_distribution=base,
+            target_distribution=target_dist,
+            make_bijector=lambda m: ODEBijector(
+                m,
+                dt0=0.1,
+                solver=dfx.Euler(),
+                stepsize_controller=dfx.ConstantStepSize(),
+                dynamic_mask=MockParticleSystem(positions=True, species=False, box=False),
+            ),
+            selection_protocol=protocol,
+        )
+
+        # 4. Stochastic Interpolant
+        def interpolant(t, x0, x1):
+            return jax.tree.map(
+                lambda a0, a1: (1 - t) * a0 + t * a1 if a0 is not None else None,
+                x0,
+                x1,
+                is_leaf=lambda x: x is None,
+            )
+
+        si_loss = StochasticInterpolantLoss(
+            interpolant,
+            get_velocity=lambda m: m,
+            selection_protocol=protocol,
+            dynamic_mask=MockParticleSystem(positions=True, species=False, box=False),
+        )
+
+        B = 2
+        key = jax.random.key(123)
+        # Mock target samples of shape (B, N, d) for MLE/KL/SI
+        target_positions = jax.random.normal(key, (B, N, d))
+        target_batch = MockParticleSystem(
+            positions=target_positions, species=jnp.zeros((B, N), dtype=int), box=jnp.zeros((B, d))
+        )
+
+        # Run MLE
+        l_mle, _ = mle_loss(model, target_batch, key=key)
+        assert jnp.isfinite(l_mle)
+
+        # Run Energy
+        l_energy, _ = energy_loss(model, target_batch, key=key)
+        assert jnp.isfinite(l_energy)
+
+        # Run KL
+        l_kl, _ = kl_loss(model, target_batch, key=key)
+        assert jnp.isfinite(l_kl)
+
+        # Run SI
+        l_si, _ = si_loss(model, (target_batch, target_batch), key=key)
+        assert jnp.isfinite(l_si)

@@ -21,16 +21,16 @@ from typing import Callable
 import equinox as eqx
 import jax
 
-from superiorflows.partition import merge_state, state_context_partition
+from superiorflows.partition import PartitionSpec, merge_state, state_context_partition
 
 __all__ = ["AbstractBijector"]
 
 
-def _pack_args(ctx, user_args):
-    """Combine partition context with user-supplied args."""
-    if user_args is not None:
-        return (ctx, user_args)
-    return ctx
+def _pack_args(ctx, index_meta, user_args=None):
+    """Combine partition context, index mapping metadata, and user-supplied args."""
+    if index_meta is None:
+        return (ctx, user_args) if user_args is not None else ctx
+    return (ctx, (index_meta, user_args)) if user_args is not None else (ctx, index_meta)
 
 
 class AbstractBijector(eqx.Module):
@@ -75,7 +75,8 @@ class AbstractBijector(eqx.Module):
         kw = dict(kwargs)
         mask = kw.pop("dynamic_mask", self.dynamic_mask)
         x_dyn, ctx, spec = state_context_partition(x, mask)
-        args = _pack_args(ctx, kw.pop("args", None))
+        index_meta = spec.index_meta if isinstance(spec, PartitionSpec) else None
+        args = _pack_args(ctx, index_meta, kw.pop("args", None))
         y_dyn = self._forward(x_dyn, args=args, **kw)
         return merge_state(y_dyn, x, spec)
 
@@ -85,7 +86,8 @@ class AbstractBijector(eqx.Module):
         kw = dict(kwargs)
         mask = kw.pop("dynamic_mask", self.dynamic_mask)
         y_dyn, ctx, spec = state_context_partition(y, mask)
-        args = _pack_args(ctx, kw.pop("args", None))
+        index_meta = spec.index_meta if isinstance(spec, PartitionSpec) else None
+        args = _pack_args(ctx, index_meta, kw.pop("args", None))
         x_dyn = self._inverse(y_dyn, args=args, **kw)
         return merge_state(x_dyn, y, spec)
 
@@ -95,7 +97,8 @@ class AbstractBijector(eqx.Module):
         kw = dict(kwargs)
         mask = kw.pop("dynamic_mask", self.dynamic_mask)
         x_dyn, ctx, spec = state_context_partition(x, mask)
-        args = _pack_args(ctx, kw.pop("args", None))
+        index_meta = spec.index_meta if isinstance(spec, PartitionSpec) else None
+        args = _pack_args(ctx, index_meta, kw.pop("args", None))
         y_dyn, logdet = self._forward_and_log_det(x_dyn, args=args, **kw)
         return merge_state(y_dyn, x, spec), logdet
 
@@ -105,7 +108,8 @@ class AbstractBijector(eqx.Module):
         kw = dict(kwargs)
         mask = kw.pop("dynamic_mask", self.dynamic_mask)
         y_dyn, ctx, spec = state_context_partition(y, mask)
-        args = _pack_args(ctx, kw.pop("args", None))
+        index_meta = spec.index_meta if isinstance(spec, PartitionSpec) else None
+        args = _pack_args(ctx, index_meta, kw.pop("args", None))
         x_dyn, logdet = self._inverse_and_log_det(y_dyn, args=args, **kw)
         return merge_state(x_dyn, y, spec), logdet
 
