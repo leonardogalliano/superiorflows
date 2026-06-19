@@ -14,8 +14,7 @@ from typing_extensions import Annotated
 
 from scripts.gaussian_mixture.sample_gaussian_mixture import load_trained_flow
 from scripts.gaussian_mixture.train_gaussian_mixture import build_louis_mixture
-from superiorflows.partial import PartialFlowUpdater
-from superiorflows.selection import uniform_index_selection
+from superiorflows.partial import PartialFlowUpdater, uniform_index_selection
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
 

@@ -11,9 +11,10 @@ import optax
 import typer
 from typing_extensions import Annotated
 
-from superiorflows import DistributionDataSource, ODEBijector
+from superiorflows import ODEBijector
 from superiorflows.train import (
     CheckpointCallback,
+    DistributionDataSource,
     LoggerCallback,
     MaximumLikelihoodLoss,
     ProgressBarCallback,

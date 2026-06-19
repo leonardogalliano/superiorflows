@@ -13,9 +13,11 @@ import optax
 from PIL import Image, ImageDraw, ImageFont
 from scipy.optimize import linear_sum_assignment
 
-from superiorflows import CoupledDataSource, DistributionDataSource, Flow, ODEBijector
+from superiorflows import Flow, ODEBijector
 from superiorflows.train import (
     CheckpointCallback,
+    CoupledDataSource,
+    DistributionDataSource,
     LoggerCallback,
     ProgressBarCallback,
     StochasticInterpolantLoss,

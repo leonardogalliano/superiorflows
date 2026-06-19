@@ -14,11 +14,13 @@ import jax.numpy as jnp
 import optax
 import pytest
 
-from superiorflows import CoupledDataSource, DistributionDataSource, Flow, ODEBijector
+from superiorflows import Flow, ODEBijector
 from superiorflows.train import (
     Callback,
     CheckpointCallback,
+    CoupledDataSource,
     DatasetExhausted,
+    DistributionDataSource,
     EnergyBasedLoss,
     KullbackLeiblerLoss,
     LoggerCallback,

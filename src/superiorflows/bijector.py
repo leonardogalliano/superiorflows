@@ -21,7 +21,7 @@ from typing import Callable
 import equinox as eqx
 import jax
 
-from superiorflows.partition import PartitionSpec, merge_state, state_context_partition
+from superiorflows.partial import PartitionSpec, merge_state, state_context_partition
 
 __all__ = ["AbstractBijector"]
 

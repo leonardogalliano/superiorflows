@@ -11,6 +11,7 @@ from superiorflows.train.callbacks import (
     TensorBoardLogger,
     ValidationCallback,
 )
+from superiorflows.train.data import CoupledDataSource, DistributionDataSource
 from superiorflows.train.losses import (
     EnergyBasedLoss,
     KullbackLeiblerLoss,
@@ -36,4 +37,6 @@ __all__ = [
     "EnergyBasedLoss",
     "KullbackLeiblerLoss",
     "StochasticInterpolantLoss",
+    "CoupledDataSource",
+    "DistributionDataSource",
 ]

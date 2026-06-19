@@ -11,9 +11,11 @@ import optax
 import typer
 from typing_extensions import Annotated
 
-from superiorflows import CoupledDataSource, DistributionDataSource, ODEBijector
+from superiorflows import ODEBijector
 from superiorflows.train import (
     CheckpointCallback,
+    CoupledDataSource,
+    DistributionDataSource,
     EnergyBasedLoss,
     ESSCallback,
     KullbackLeiblerLoss,

@@ -14,7 +14,7 @@ import pytest
 
 from superiorflows import Flow, ODEBijector
 from superiorflows.bijector import AbstractBijector
-from superiorflows.partition import (
+from superiorflows.partial import (
     _compute_complement,
     merge_state,
     state_context_partition,
@@ -704,7 +704,7 @@ class TestPartialFlowUpdater:
 
 class TestSelectionProtocols:
     def test_uniform_index_selection_shape(self):
-        from superiorflows.selection import uniform_index_selection
+        from superiorflows.partial import uniform_index_selection
 
         protocol = uniform_index_selection(4)
         x = jnp.arange(10, dtype=float)
@@ -713,7 +713,7 @@ class TestSelectionProtocols:
         assert jnp.all(indices[1:] >= indices[:-1])
 
     def test_uniform_index_selection_varies(self):
-        from superiorflows.selection import uniform_index_selection
+        from superiorflows.partial import uniform_index_selection
 
         protocol = uniform_index_selection(3)
         x = jnp.arange(10, dtype=float)
@@ -722,7 +722,7 @@ class TestSelectionProtocols:
         assert not jnp.array_equal(idx1, idx2)
 
     def test_fixed_selection(self):
-        from superiorflows.selection import fixed_selection
+        from superiorflows.partial import fixed_selection
 
         mask = jnp.array([2, 5, 8])
         protocol = fixed_selection(mask)
@@ -1010,7 +1010,7 @@ class TestMLEPartialUpdate:
         """MLE loss with fixed_selection produces finite loss and gradients."""
         import distreqx.distributions as dsx
 
-        from superiorflows.selection import fixed_selection
+        from superiorflows.partial import fixed_selection
         from superiorflows.train.losses import MaximumLikelihoodLoss
 
         dim = 6
@@ -1048,7 +1048,7 @@ class TestMLEPartialUpdate:
         """MLE with identity bijector + fixed mask matches Gaussian marginal NLL."""
         import distreqx.distributions as dsx
 
-        from superiorflows.selection import fixed_selection
+        from superiorflows.partial import fixed_selection
         from superiorflows.train.losses import MaximumLikelihoodLoss
 
         dim = 6
@@ -1096,7 +1096,7 @@ class TestGradientFlow:
         """Gradient through MLE loss with selection protocol is non-zero."""
         import distreqx.distributions as dsx
 
-        from superiorflows.selection import fixed_selection
+        from superiorflows.partial import fixed_selection
         from superiorflows.train.losses import MaximumLikelihoodLoss
 
         dim = 4
@@ -1139,7 +1139,7 @@ class TestGradientFlow:
 
     def test_si_partial_gradient_nonzero(self):
         """Gradient through SI loss with selection protocol is non-zero."""
-        from superiorflows.selection import fixed_selection
+        from superiorflows.partial import fixed_selection
         from superiorflows.train.losses import StochasticInterpolantLoss
 
         N, d = 6, 2
@@ -1178,7 +1178,7 @@ class TestAdditionalLossesPartialUpdate:
         """Verify EnergyBasedLoss with partial updates runs and yields finite loss/gradient."""
         import distreqx.distributions as dsx
 
-        from superiorflows.selection import fixed_selection
+        from superiorflows.partial import fixed_selection
         from superiorflows.train.losses import EnergyBasedLoss
 
         dim = 6
@@ -1225,7 +1225,7 @@ class TestAdditionalLossesPartialUpdate:
         """Verify KullbackLeiblerLoss with partial updates runs and yields finite loss/gradient."""
         import distreqx.distributions as dsx
 
-        from superiorflows.selection import fixed_selection
+        from superiorflows.partial import fixed_selection
         from superiorflows.train.losses import KullbackLeiblerLoss
 
         dim = 6
@@ -1276,7 +1276,7 @@ class TestAdditionalLossesPartialUpdate:
 
     def test_si_noisy_partial_update(self):
         """Verify StochasticInterpolantLoss with noisy path (gamma) and partial updates."""
-        from superiorflows.selection import fixed_selection
+        from superiorflows.partial import fixed_selection
         from superiorflows.train.losses import StochasticInterpolantLoss
 
         N, d = 6, 2
@@ -1315,7 +1315,7 @@ class TestAdditionalLossesPartialUpdate:
 
     def test_si_denoiser_partial_update(self):
         """Verify StochasticInterpolantLoss with denoiser path and partial updates."""
-        from superiorflows.selection import fixed_selection
+        from superiorflows.partial import fixed_selection
         from superiorflows.train.losses import StochasticInterpolantLoss
 
         N, d = 6, 2
@@ -1379,7 +1379,7 @@ class TestAdditionalLossesPartialUpdate:
 
 class TestPartitionSpecAndReconstruct:
     def test_partition_spec_fields(self):
-        from superiorflows.partition import PartitionSpec, state_context_partition
+        from superiorflows.partial import PartitionSpec, state_context_partition
 
         x = MockParticleSystem(
             positions=jnp.arange(10, dtype=float).reshape(5, 2),
@@ -1406,7 +1406,7 @@ class TestPartitionSpecAndReconstruct:
         assert spec.index_meta.box is None
 
     def test_reconstruct_state_roundtrip(self):
-        from superiorflows.partition import reconstruct_state, state_context_partition
+        from superiorflows.partial import reconstruct_state, state_context_partition
 
         x = MockParticleSystem(
             positions=jnp.arange(10, dtype=float).reshape(5, 2),
@@ -1431,7 +1431,7 @@ class TestPartitionSpecAndReconstruct:
         assert jnp.allclose(recon_i.box, x.box)
 
     def test_reconstruct_state_jit(self):
-        from superiorflows.partition import reconstruct_state, state_context_partition
+        from superiorflows.partial import reconstruct_state, state_context_partition
 
         x = MockParticleSystem(
             positions=jnp.arange(10, dtype=float).reshape(5, 2),
@@ -1450,7 +1450,7 @@ class TestPartitionSpecAndReconstruct:
         assert jnp.allclose(recon.species, x.species)
 
     def test_reconstruct_state_vmap(self):
-        from superiorflows.partition import reconstruct_state, state_context_partition
+        from superiorflows.partial import reconstruct_state, state_context_partition
 
         B = 3
         positions = jnp.arange(30, dtype=float).reshape(B, 5, 2)

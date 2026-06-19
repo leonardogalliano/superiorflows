@@ -5,8 +5,7 @@ import jax
 import jax.numpy as jnp
 
 from superiorflows.flow import Flow
-from superiorflows.partial import PartialFlowUpdater
-from superiorflows.partition import PartitionSpec, state_context_partition
+from superiorflows.partial import PartialFlowUpdater, PartitionSpec, state_context_partition
 
 
 def _vmap_log_prob(flow, batch, key=None):

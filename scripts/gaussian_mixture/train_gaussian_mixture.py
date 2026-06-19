@@ -20,11 +20,12 @@ import optax
 import typer
 from typing_extensions import Annotated
 
-from superiorflows import CoupledDataSource, DistributionDataSource, ODEBijector
-from superiorflows.bijector import AbstractBijector
-from superiorflows.partition import reconstruct_state
+from superiorflows import AbstractBijector, ODEBijector
+from superiorflows.partial import reconstruct_state
 from superiorflows.train import (
     CheckpointCallback,
+    CoupledDataSource,
+    DistributionDataSource,
     EnergyBasedLoss,
     ESSCallback,
     KullbackLeiblerLoss,
@@ -509,7 +510,7 @@ def train_single_model(config: dict):
                 f"partial_dofs must satisfy 1 <= partial_dofs < d, got partial_dofs={partial_dofs} for d={d}"
             )
 
-        from superiorflows.selection import uniform_index_selection
+        from superiorflows.partial import uniform_index_selection
 
         selection_protocol = uniform_index_selection(partial_dofs)
         base_dist_partial = dsx.MultivariateNormalDiag(jnp.zeros(partial_dofs), jnp.ones(partial_dofs))
