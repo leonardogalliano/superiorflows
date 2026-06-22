@@ -125,14 +125,13 @@ class ODEBijector(AbstractBijector):
     The forward map integrates the ODE ``dx/dt = v(t, x)`` from ``t₀`` to
     ``t₁``; the inverse integrates backward from ``t₁`` to ``t₀``.
 
-    Supports arbitrary pytree states: the ``dynamic_mask`` selects which
-    leaves are integrated (dynamic) vs. passed as context (static) via
-    ``eqx.partition``.
+    Dynamic-mask partitioning is handled by the parent
+    :class:`AbstractBijector` — this class operates exclusively on the
+    pre-partitioned dynamic state.  Static context is received via
+    ``args`` and forwarded to the velocity field.
 
     Attributes:
         velocity_field: Callable ``(t, x_dynamic, args) → velocity_pytree``.
-        dynamic_mask: Callable ``x → pytree_of_bools`` selecting dynamic
-            leaves.  Defaults to ``eqx.is_inexact_array``.
         divergence_fn: Optional callable
             ``(velocity_field, t, x, args) → (v, div_v)`` providing an
             analytical divergence.  Mutually exclusive with
@@ -153,10 +152,6 @@ class ODEBijector(AbstractBijector):
     """
 
     velocity_field: Callable
-    dynamic_mask: Callable = eqx.field(
-        default=lambda x: jax.tree.map(eqx.is_inexact_array, x),
-        static=True,
-    )
     divergence_fn: Optional[Callable] = eqx.field(default=None, static=True)
     hutchinson_samples: Optional[int] = eqx.field(default=None, static=True)
     solver: dfx.AbstractSolver = eqx.field(
@@ -185,108 +180,61 @@ class ODEBijector(AbstractBijector):
         if self.divergence_fn is not None and self.hutchinson_samples is not None:
             raise ValueError("Cannot set both divergence_fn and hutchinson_samples. Choose one divergence strategy.")
 
-    # --- AbstractBijector interface ---
+    # --- AbstractBijector extension points --------------------------------
+    #
+    # All methods receive pre-partitioned dynamic state from the parent.
+    # Context is in ``args``; no partition/merge logic here.
 
-    @eqx.filter_jit
-    def forward(self, x, **kwargs):
-        """Compute y = f(x) by integrating the ODE from t₀ to t₁.
-
-        Args:
-            x: Initial state pytree.
-            **kwargs: Override solver parameters (``t0``, ``t1``, ``dt0``,
-                ``saveat``, ``args``).
-
-        Returns:
-            Transformed state y at t₁.
-        """
+    def _forward(self, x, *, args=None, **kwargs):
         kw = dict(kwargs)
         saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
-        sol = self.integrate(x, saveat=saveat, **kw)
+        sol = self._integrate(x, args=args, saveat=saveat, **kw)
         return jax.tree.map(lambda y: y[-1], sol.ys)
 
-    @eqx.filter_jit
-    def inverse(self, y, **kwargs):
-        """Compute x = f⁻¹(y) by integrating the ODE from t₁ to t₀.
-
-        Args:
-            y: State pytree at t₁.
-            **kwargs: Override solver parameters.
-
-        Returns:
-            Reconstructed state x at t₀.
-        """
+    def _inverse(self, y, *, args=None, **kwargs):
         kw = dict(kwargs)
         t0 = kw.pop("t0", self.t0)
         t1 = kw.pop("t1", self.t1)
         saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
-        sol = self.integrate(y, t0=t1, t1=t0, saveat=saveat, **kw)
+        sol = self._integrate(y, args=args, t0=t1, t1=t0, saveat=saveat, **kw)
         return jax.tree.map(lambda y: y[-1], sol.ys)
 
-    @eqx.filter_jit
-    def forward_and_log_det(self, x, **kwargs):
-        """Compute (y, log|det J_f(x)|) via the augmented ODE.
-
-        Integrates forward from t₀ to t₁ while accumulating the divergence.
-        The log-det is ``∫ div(v) dt = −logq(t₁)`` where ``logq`` is the
-        accumulator initialised at zero.
-
-        Args:
-            x: Initial state pytree.
-            **kwargs: ``key`` (required for Hutchinson), plus solver overrides.
-
-        Returns:
-            Tuple ``(y, fwd_logdet)`` where ``fwd_logdet = log|det J_f(x)|``.
-        """
+    def _forward_and_log_det(self, x, *, args=None, **kwargs):
         kw = dict(kwargs)
         key = kw.pop("key", None)
         saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
         logq0 = jnp.zeros(())
-        sol = self.integrate_augmented_ode(x, logq0, key=key, saveat=saveat, **kw)
+        sol = self._integrate_augmented(x, logq0, key=key, args=args, saveat=saveat, **kw)
         y = jax.tree.map(lambda arr: arr[-1], sol.ys["x"])
         logq1 = sol.ys["logq"][-1]
         return y, -logq1
 
-    @eqx.filter_jit
-    def inverse_and_log_det(self, y, **kwargs):
-        """Compute (x, log|det J_{f⁻¹}(y)|) via the augmented ODE.
-
-        Integrates backward from t₁ to t₀ while accumulating the divergence.
-        The inverse log-det is ``−logq(t₀)`` where ``logq`` is the accumulator
-        initialised at zero.
-
-        Args:
-            y: State pytree at t₁.
-            **kwargs: ``key`` (required for Hutchinson), plus solver overrides.
-
-        Returns:
-            Tuple ``(x, inv_logdet)`` where
-            ``inv_logdet = log|det J_{f⁻¹}(y)| = −log|det J_f(x)|``.
-        """
+    def _inverse_and_log_det(self, y, *, args=None, **kwargs):
         kw = dict(kwargs)
         key = kw.pop("key", None)
         t0 = kw.pop("t0", self.t0)
         t1 = kw.pop("t1", self.t1)
         saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
         logq0 = jnp.zeros(())
-        sol = self.integrate_augmented_ode(y, logq0, key=key, t0=t1, t1=t0, saveat=saveat, **kw)
+        sol = self._integrate_augmented(y, logq0, key=key, args=args, t0=t1, t1=t0, saveat=saveat, **kw)
         x = jax.tree.map(lambda arr: arr[-1], sol.ys["x"])
         f0 = sol.ys["logq"][-1]
         return x, -f0
 
-    # --- ODE-specific methods (not part of AbstractBijector) ---
+    # --- ODE integration backend -----------------------------------------
 
-    @eqx.filter_jit
-    def integrate(self, x0, **kwargs):
-        """Integrate the ODE, returning the full diffrax solution.
+    def _integrate(self, x0, *, args=None, **kwargs):
+        """Integrate the ODE on pre-partitioned dynamic state.
 
         Args:
-            x0: Initial state pytree.
+            x0: Dynamic state (static leaves are ``None``).
+            args: Context from partition, forwarded to velocity field.
             **kwargs: Override solver parameters (``t0``, ``t1``, ``dt0``,
-                ``saveat``, ``args``).
+                ``saveat``).
 
         Returns:
-            Diffrax solution object with ``.ys`` containing the trajectory.
-            Static context leaves are broadcast along the time axis.
+            Diffrax solution object with ``.ys`` containing the dynamic
+            trajectory.
         """
         solver_args = dict(
             solver=self.solver,
@@ -299,35 +247,24 @@ class ODEBijector(AbstractBijector):
         solver_args.update(kwargs)
         if solver_args["dt0"] is not None:
             solver_args["dt0"] = jnp.sign(solver_args["t1"] - solver_args["t0"]) * abs(solver_args["dt0"])
-
-        y0, ctx = eqx.partition(x0, self.dynamic_mask)
-
-        user_args = solver_args.get("args")
-        if user_args is not None:
-            solver_args["args"] = (ctx, user_args)
-        else:
-            solver_args["args"] = ctx
+        solver_args["args"] = args
 
         term = dfx.ODETerm(self.velocity_field)
-        sol = dfx.diffeqsolve(term, y0=y0, **solver_args)
-        return eqx.tree_at(lambda s: s.ys, sol, self._merge_solution(sol.ys, ctx))
+        return dfx.diffeqsolve(term, y0=x0, **solver_args)
 
-    @eqx.filter_jit
-    def integrate_augmented_ode(self, x0, logq0, *, key=None, **kwargs):
-        """Integrate the augmented ODE for log-det computation.
+    def _integrate_augmented(self, x0, logq0, *, key=None, args=None, **kwargs):
+        """Integrate the augmented ODE on pre-partitioned dynamic state.
 
         Args:
-            x0: Initial state pytree.
+            x0: Dynamic state (static leaves are ``None``).
             logq0: Initial value of the log-det accumulator (scalar).
-                **Required** — there is no default.  For pure log-det
-                computation (bijector level), pass ``jnp.zeros(())``.
-            key: PRNG key for Hutchinson estimator.  Required when
-                ``hutchinson_samples`` is set.
+            key: PRNG key for Hutchinson estimator.
+            args: Context from partition, forwarded to velocity field.
             **kwargs: Override solver parameters.
 
         Returns:
             Diffrax solution with ``.ys`` containing
-            ``{"x": trajectory, "logq": accumulated_logdet}``.
+            ``{"x": dynamic_trajectory, "logq": accumulated_logdet}``.
         """
         solver_args = dict(
             solver=self.augmented_solver,
@@ -341,46 +278,24 @@ class ODEBijector(AbstractBijector):
         if solver_args["dt0"] is not None:
             solver_args["dt0"] = jnp.sign(solver_args["t1"] - solver_args["t0"]) * abs(solver_args["dt0"])
 
-        y0, ctx = eqx.partition(x0, self.dynamic_mask)
-        u0 = {"x": y0, "logq": logq0}
+        u0 = {"x": x0, "logq": logq0}
 
         random_vectors = None
         if self.hutchinson_samples is not None:
             if key is None:
                 raise ValueError("key is required when hutchinson_samples is set")
-            y0_flat, _ = jax.flatten_util.ravel_pytree(y0)
+            y0_flat, _ = jax.flatten_util.ravel_pytree(x0)
             d = y0_flat.size
             random_vectors = jax.random.rademacher(key, shape=(self.hutchinson_samples, d)).astype(y0_flat.dtype)
 
-        user_args = solver_args.get("args")
-        if user_args is not None:
-            solver_args["args"] = (ctx, user_args)
-        else:
-            solver_args["args"] = ctx
+        solver_args["args"] = args
 
         div_fn = self._make_divergence_fn(random_vectors=random_vectors)
         term_func = jax.tree_util.Partial(_augmented_dynamics, divergence_fn=div_fn)
-
         term = dfx.ODETerm(term_func)
-        sol = dfx.diffeqsolve(term, y0=u0, **solver_args)
-        return eqx.tree_at(lambda s: s.ys["x"], sol, self._merge_solution(sol.ys["x"], ctx))
+        return dfx.diffeqsolve(term, y0=u0, **solver_args)
 
-    # --- Private helpers ---
-
-    def _merge_solution(self, ys, ctx):
-        if ys is None:
-            return None
-        leaves = jax.tree.leaves(ys)
-        if not leaves:
-            return ys
-        T = leaves[0].shape[0]
-
-        return jax.tree.map(
-            lambda y, c: y if y is not None else jnp.broadcast_to(c, (T,) + c.shape),
-            ys,
-            ctx,
-            is_leaf=lambda x: x is None,
-        )
+    # --- Private helpers --------------------------------------------------
 
     def _make_divergence_fn(self, random_vectors=None):
         """Resolve the divergence strategy into a single callable.

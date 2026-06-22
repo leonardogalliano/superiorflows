@@ -3,7 +3,7 @@
 import equinox as eqx
 import jax.numpy as jnp
 
-from superiorflows.bijector import AbstractBijector, DistreqxBijectorWrapper
+from superiorflows.bijector import AbstractBijector
 
 
 class ScaleBijector(AbstractBijector):
@@ -14,14 +14,14 @@ class ScaleBijector(AbstractBijector):
 
     scale: float
 
-    def forward_and_log_det(self, x, **kwargs):
+    def _forward_and_log_det(self, x, *, args=None, **kwargs):
         y = self.scale * x
         # log|det J_f(x)| = log|scale| * dimension
         dimension = x.size
         logdet = jnp.sum(jnp.log(jnp.abs(self.scale))) * dimension
         return y, logdet
 
-    def inverse_and_log_det(self, y, **kwargs):
+    def _inverse_and_log_det(self, y, *, args=None, **kwargs):
         x = y / self.scale
         dimension = y.size
         logdet = -jnp.sum(jnp.log(jnp.abs(self.scale))) * dimension
@@ -48,6 +48,24 @@ class MockDistreqxBijector(eqx.Module):
         x = y / self.scale
         logdet = -jnp.log(jnp.abs(self.scale)) * y.size
         return x, logdet
+
+
+class DistreqxBijectorWrapper(AbstractBijector):
+    """Adapt a third-party bijector to the superiorflows interface."""
+
+    _bijector: eqx.Module
+
+    def _forward(self, x, *, args=None, **kwargs):
+        return self._bijector.forward(x)
+
+    def _inverse(self, y, *, args=None, **kwargs):
+        return self._bijector.inverse(y)
+
+    def _forward_and_log_det(self, x, *, args=None, **kwargs):
+        return self._bijector.forward_and_log_det(x)
+
+    def _inverse_and_log_det(self, y, *, args=None, **kwargs):
+        return self._bijector.inverse_and_log_det(y)
 
 
 def test_abstract_bijector_defaults():

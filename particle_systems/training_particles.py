@@ -34,9 +34,10 @@ from particle_systems.particle_system import (
     particle_geodesic_interpolant,
 )
 from particle_systems.velocities import ParticlesEGNNVelocity, ParticlesMLPVelocity
-from superiorflows import DistributionDataSource, ODEBijector
+from superiorflows import ODEBijector
 from superiorflows.train import (
     CheckpointCallback,
+    DistributionDataSource,
     EnergyBasedLoss,
     ESSCallback,
     KullbackLeiblerLoss,

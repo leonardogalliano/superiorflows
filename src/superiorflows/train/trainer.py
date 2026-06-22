@@ -73,7 +73,7 @@ class Trainer:
 
     Example:
         >>> import grain
-        >>> from superiorflows.data import DistributionDataSource
+        >>> from superiorflows.train import DistributionDataSource
         >>> source = DistributionDataSource(target_dist, batch_size=32)
         >>> dataset = grain.MapDataset.source(source).repeat()
         >>> trainer = Trainer(model, optax.adam(1e-3), loss_fn)

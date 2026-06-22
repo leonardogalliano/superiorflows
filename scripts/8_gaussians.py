@@ -11,9 +11,11 @@ import optax
 import typer
 from typing_extensions import Annotated
 
-from superiorflows import CoupledDataSource, DistributionDataSource, ODEBijector
+from superiorflows import ODEBijector
 from superiorflows.train import (
     CheckpointCallback,
+    CoupledDataSource,
+    DistributionDataSource,
     EnergyBasedLoss,
     ESSCallback,
     KullbackLeiblerLoss,
@@ -100,7 +102,8 @@ def train_single_model(
     # Loss Setup
     flow_kwargs = dict(stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5))
 
-    def make_bijector(vf):
+    def make_bijector(m):
+        vf = m.velocity_field if isinstance(m, VelocityDenoiserPair) else m
         return ODEBijector(vf, **flow_kwargs)
 
     if loss_type == "maximum_likelihood":

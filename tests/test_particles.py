@@ -299,7 +299,7 @@ def test_particle_ad_performance(benchmark, particles_flow_setup):
     X = jax.vmap(flow.bijector.forward)(X0)
 
     def run_ad():
-        jax.grad(foo_loss)(flow, X).bijector.velocity_field.params.block_until_ready()
+        eqx.filter_grad(foo_loss)(flow, X).bijector.velocity_field.params.block_until_ready()
 
     benchmark(run_ad)
 

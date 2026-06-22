@@ -3515,7 +3515,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "diffrax" },
-    { name = "distreqx" },
     { name = "equinox" },
     { name = "grain" },
     { name = "jax" },
@@ -3533,6 +3532,7 @@ cuda = [
 [package.dev-dependencies]
 dev = [
     { name = "atooms-pp" },
+    { name = "distreqx" },
     { name = "ipykernel" },
     { name = "jax-md" },
     { name = "matplotlib" },
@@ -3552,7 +3552,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "diffrax", specifier = ">=0.7.0" },
-    { name = "distreqx", specifier = ">=0.0.3" },
     { name = "equinox", specifier = ">=0.13.2" },
     { name = "grain", specifier = ">=0.2.15" },
     { name = "jax", specifier = ">=0.8.2" },
@@ -3567,6 +3566,7 @@ provides-extras = ["cuda"]
 [package.metadata.requires-dev]
 dev = [
     { name = "atooms-pp", specifier = ">=4.2.1" },
+    { name = "distreqx", specifier = ">=0.0.3" },
     { name = "ipykernel", specifier = ">=7.1.0" },
     { name = "jax-md", specifier = ">=0.2.27" },
     { name = "matplotlib", specifier = ">=3.10.8" },

@@ -144,7 +144,7 @@ def test_gradient_default_adjoint(base_flow):
     def loss(flow, x):
         return jnp.mean(jax.vmap(flow.log_prob)(x))
 
-    grad = jax.grad(loss)(base_flow, X1)
+    grad = eqx.filter_grad(loss)(base_flow, X1)
     assert grad is not None
     # Check gradient is finite and non-zero
     grad_flat = jax.flatten_util.ravel_pytree(grad)[0]
@@ -172,7 +172,8 @@ def test_gradient_with_direct_adjoint(base_distribution, velocity_field):
         return jnp.mean(jax.vmap(flow.log_prob)(x))
 
     # Should work with both reverse and forward mode
-    grad_rev = jax.grad(loss)(flow, X1)
+    grad_rev = eqx.filter_grad(loss)(flow, X1)
+
     assert grad_rev is not None
 
     # Forward mode via jacfwd
@@ -268,7 +269,7 @@ def test_saveat_t1_only(base_flow):
     key = jax.random.key(0)
     x0 = base_flow.base_distribution.sample(key)
 
-    sol = base_flow.bijector.integrate(x0)
+    sol = base_flow.bijector._integrate(x0)
     assert sol.ys.shape[0] == 1  # Only t1 saved
 
 
@@ -278,7 +279,7 @@ def test_saveat_specific_times(base_flow):
     x0 = base_flow.base_distribution.sample(key)
 
     ts = jnp.array([0.0, 0.25, 0.5, 0.75, 1.0])
-    sol = base_flow.bijector.integrate(x0, saveat=dfx.SaveAt(ts=ts))
+    sol = base_flow.bijector._integrate(x0, saveat=dfx.SaveAt(ts=ts))
 
     assert sol.ys.shape[0] == len(ts)
     # First should be close to x0
@@ -290,7 +291,7 @@ def test_saveat_steps(base_flow):
     key = jax.random.key(0)
     x0 = base_flow.base_distribution.sample(key)
 
-    sol = base_flow.bijector.integrate(x0, saveat=dfx.SaveAt(steps=True), max_steps=1000)
+    sol = base_flow.bijector._integrate(x0, saveat=dfx.SaveAt(steps=True), max_steps=1000)
 
     # Should have multiple steps saved
     assert sol.ys.shape[0] > 1
@@ -302,7 +303,7 @@ def test_saveat_dense_output(base_flow):
     x0 = base_flow.base_distribution.sample(key)
 
     # For dense output, we need to also save at t1 to get a valid solution
-    sol = base_flow.bijector.integrate(x0, saveat=dfx.SaveAt(dense=True, t1=True), max_steps=1000)
+    sol = base_flow.bijector._integrate(x0, saveat=dfx.SaveAt(dense=True, t1=True), max_steps=1000)
 
     # Evaluate at arbitrary times using dense interpolation
     t_eval = 0.5
@@ -740,7 +741,7 @@ def test_event_via_extra_args():
     x0 = base_dist.sample(key)
 
     # With event, should stop early when |x| < 0.1
-    sol = flow.bijector.integrate(x0)
+    sol = flow.bijector._integrate(x0)
     x1 = sol.ys[-1]
 
     # Should have stopped before going all the way to near-zero
@@ -771,7 +772,7 @@ def test_subsaveat_monitoring_at_each_step():
     key = jax.random.key(0)
     x0 = base_dist.sample(key)
 
-    sol = flow.bijector.integrate(x0, saveat=saveat)
+    sol = flow.bijector._integrate(x0, saveat=saveat)
     trajectory = sol.ys
 
     # Compute norms at each saved time
@@ -816,7 +817,7 @@ def test_manifold_projection_monitoring():
     x0 = base_dist.sample(key)
     x0 = x0 / jnp.linalg.norm(x0)  # Start on sphere
 
-    sol = flow.bijector.integrate(x0, saveat=saveat)
+    sol = flow.bijector._integrate(x0, saveat=saveat)
     trajectory = sol.ys
 
     # Compute manifold distances at each saved time
