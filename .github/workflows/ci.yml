@@ -44,7 +44,7 @@ jobs:
         run: uv run pytest --cov=src --cov=particle_systems --cov-report=xml
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           fail_ci_if_error: false
           files: ./coverage.xml
