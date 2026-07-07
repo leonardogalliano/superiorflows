@@ -22,21 +22,76 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from particle_systems.particle_system import ParticleSystem
+from particle_systems.particle_system import ParticleSystem, log_map
 from superiorflows.partial import PartialFlowUpdater
 
-__all__ = ["UniformPatchBase", "PatchUpdater"]
+__all__ = ["GaussianPatchBase", "UniformPatchBase", "PatchUpdater"]
+
+
+class GaussianPatchBase(eqx.Module):
+    """Gaussian base distribution for patch sampling, centred on a given point.
+
+    Samples N_patch positions from a multivariate Gaussian centred on
+    ``center`` (typically the selection anchor). Positions are drawn
+    on R^d **without** wrapping to the torus, avoiding the ill-defined
+    heat-kernel density on the flat torus. The ODE flow handles PBC
+    internally via ``log_map``/``exp_map``.
+
+    The log-probability uses the minimum-image displacement (``log_map``)
+    for the torus distance, which is exact up to exponentially small
+    corrections when σ ≪ L.
+
+    Attributes:
+        center: Gaussian centre, shape (d,).
+        sigma: Standard deviation of the isotropic Gaussian.
+        N_patch: Number of patch particles.
+        d: Spatial dimension.
+        L: Box side length (for torus distance in log_prob).
+    """
+
+    center: jnp.ndarray
+    sigma: float = eqx.field(static=True)
+    N_patch: int = eqx.field(static=True)
+    d: int = eqx.field(static=True)
+    L: float = eqx.field(static=True)
+
+    def sample(self, key, **kwargs):
+        """Draw N_patch positions from N(center, σ²I).
+
+        Returns:
+            ParticleSystem with ``positions`` of shape ``(N_patch, d)`` and
+            ``species=None``, ``box=None`` (matching the dynamic partition).
+        """
+        noise = jax.random.normal(key, shape=(self.N_patch, self.d))
+        positions = self.center + self.sigma * noise
+        return ParticleSystem(positions=positions, species=None, box=None)
+
+    def log_prob(self, value, **kwargs):
+        """Log-density using minimum-image displacement for torus consistency.
+
+        For σ ≪ L, this is the standard Gaussian log-density evaluated at the
+        shortest torus displacement from each particle to the centre:
+
+            log q₀ = −(1/2σ²) Σᵢ ‖log_map(xᵢ, center, L)‖² − (Nd/2) log(2πσ²)
+
+        Args:
+            value: ParticleSystem with positions of shape ``(N_patch, d)``.
+
+        Returns:
+            Scalar log-probability.
+        """
+        center_broadcast = jnp.broadcast_to(self.center, value.positions.shape)
+        disp = log_map(value.positions, center_broadcast, self.L)
+        sq_dist = jnp.sum(disp**2)
+        return -0.5 * sq_dist / self.sigma**2 - 0.5 * self.N_patch * self.d * jnp.log(2 * jnp.pi * self.sigma**2)
 
 
 class UniformPatchBase(eqx.Module):
     """Uniform base distribution for patch sampling.
 
-    Samples N_patch positions uniformly in [0, L)^d. Species and box are
-    not sampled — they are inherited from the context via
-    :class:`~superiorflows.partial.PartialBase`.
-
-    The log-probability is the uniform density on the flat torus:
-    −N_patch · d · log(L).
+    Samples N_patch positions uniformly in [0, L)^d. Kept for backward
+    compatibility and as a reference baseline; prefer
+    :class:`GaussianPatchBase` for better flow initialisation.
 
     Attributes:
         N_patch: Number of patch particles.
@@ -48,25 +103,13 @@ class UniformPatchBase(eqx.Module):
     d: int = eqx.field(static=True)
     L: float = eqx.field(static=True)
 
-    def sample(self, key):
-        """Draw N_patch uniform positions in [0, L)^d.
-
-        Returns:
-            ParticleSystem with ``positions`` of shape ``(N_patch, d)`` and
-            ``species=None``, ``box=None`` (matching the dynamic partition).
-        """
+    def sample(self, key, **kwargs):
+        """Draw N_patch uniform positions in [0, L)^d."""
         pos = jax.random.uniform(key, shape=(self.N_patch, self.d), maxval=self.L)
         return ParticleSystem(positions=pos, species=None, box=None)
 
-    def log_prob(self, value):
-        """Log-density of uniform distribution on [0, L)^{N_patch × d}.
-
-        Args:
-            value: ParticleSystem with positions of shape ``(N_patch, d)``.
-
-        Returns:
-            Scalar log-probability −N_patch · d · log(L).
-        """
+    def log_prob(self, value, **kwargs):
+        """Log-density of uniform distribution on [0, L)^{N_patch × d}."""
         return -self.N_patch * self.d * jnp.log(self.L)
 
 
@@ -79,34 +122,57 @@ class PatchUpdater(eqx.Module):
                → [PartialFlowUpdater] → x_active' (inner partition: patch vs context)
                → [scatter] → full_x'
 
+    The base distribution is centred on the selection anchor for each
+    update, so the flow starts from positions near the patch
+    neighbourhood rather than uniformly in the box.
+
     The inner :class:`~superiorflows.partial.PartialFlowUpdater` handles
     the two-way split of the active sub-system into patch (dynamic) and
     context (static) via the standard ``state_context_partition`` machinery.
 
     Attributes:
-        partial_updater: Wraps the bijector and base distribution.
+        bijector: The ODE bijector (stored separately so the base can be
+            reconstructed per call with a fresh centre).
         selection_fn: Callable ``(key, x) → SelectionResult``.
         N_patch: Static patch allocation size.
         N_context: Static context allocation size.
+        sigma: Standard deviation of the Gaussian base distribution.
+        L: Box side length.
+        d: Spatial dimension.
     """
 
-    partial_updater: PartialFlowUpdater
+    bijector: eqx.Module
     selection_fn: object = eqx.field(static=True)
     N_patch: int = eqx.field(static=True)
     N_context: int = eqx.field(static=True)
+    sigma: float = eqx.field(static=True)
+    L: float = eqx.field(static=True)
+    d: int = eqx.field(static=True)
 
-    def __init__(self, bijector, base_distribution, selection_fn, N_patch, N_context):
-        self.partial_updater = PartialFlowUpdater(bijector, base_distribution)
+    def __init__(self, bijector, selection_fn, N_patch, N_context, *, sigma, L, d):
+        self.bijector = bijector
         object.__setattr__(self, "selection_fn", selection_fn)
         self.N_patch = N_patch
         self.N_context = N_context
+        self.sigma = sigma
+        self.L = L
+        self.d = d
+
+    def _make_base(self, center):
+        """Construct a Gaussian base distribution centred on ``center``."""
+        return GaussianPatchBase(center=center, sigma=self.sigma, N_patch=self.N_patch, d=self.d, L=self.L)
+
+    def _make_updater(self, center):
+        """Build a fresh PartialFlowUpdater with a base centred on ``center``."""
+        return PartialFlowUpdater(self.bijector, self._make_base(center))
 
     def update_and_log_prob(self, x, key, **kwargs):
         """Propose a new patch and compute its log-density.
 
         Draws a random patch/context partition via the selection protocol,
-        samples from the base distribution, pushes through the flow, and
-        returns the updated full configuration with the forward log-density.
+        constructs a Gaussian base centred on the selection anchor, samples
+        from the base, pushes through the flow, and returns the updated full
+        configuration with the forward log-density.
 
         Args:
             x: Full particle system configuration.
@@ -122,8 +188,9 @@ class PatchUpdater(eqx.Module):
         sel = self.selection_fn(k_sel, x)
         x_active = self._build_subsystem(x, sel)
         mask = self._inner_mask()
+        updater = self._make_updater(sel.anchor)
 
-        x_active_new, log_q = self.partial_updater.update_and_log_prob(
+        x_active_new, log_q = updater.update_and_log_prob(
             x_active, mask, k_flow, args=(sel.n_patch, sel.n_context), **kwargs
         )
         x_new = self._scatter_patch(x, x_active_new, sel)
@@ -148,7 +215,8 @@ class PatchUpdater(eqx.Module):
         """
         x_active = self._build_subsystem(x, sel)
         mask = self._inner_mask()
-        return self.partial_updater.log_prob(x_active, mask, args=(sel.n_patch, sel.n_context), **kwargs)
+        updater = self._make_updater(sel.anchor)
+        return updater.log_prob(x_active, mask, args=(sel.n_patch, sel.n_context), **kwargs)
 
     def _inner_mask(self):
         """ParticleSystem-shaped mask selecting patch positions as dynamic DOFs."""

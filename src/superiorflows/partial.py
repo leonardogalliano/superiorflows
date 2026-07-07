@@ -253,42 +253,53 @@ def fixed_selection(mask):
 class PartialBase(eqx.Module):
     """Base distribution for partial sampling on a subset of DOFs.
 
-    Wraps an unconditional base distribution that produces samples
-    matching the dynamic-DOF shape.  :meth:`sample` merges the base
-    sample with the static context to produce a full-dimensional state.
-    :meth:`log_prob` extracts the dynamic DOFs and evaluates only over
-    those.
+    Wraps a base distribution that produces samples matching the
+    dynamic-DOF shape.  :meth:`sample` merges the base sample with the
+    static context to produce a full-dimensional state.  :meth:`log_prob`
+    extracts the dynamic DOFs and evaluates only over those.
 
-    For genuinely conditional bases :math:`q_0(s \\mid c)`, subclass
-    and override :meth:`sample` / :meth:`log_prob` to forward the
-    static context to the base distribution.
+    When ``conditional=True``, the static context is extracted via
+    :func:`state_context_partition` and forwarded to the base distribution
+    as ``base.sample(key=..., context=ctx_static)`` and
+    ``base.log_prob(s, context=ctx_static)``.  This enables genuinely
+    conditional bases :math:`q_0(s \\mid c)` that depend on the context.
 
     Attributes:
         base_distribution: Distribution over the dynamic DOFs.
             Must provide ``sample(key=...) → s`` and
             ``log_prob(s) → scalar`` where ``s`` has the dynamic-DOF
             shape (e.g. ``(n, d)`` for ``n`` selected particles).
+            When ``conditional=True``, must also accept a ``context``
+            keyword argument in both methods.
         context: Full state serving as template.  Static DOFs are
             copied from here into sampled states.
         dynamic_mask: Mask selecting which DOFs are dynamic.  Same
             format as accepted by :func:`state_context_partition`:
             a PyTree of scalar booleans and/or 1-D integer index
             arrays.
+        conditional: If ``True``, the static context is forwarded to the
+            base distribution's ``sample`` and ``log_prob`` methods.
     """
 
     base_distribution: eqx.Module
     context: eqx.Module
     dynamic_mask: object
+    conditional: bool = eqx.field(static=True, default=False)
 
     def sample(self, key):
-        """Draw ``s ~ q₀(·)`` and merge with context → full state."""
-        s = self.base_distribution.sample(key=key)
-        _, _, spec = state_context_partition(self.context, self.dynamic_mask)
+        """Draw ``s ~ q₀(· | c)`` and merge with context → full state."""
+        _, ctx, spec = state_context_partition(self.context, self.dynamic_mask)
+        if self.conditional:
+            s = self.base_distribution.sample(key=key, context=ctx)
+        else:
+            s = self.base_distribution.sample(key=key)
         return merge_state(s, self.context, spec)
 
     def log_prob(self, x):
-        """Evaluate ``log q₀(s)`` where ``s`` is the dynamic part of ``x``."""
-        s, _, _ = state_context_partition(x, self.dynamic_mask)
+        """Evaluate ``log q₀(s | c)`` where ``s`` is the dynamic part of ``x``."""
+        s, ctx, _ = state_context_partition(x, self.dynamic_mask)
+        if self.conditional:
+            return self.base_distribution.log_prob(s, context=ctx)
         return self.base_distribution.log_prob(s)
 
     def sample_and_log_prob(self, key):
@@ -305,6 +316,10 @@ class PartialFlowUpdater(eqx.Module):
     enabling the same updater to be called with different masks (e.g.
     different random particle selections per sample in a batch).
 
+    When ``conditional=True``, the :class:`PartialBase` constructed
+    internally will forward the static context to the base distribution,
+    enabling genuinely conditional bases :math:`q_0(s \\mid c)`.
+
     Used directly for inference (MCMC inner loops) and internally by
     the training losses when a selection protocol is active.
 
@@ -312,10 +327,13 @@ class PartialFlowUpdater(eqx.Module):
         bijector: The invertible transformation (e.g.
             :class:`ODEBijector`).
         base_distribution: Distribution over the dynamic DOFs.
+        conditional: If ``True``, the static context is forwarded to the
+            base distribution.
     """
 
     bijector: eqx.Module
     base_distribution: eqx.Module
+    conditional: bool = eqx.field(static=True, default=False)
 
     def log_prob(self, x, dynamic_mask, **kwargs):
         """Evaluate ``log q_θ(s | c)`` for a given full state and mask.
@@ -331,7 +349,7 @@ class PartialFlowUpdater(eqx.Module):
         """
         from superiorflows.flow import Flow
 
-        partial_base = PartialBase(self.base_distribution, x, dynamic_mask)
+        partial_base = PartialBase(self.base_distribution, x, dynamic_mask, conditional=self.conditional)
         flow = Flow(self.bijector, partial_base)
         return flow.log_prob(x, dynamic_mask=dynamic_mask, **kwargs)
 
@@ -352,7 +370,7 @@ class PartialFlowUpdater(eqx.Module):
         """
         from superiorflows.flow import Flow
 
-        partial_base = PartialBase(self.base_distribution, x, dynamic_mask)
+        partial_base = PartialBase(self.base_distribution, x, dynamic_mask, conditional=self.conditional)
         flow = Flow(self.bijector, partial_base)
         return flow.sample(key=key, dynamic_mask=dynamic_mask, **kwargs)
 
@@ -370,7 +388,7 @@ class PartialFlowUpdater(eqx.Module):
         """
         from superiorflows.flow import Flow
 
-        partial_base = PartialBase(self.base_distribution, x, dynamic_mask)
+        partial_base = PartialBase(self.base_distribution, x, dynamic_mask, conditional=self.conditional)
         flow = Flow(self.bijector, partial_base)
         return flow.sample_and_log_prob(key=key, dynamic_mask=dynamic_mask, **kwargs)
 
@@ -391,6 +409,6 @@ class PartialFlowUpdater(eqx.Module):
         """
         from superiorflows.flow import Flow
 
-        partial_base = PartialBase(self.base_distribution, x, dynamic_mask)
+        partial_base = PartialBase(self.base_distribution, x, dynamic_mask, conditional=self.conditional)
         flow = Flow(self.bijector, partial_base)
         return flow.push_forward_and_log_prob(x, dynamic_mask=dynamic_mask, **kwargs)

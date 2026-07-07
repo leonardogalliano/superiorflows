@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import pytest
 
 from particle_systems.particle_system import ParticleSystem
-from particle_systems.patch_updater import PatchUpdater, UniformPatchBase
+from particle_systems.patch_updater import GaussianPatchBase, PatchUpdater, UniformPatchBase
 from particle_systems.selection import random_point_select
 from particle_systems.velocities.conditional_egnn import PatchEGNNVelocity
 from superiorflows.ode import ODEBijector
@@ -62,7 +62,7 @@ def velocity_field(key):
 
 @pytest.fixture
 def patch_updater(velocity_field):
-    """PatchUpdater wired to a random EGNN."""
+    """PatchUpdater wired to a random EGNN with Gaussian base."""
     import diffrax as dfx
 
     bijector = ODEBijector(
@@ -73,10 +73,17 @@ def patch_updater(velocity_field):
         stepsize_controller=dfx.ConstantStepSize(),
         augmented_stepsize_controller=dfx.ConstantStepSize(),
     )
-    base = UniformPatchBase(N_patch=N_PATCH, d=D, L=L)
     selection_fn = random_point_select(N_PATCH, N_CONTEXT, R_PATCH, R_CONTEXT, sigma_r=0.2)
 
-    return PatchUpdater(bijector, base, selection_fn, N_PATCH, N_CONTEXT)
+    return PatchUpdater(
+        bijector,
+        selection_fn,
+        N_PATCH,
+        N_CONTEXT,
+        sigma=R_PATCH / 2,
+        L=L,
+        d=D,
+    )
 
 
 # ── Selection protocol tests ────────────────────────────────────────────────
@@ -256,6 +263,42 @@ class TestPatchUpdater:
 
 
 # ── UniformPatchBase tests ───────────────────────────────────────────────────
+
+
+class TestGaussianPatchBase:
+    def test_sample_shape(self, key):
+        center = jnp.array([3.0, 3.0])
+        base = GaussianPatchBase(center=center, sigma=R_PATCH / 2, N_patch=N_PATCH, d=D, L=L)
+        s = base.sample(key=key)
+        assert s.positions.shape == (N_PATCH, D)
+        assert s.species is None
+        assert s.box is None
+
+    def test_samples_near_center(self, key):
+        """Samples should cluster around the centre, not be uniformly spread."""
+        center = jnp.array([3.0, 3.0])
+        sigma = 0.5
+        base = GaussianPatchBase(center=center, sigma=sigma, N_patch=N_PATCH, d=D, L=L)
+        s = base.sample(key=key)
+        dists = jnp.sqrt(jnp.sum((s.positions - center) ** 2, axis=-1))
+        assert jnp.mean(dists) < 3 * sigma, "Samples should be close to the centre"
+
+    def test_log_prob_value(self):
+        center = jnp.array([3.0, 3.0])
+        sigma = 0.5
+        base = GaussianPatchBase(center=center, sigma=sigma, N_patch=N_PATCH, d=D, L=L)
+        dummy = ParticleSystem(positions=jnp.broadcast_to(center, (N_PATCH, D)), species=None, box=None)
+        expected = -0.5 * N_PATCH * D * jnp.log(2 * jnp.pi * sigma**2)
+        assert jnp.allclose(base.log_prob(dummy), expected, atol=1e-5)
+
+    def test_log_prob_uses_torus_distance(self):
+        """log_prob should use minimum-image displacement, not Euclidean."""
+        center = jnp.array([0.1, 0.1])
+        sigma = 0.5
+        base = GaussianPatchBase(center=center, sigma=sigma, N_patch=1, d=D, L=L)
+        near = ParticleSystem(positions=jnp.array([[L - 0.1, 0.1]]), species=None, box=None)
+        far = ParticleSystem(positions=jnp.array([[L / 2, L / 2]]), species=None, box=None)
+        assert base.log_prob(near) > base.log_prob(far), "Position near the centre via PBC should have higher log-prob"
 
 
 class TestUniformPatchBase:
