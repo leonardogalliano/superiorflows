@@ -97,7 +97,16 @@ def random_point_select(N_patch, N_context, r_patch, r_context, sigma_r=0.0):
         dists = torus_distances_from_point(anchor, positions, x.box)
 
         patch_idx, n_patch = _select_shell(dists, dists < radius, N_patch, N)
-        context_idx, n_context = _select_shell(dists, (dists >= radius) & (dists < r_context), N_context, N)
+
+        # Particles in the patch zone that exceed N_patch should fall into the context shell.
+        # We find exactly which particles were selected for the patch.
+        valid_patch_mask = jnp.arange(N_patch) < n_patch
+        is_patch = jnp.any((jnp.arange(N)[:, None] == patch_idx[None, :]) & valid_patch_mask[None, :], axis=1)
+
+        # Context: everything within r_context that isn't in the patch
+        context_membership = (dists < r_context) & (~is_patch)
+
+        context_idx, n_context = _select_shell(dists, context_membership, N_context, N)
 
         return SelectionResult(anchor, radius, patch_idx, context_idx, n_patch, n_context)
 

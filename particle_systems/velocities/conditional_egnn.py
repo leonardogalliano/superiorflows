@@ -143,14 +143,15 @@ class PatchEGNNVelocity(eqx.Module):
         n_valid = n_patch + n_context
         node_mask = jnp.arange(M) < n_valid
         edge_mask = node_mask[:, None] & node_mask[None, :]
+        patch_mask = jnp.arange(M) < n_patch
 
-        _, x_final = self._masked_forward(h0, all_pos, L, edge_mask, node_mask)
+        _, x_final = self._masked_forward(h0, all_pos, L, edge_mask, node_mask, patch_mask)
 
         vel = log_map(all_pos[: self.N_patch], x_final[: self.N_patch], L)
 
         return type(x_dyn)(positions=vel, species=None, box=None)
 
-    def _masked_forward(self, h0, pos, L, edge_mask, node_mask):
+    def _masked_forward(self, h0, pos, L, edge_mask, node_mask, patch_mask):
         """EGNN forward pass with edge masking for variable-count sub-systems.
 
         Reuses the EGNN's embedding and E_GCL sub-methods, applying edge
@@ -163,6 +164,8 @@ class PatchEGNNVelocity(eqx.Module):
           position drift from bias-derived coordinate weights.
         - Node features are zeroed for padded particles after each layer,
           ensuring they remain inert throughout the message-passing stack.
+        - Context particles have their positions frozen at each layer, acting
+          as fixed boundary anchors for the message passing.
 
         Args:
             h0: Initial node features, shape (M, in_node_nf).
@@ -170,6 +173,7 @@ class PatchEGNNVelocity(eqx.Module):
             L: Box side length (scalar, traced).
             edge_mask: Boolean pairwise validity mask, shape (M, M).
             node_mask: Boolean per-node validity mask, shape (M,).
+            patch_mask: Boolean mask for patch particles, shape (M,).
 
         Returns:
             ``(h, pos)``: updated node features and coordinates.
@@ -184,7 +188,9 @@ class PatchEGNNVelocity(eqx.Module):
             edge_feat = layer._edge_model(h, radial)
             edge_feat = edge_feat * edge_mask[:, :, None]
 
-            pos = layer._coord_model(pos, coord_diff, edge_feat, L)
+            pos_new = layer._coord_model(pos, coord_diff, edge_feat, L)
+            pos = jnp.where(patch_mask[:, None], pos_new, pos)
+
             h = layer._node_model(h, edge_feat)
             h = h * node_mask[:, None]
 
