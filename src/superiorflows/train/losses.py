@@ -8,22 +8,22 @@ from superiorflows.flow import Flow
 from superiorflows.partial import PartialFlowUpdater, PartitionSpec, state_context_partition
 
 
-def _vmap_log_prob(flow, batch, key=None):
+def _vmap_log_prob(flow, batch, key=None, **kwargs):
     """Evaluate flow.log_prob over a batch, splitting keys for Hutchinson."""
     if key is not None:
         batch_size = jax.tree.leaves(batch)[0].shape[0]
         keys = jax.random.split(key, batch_size)
-        return jax.vmap(lambda x, k: flow.log_prob(x, key=k))(batch, keys)
-    return jax.vmap(flow.log_prob)(batch)
+        return jax.vmap(lambda x, k: flow.log_prob(x, key=k, **kwargs))(batch, keys)
+    return jax.vmap(lambda x: flow.log_prob(x, **kwargs))(batch)
 
 
-def _vmap_push_forward_and_log_prob(flow, batch, key=None):
+def _vmap_push_forward_and_log_prob(flow, batch, key=None, **kwargs):
     """Evaluate flow.push_forward_and_log_prob over a batch, splitting keys for Hutchinson."""
     if key is not None:
         batch_size = jax.tree.leaves(batch)[0].shape[0]
         keys = jax.random.split(key, batch_size)
-        return jax.vmap(lambda x, k: flow.push_forward_and_log_prob(x, key=k))(batch, keys)
-    return jax.vmap(flow.push_forward_and_log_prob)(batch)
+        return jax.vmap(lambda x, k: flow.push_forward_and_log_prob(x, key=k, **kwargs))(batch, keys)
+    return jax.vmap(lambda x: flow.push_forward_and_log_prob(x, **kwargs))(batch)
 
 
 def _pack_args(ctx, index_meta, user_args=None):
@@ -65,11 +65,15 @@ class MaximumLikelihoodLoss(eqx.Module):
         make_bijector: Callable ``model → AbstractBijector``.
         selection_protocol: Optional callable ``(key, x) → dynamic_mask``.
             When ``None`` (default), the loss operates on the full state.
+        flow_kwargs: Extra keyword arguments forwarded to
+            ``flow.log_prob`` on every call (e.g. ``{"args": (n_p, n_c)}``
+            for velocity fields that require additional context).
     """
 
     base_distribution: eqx.Module
     make_bijector: Callable = eqx.field(static=True)
     selection_protocol: Optional[Callable] = eqx.field(default=None, static=True)
+    flow_kwargs: dict = eqx.field(default_factory=dict, static=True)
 
     @eqx.filter_jit
     def __call__(self, model, batch, key=None):
@@ -89,7 +93,7 @@ class MaximumLikelihoodLoss(eqx.Module):
 
         if self.selection_protocol is None:
             flow = Flow(bijector, self.base_distribution)
-            return -jnp.mean(_vmap_log_prob(flow, batch, key=key)), {}
+            return -jnp.mean(_vmap_log_prob(flow, batch, key=key, **self.flow_kwargs)), {}
 
         updater = PartialFlowUpdater(bijector, self.base_distribution)
         batch_size = jax.tree.leaves(batch)[0].shape[0]
@@ -98,7 +102,7 @@ class MaximumLikelihoodLoss(eqx.Module):
         def conditional_log_prob(xi, key_i):
             k_sel, k_lp = jax.random.split(key_i)
             mask = self.selection_protocol(k_sel, xi)
-            return updater.log_prob(xi, mask, key=k_lp)
+            return updater.log_prob(xi, mask, key=k_lp, **self.flow_kwargs)
 
         log_probs = jax.vmap(conditional_log_prob)(batch, keys)
         return -jnp.mean(log_probs), {}
@@ -122,12 +126,15 @@ class EnergyBasedLoss(eqx.Module):
         target_distribution: The target distribution with known ``log_prob``.
         make_bijector: Callable ``model → AbstractBijector``.
         selection_protocol: Optional callable ``(key, x) → dynamic_mask``.
+        flow_kwargs: Extra keyword arguments forwarded to
+            ``flow.push_forward_and_log_prob`` on every call.
     """
 
     base_distribution: eqx.Module
     target_distribution: eqx.Module
     make_bijector: Callable = eqx.field(static=True)
     selection_protocol: Optional[Callable] = eqx.field(default=None, static=True)
+    flow_kwargs: dict = eqx.field(default_factory=dict, static=True)
 
     @eqx.filter_jit
     def __call__(self, model, batch, key=None):
@@ -148,7 +155,7 @@ class EnergyBasedLoss(eqx.Module):
         if self.selection_protocol is None:
             flow = Flow(bijector, self.base_distribution)
             x0 = batch
-            x1, logq = _vmap_push_forward_and_log_prob(flow, x0, key=key)
+            x1, logq = _vmap_push_forward_and_log_prob(flow, x0, key=key, **self.flow_kwargs)
             logp = jax.vmap(self.target_distribution.log_prob)(x1)
             return jnp.mean(logq - logp), {}
 
@@ -159,7 +166,7 @@ class EnergyBasedLoss(eqx.Module):
         def energy_single(xi, key_i):
             k_sel, k_rest = jax.random.split(key_i)
             mask = self.selection_protocol(k_sel, xi)
-            x1_i, logq_i = updater.update_and_log_prob(xi, mask, key=k_rest)
+            x1_i, logq_i = updater.update_and_log_prob(xi, mask, key=k_rest, **self.flow_kwargs)
             logp_i = self.target_distribution.log_prob(x1_i)
             return logq_i - logp_i
 
@@ -196,7 +203,15 @@ class KullbackLeiblerLoss(eqx.Module):
     base_distribution: eqx.Module
     alpha: float
 
-    def __init__(self, base_distribution, target_distribution, make_bijector, alpha=0.5, selection_protocol=None):
+    def __init__(
+        self,
+        base_distribution,
+        target_distribution,
+        make_bijector,
+        alpha=0.5,
+        selection_protocol=None,
+        flow_kwargs=None,
+    ):
         """Initialise the hybrid loss.
 
         Args:
@@ -205,10 +220,15 @@ class KullbackLeiblerLoss(eqx.Module):
             make_bijector: Callable ``model → AbstractBijector``.
             alpha: Blending coefficient. 1.0 = pure MLE, 0.0 = pure energy-based.
             selection_protocol: Optional callable ``(key, x) → dynamic_mask``.
+            flow_kwargs: Extra keyword arguments forwarded to the underlying
+                flow methods (e.g. ``{"args": (n_p, n_c)}``).
         """
-        self.mle_loss = MaximumLikelihoodLoss(base_distribution, make_bijector, selection_protocol=selection_protocol)
+        fk = flow_kwargs or {}
+        self.mle_loss = MaximumLikelihoodLoss(
+            base_distribution, make_bijector, selection_protocol=selection_protocol, flow_kwargs=fk
+        )
         self.energy_loss = EnergyBasedLoss(
-            base_distribution, target_distribution, make_bijector, selection_protocol=selection_protocol
+            base_distribution, target_distribution, make_bijector, selection_protocol=selection_protocol, flow_kwargs=fk
         )
         self.base_distribution = base_distribution
         self.alpha = alpha
