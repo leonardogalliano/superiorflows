@@ -347,17 +347,14 @@ class StochasticInterpolantLoss(eqx.Module):
     denoiser_weight: float = eqx.field(static=True)
     _get_velocity: Callable = eqx.field(static=True)
     _get_denoiser: Optional[Callable] = eqx.field(static=True)
-    dynamic_mask: Callable = eqx.field(
-        default=lambda x: jax.tree.map(eqx.is_inexact_array, x),
-        static=True,
-    )
+    dynamic_mask: object = eqx.field(default=None)
     selection_protocol: Optional[Callable] = eqx.field(default=None, static=True)
 
     def __init__(
         self,
         interpolant: Callable,
         gamma: Optional[Callable] = None,
-        dynamic_mask: Optional[Callable] = None,
+        dynamic_mask: Optional[object] = None,
         get_velocity: Optional[Callable] = None,
         get_denoiser: Optional[Callable] = None,
         denoiser_weight: float = 1.0,
@@ -376,9 +373,8 @@ class StochasticInterpolantLoss(eqx.Module):
             gamma: Optional noise schedule ``γ(t)`` operating on scalar ``t``.
                 Must satisfy ``γ(0) = γ(1) = 0`` and ``γ(t) > 0`` for
                 ``t ∈ (0, 1)``. If ``None``, uses the deterministic interpolant.
-            dynamic_mask: Optional callable ``mask(x)`` that returns a pytree
-                of booleans or index arrays. Defaults to
-                ``eqx.is_inexact_array``.
+            dynamic_mask: Optional callable ``mask(x)`` or PyTree mask.
+                Defaults to ``eqx.is_inexact_array``.
             get_velocity: Callable ``model -> velocity_field`` to extract the
                 velocity field from the model. Defaults to identity (the model
                 *is* the velocity field).
@@ -394,9 +390,12 @@ class StochasticInterpolantLoss(eqx.Module):
         self.interpolant = interpolant
         self.gamma = gamma
         if dynamic_mask is not None:
-            self.dynamic_mask = dynamic_mask
+            if callable(dynamic_mask) and not hasattr(dynamic_mask, "__jax_tree_flatten__"):
+                self.dynamic_mask = jax.tree_util.Partial(dynamic_mask)
+            else:
+                self.dynamic_mask = dynamic_mask
         else:
-            self.dynamic_mask = lambda x: jax.tree.map(eqx.is_inexact_array, x)
+            self.dynamic_mask = jax.tree_util.Partial(lambda x: jax.tree.map(eqx.is_inexact_array, x))
         self.selection_protocol = selection_protocol
         self.velocity_kwargs = velocity_kwargs
         self.denoiser_weight = denoiser_weight
