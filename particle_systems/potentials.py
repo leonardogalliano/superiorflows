@@ -175,29 +175,28 @@ CUTOFF_REGISTRY = {
 # ── Builder ─────────────────────────────────────────────────────────────
 
 
-def build_energy_fn(model, box, n_species):
-    """Build a jax-md energy function from a berni model dictionary.
+def _build_pair_terms(model, n_species):
+    """Parse a model dict and build (pair_fn, params) for each potential term.
+
+    Shared setup used by both :func:`build_energy_fn` and
+    :func:`build_masked_energy_fn`.  Does NOT construct displacement or
+    metric functions — those depend on the summation strategy.
 
     Args:
         model: A berni model dict with ``"potential"`` and ``"cutoff"`` keys.
-            Each potential and cutoff entry is paired by index.
-        box: Box side lengths, array of shape ``(d,)`` or scalar.
         n_species: Number of distinct species types.
 
     Returns:
-        A function ``energy_fn(positions, species) -> scalar``
-        computing the total potential energy.
+        List of ``(pair_fn, all_params)`` tuples where ``pair_fn`` is the
+        cutoff-wrapped pair potential and ``all_params`` is a dict of
+        ``(n_species, n_species)`` parameter matrices.
     """
-    displacement_fn, _ = space.periodic(box)
-    metric_fn = space.metric(displacement_fn)
-
     potentials = model["potential"]
     cutoffs = model["cutoff"]
     if len(potentials) != len(cutoffs):
         raise ValueError(f"Number of potentials ({len(potentials)}) must match number of cutoffs ({len(cutoffs)})")
 
-    # Build one smap.pair per potential term
-    term_fns = []
+    terms = []
     for pot_spec, cut_spec in zip(potentials, cutoffs):
         pot_type = pot_spec["type"]
         cut_type = cut_spec["type"]
@@ -255,10 +254,33 @@ def build_energy_fn(model, box, n_species):
                 correction_params["_B"] = B
                 correction_params["_C"] = C
 
-        # Merge all params for smap.pair
+        # Merge all params
         all_params = {**params, **correction_params}
+        terms.append((pair_fn, all_params))
 
-        # smap.pair with dynamic species (species=n_species)
+    return terms
+
+
+def build_energy_fn(model, box, n_species):
+    """Build a jax-md energy function from a berni model dictionary.
+
+    Args:
+        model: A berni model dict with ``"potential"`` and ``"cutoff"`` keys.
+            Each potential and cutoff entry is paired by index.
+        box: Box side lengths, array of shape ``(d,)`` or scalar.
+        n_species: Number of distinct species types.
+
+    Returns:
+        A function ``energy_fn(positions, species) -> scalar``
+        computing the total potential energy.
+    """
+    displacement_fn, _ = space.periodic(box)
+    metric_fn = space.metric(displacement_fn)
+    terms = _build_pair_terms(model, n_species)
+
+    # Build one smap.pair per potential term
+    term_fns = []
+    for pair_fn, all_params in terms:
         energy_term = smap.pair(
             pair_fn,
             metric_fn,
@@ -281,5 +303,47 @@ def build_energy_fn(model, box, n_species):
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*float64.*", category=UserWarning)
             return sum(fn(positions, species=species) for fn in term_fns)
+
+    return energy_fn
+
+
+def build_masked_energy_fn(model, box, n_species):
+    """Build a masked energy function for subsystems with padded particles.
+
+    Like :func:`build_energy_fn`, but returns a function with signature
+    ``energy_fn(positions, species, n_valid) → scalar`` that excludes
+    pairs involving padded particles (index ≥ n_valid) from the sum.
+
+    Uses manual O(M²) pairwise computation with vectorised species-indexed
+    parameter lookup, rather than ``smap.pair``.
+
+    Args:
+        model: A berni model dict.
+        box: Box side lengths, array of shape ``(d,)``.
+        n_species: Number of distinct species types.
+
+    Returns:
+        A function ``energy_fn(positions, species, n_valid) → scalar``.
+    """
+    displacement_fn, _ = space.periodic(box)
+    metric_fn = space.metric(displacement_fn)
+    d_fn = space.map_product(metric_fn)
+    terms = _build_pair_terms(model, n_species)
+
+    def energy_fn(positions, species, n_valid):
+        M = positions.shape[0]
+        dr = d_fn(positions, positions)
+
+        valid = (jnp.arange(M) < n_valid).astype(positions.dtype)
+        pair_mask = valid[:, None] * valid[None, :]
+        diag_mask = 1.0 - jnp.eye(M)
+        mask = pair_mask * diag_mask
+
+        total = jnp.float32(0.0)
+        for pair_fn, params in terms:
+            kw = {k: v[species[:, None], species[None, :]] for k, v in params.items()}
+            u = pair_fn(dr, **kw)
+            total = total + jnp.sum(u * mask)
+        return 0.5 * total
 
     return energy_fn

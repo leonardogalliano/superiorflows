@@ -8,9 +8,8 @@ the conditional target distribution and match the flow's base distribution.
 import jax
 import jax.numpy as jnp
 import numpy as np
-from scipy.optimize import linear_sum_assignment
 
-from particle_systems.particle_system import ParticleSystem
+from particle_systems.particle_system import ParticleSystem, _solve_ot_single
 from particle_systems.patch_updater import GaussianPatchBase
 from particle_systems.selection import random_point_select
 
@@ -52,17 +51,15 @@ class ExtractAndShiftSubsystem:
             shift = center - sel.anchor
             shifted_pos = (sub_pos + shift) % L
 
-            return ParticleSystem(positions=shifted_pos, species=sub_spec, box=x.box)
+            return (ParticleSystem(positions=shifted_pos, species=sub_spec, box=x.box), sel.n_patch, sel.n_context)
 
 
 class CouplePatchBase:
     """Grain transform: Generate base samples for Stochastic Interpolant training.
 
-    Applied **after** batching via ``map_with_index``.  Receives a batched
-    sub-system ``x1_sub`` with positions of shape ``(B, M, d)`` and produces
-    ``(x0, x1)`` where ``x0`` has base-sampled patch DOFs and shared context.
-
-    Returns (x0, x1) where both are batched ParticleSystem sub-systems.
+    Applied **after** batching via ``map_with_index``.  Receives a tuple
+    ``(x1_sub, n_patch, n_context)`` and produces ``(x0, x1, n_patch, n_context)``
+    where ``x0`` has base-sampled patch DOFs and shared context.
     """
 
     def __init__(self, N_patch, d, L, sigma, seed=0):
@@ -78,7 +75,8 @@ class CouplePatchBase:
         )
         self.seed = seed
 
-    def __call__(self, index, x1_sub):
+    def __call__(self, index, batch):
+        x1_sub, n_patch, n_context = batch
         batch_size = x1_sub.positions.shape[0]
 
         with jax.default_device(jax.devices("cpu")[0]):
@@ -90,33 +88,7 @@ class CouplePatchBase:
 
             x0_sub = ParticleSystem(positions=x0_pos, species=x1_sub.species, box=x1_sub.box)
 
-        return (x0_sub, x1_sub)
-
-
-def _solve_ot_patch(pos_0, pos_1, species_0, species_1, box):
-    """Solve species-wise OT for patch particles only."""
-    aligned = np.copy(pos_0)
-    total_cost = 0.0
-
-    for s in np.unique(species_1):
-        idx_0 = np.where(species_0 == s)[0]
-        idx_1 = np.where(species_1 == s)[0]
-
-        if len(idx_0) == 0 or len(idx_1) == 0:
-            continue
-
-        p0_s = pos_0[idx_0]
-        p1_s = pos_1[idx_1]
-
-        delta = p0_s[:, None, :] - p1_s[None, :, :]
-        delta -= box * np.round(delta / box)
-        cost_matrix = np.sum(delta**2, axis=-1)
-
-        row_ind, col_ind = linear_sum_assignment(cost_matrix)
-        aligned[idx_1[col_ind]] = p0_s[row_ind]
-        total_cost += cost_matrix[row_ind, col_ind].sum()
-
-    return aligned, total_cost
+        return (x0_sub, x1_sub, n_patch, n_context)
 
 
 class PatchEquivariantOptimalTransport:
@@ -130,7 +102,7 @@ class PatchEquivariantOptimalTransport:
         self.N_patch = N_patch
 
     def __call__(self, batch):
-        x0, x1 = batch
+        x0, x1, n_patch, n_context = batch
 
         pos_0 = np.asarray(x0.positions)
         pos_1 = np.asarray(x1.positions)
@@ -146,8 +118,8 @@ class PatchEquivariantOptimalTransport:
             p1_patch = pos_1[i, : self.N_patch]
             spec_patch = species[i, : self.N_patch]
 
-            aligned_patch, _ = _solve_ot_patch(p0_patch, p1_patch, spec_patch, spec_patch, box[i])
+            aligned_patch, _ = _solve_ot_single(p0_patch, p1_patch, spec_patch, spec_patch, box[i])
             aligned_positions[i, : self.N_patch] = aligned_patch
 
         x0_aligned = ParticleSystem(positions=jnp.asarray(aligned_positions), species=x0.species, box=x0.box)
-        return (x0_aligned, x1)
+        return (x0_aligned, x1, n_patch, n_context)

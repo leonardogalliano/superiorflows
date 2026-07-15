@@ -107,9 +107,10 @@ class BoltzmannDistribution(eqx.Module):
     temperature: float = eqx.field(static=True)
     model: dict = eqx.field(static=True)
     _energy_fn: object = eqx.field(static=True)
+    _masked_energy_fn: object = eqx.field(static=True)
 
     def __init__(self, N, d, L, temperature, model, composition):
-        from particle_systems.potentials import build_energy_fn
+        from particle_systems.potentials import build_energy_fn, build_masked_energy_fn
 
         self.N = N
         self.d = d
@@ -119,6 +120,7 @@ class BoltzmannDistribution(eqx.Module):
         n_species = len(composition)
         box = jnp.ones(d) * self.L
         self._energy_fn = build_energy_fn(model, box, n_species)
+        self._masked_energy_fn = build_masked_energy_fn(model, box, n_species)
 
     @property
     def event_shape(self):
@@ -131,17 +133,22 @@ class BoltzmannDistribution(eqx.Module):
     def sample(self, key):
         raise NotImplementedError("Cannot sample from Boltzmann distribution.")
 
-    def log_prob(self, value: ParticleSystem):
+    def log_prob(self, value: ParticleSystem, **kwargs):
         """Unnormalised log-probability: -U(x) / T.
 
         Args:
             value: A ``ParticleSystem``.
+            **kwargs: Optional. Pass ``n_valid=`` to use the masked energy
+                function that excludes padded particles.
 
         Returns:
             Scalar unnormalised log-probability.
         """
         positions = jnp.asarray(value.positions)
         species = jnp.asarray(value.species)
+        n_valid = kwargs.get("n_valid")
+        if n_valid is not None:
+            return -self._masked_energy_fn(positions, species, n_valid) / self.temperature
         return -self._energy_fn(positions, species) / self.temperature
 
 

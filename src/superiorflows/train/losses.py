@@ -33,6 +33,39 @@ def _pack_args(ctx, index_meta, user_args=None):
     return (ctx, (index_meta, user_args)) if user_args is not None else (ctx, index_meta)
 
 
+def _split_batch_metadata(batch):
+    """Separate a single-element batch from trailing per-sample metadata.
+
+    Supports two conventions:
+
+    * Standard: ``batch = pytree``  →  ``(pytree, None)``
+    * Extended: ``batch = (pytree, meta_0, meta_1, ...)``  →  ``(pytree, (meta_0, meta_1, ...))``
+
+    The extended format is detected when ``batch`` is a tuple of length ≥ 3
+    and the second element has a ``.shape`` attribute (i.e. it is an array,
+    not a pytree).  This heuristic avoids false positives for normal pytree
+    tuples.
+    """
+    if isinstance(batch, tuple) and len(batch) >= 3:
+        candidate = batch[1]
+        if hasattr(candidate, "shape") and hasattr(batch[2], "shape"):
+            return batch[0], tuple(batch[1:])
+    return batch, None
+
+
+def _split_paired_batch_metadata(batch):
+    """Separate a paired-element batch from trailing per-sample metadata.
+
+    Supports two conventions:
+
+    * Standard: ``batch = (x0, x1)``  →  ``(x0, x1, None)``
+    * Extended: ``batch = (x0, x1, meta_0, ...)``  →  ``(x0, x1, (meta_0, ...))``
+    """
+    if len(batch) > 2:
+        return batch[0], batch[1], tuple(batch[2:])
+    return batch[0], batch[1], None
+
+
 __all__ = [
     "MaximumLikelihoodLoss",
     "EnergyBasedLoss",
@@ -81,7 +114,8 @@ class MaximumLikelihoodLoss(eqx.Module):
 
         Args:
             model: The trainable model (e.g., velocity field for a CNF).
-            batch: Target samples with shape ``(batch_size, *event_shape)``.
+            batch: Target samples, or a tuple ``(samples, n_patch, n_context)``
+                for patch training with per-sample velocity args.
             key: Optional PRNG key (e.g., for Hutchinson estimator).
                 **Required** when ``selection_protocol`` is set.
 
@@ -90,13 +124,26 @@ class MaximumLikelihoodLoss(eqx.Module):
             ``aux`` is a dict of per-component metrics (empty here).
         """
         bijector = self.make_bijector(model)
+        samples, per_sample_args = _split_batch_metadata(batch)
 
         if self.selection_protocol is None:
             flow = Flow(bijector, self.base_distribution)
-            return -jnp.mean(_vmap_log_prob(flow, batch, key=key, **self.flow_kwargs)), {}
+            if per_sample_args is None:
+                return -jnp.mean(_vmap_log_prob(flow, samples, key=key, **self.flow_kwargs)), {}
+
+            fk = {k: v for k, v in self.flow_kwargs.items() if k != "args"}
+            batch_size = jax.tree.leaves(samples)[0].shape[0]
+            if key is not None:
+                keys = jax.random.split(key, batch_size)
+                log_probs = jax.vmap(lambda xi, ki, *a: flow.log_prob(xi, key=ki, args=a, **fk))(
+                    samples, keys, *per_sample_args
+                )
+            else:
+                log_probs = jax.vmap(lambda xi, *a: flow.log_prob(xi, args=a, **fk))(samples, *per_sample_args)
+            return -jnp.mean(log_probs), {}
 
         updater = PartialFlowUpdater(bijector, self.base_distribution)
-        batch_size = jax.tree.leaves(batch)[0].shape[0]
+        batch_size = jax.tree.leaves(samples)[0].shape[0]
         keys = jax.random.split(key, batch_size)
 
         def conditional_log_prob(xi, key_i):
@@ -104,7 +151,7 @@ class MaximumLikelihoodLoss(eqx.Module):
             mask = self.selection_protocol(k_sel, xi)
             return updater.log_prob(xi, mask, key=k_lp, **self.flow_kwargs)
 
-        log_probs = jax.vmap(conditional_log_prob)(batch, keys)
+        log_probs = jax.vmap(conditional_log_prob)(samples, keys)
         return -jnp.mean(log_probs), {}
 
 
@@ -142,8 +189,8 @@ class EnergyBasedLoss(eqx.Module):
 
         Args:
             model: The trainable model.
-            batch: Base distribution samples (or full states when
-                ``selection_protocol`` is set).
+            batch: Base distribution samples, or a tuple
+                ``(samples, n_patch, n_context)`` for patch training.
             key: Optional PRNG key.  **Required** when
                 ``selection_protocol`` is set.
 
@@ -151,16 +198,37 @@ class EnergyBasedLoss(eqx.Module):
             Tuple ``(loss, aux)``.
         """
         bijector = self.make_bijector(model)
+        samples, per_sample_args = _split_batch_metadata(batch)
 
         if self.selection_protocol is None:
             flow = Flow(bijector, self.base_distribution)
-            x0 = batch
-            x1, logq = _vmap_push_forward_and_log_prob(flow, x0, key=key, **self.flow_kwargs)
-            logp = jax.vmap(self.target_distribution.log_prob)(x1)
+            if per_sample_args is None:
+                x0 = samples
+                x1, logq = _vmap_push_forward_and_log_prob(flow, x0, key=key, **self.flow_kwargs)
+                logp = jax.vmap(self.target_distribution.log_prob)(x1)
+                return jnp.mean(logq - logp), {}
+
+            fk = {k: v for k, v in self.flow_kwargs.items() if k != "args"}
+            n_patch, n_context = per_sample_args
+            x0 = samples
+
+            if key is not None:
+                batch_size = jax.tree.leaves(x0)[0].shape[0]
+                keys = jax.random.split(key, batch_size)
+                x1, logq = jax.vmap(
+                    lambda xi, ki, np_, nc: flow.push_forward_and_log_prob(xi, key=ki, args=(np_, nc), **fk)
+                )(x0, keys, n_patch, n_context)
+            else:
+                x1, logq = jax.vmap(lambda xi, np_, nc: flow.push_forward_and_log_prob(xi, args=(np_, nc), **fk))(
+                    x0, n_patch, n_context
+                )
+
+            n_valid = n_patch + n_context
+            logp = jax.vmap(lambda xi, nv: self.target_distribution.log_prob(xi, n_valid=nv))(x1, n_valid)
             return jnp.mean(logq - logp), {}
 
         updater = PartialFlowUpdater(bijector, self.base_distribution)
-        batch_size = jax.tree.leaves(batch)[0].shape[0]
+        batch_size = jax.tree.leaves(samples)[0].shape[0]
         keys = jax.random.split(key, batch_size)
 
         def energy_single(xi, key_i):
@@ -170,7 +238,7 @@ class EnergyBasedLoss(eqx.Module):
             logp_i = self.target_distribution.log_prob(x1_i)
             return logq_i - logp_i
 
-        per_sample = jax.vmap(energy_single)(batch, keys)
+        per_sample = jax.vmap(energy_single)(samples, keys)
         return jnp.mean(per_sample), {}
 
 
@@ -239,24 +307,28 @@ class KullbackLeiblerLoss(eqx.Module):
 
         Args:
             model: The trainable model.
-            batch: Target distribution samples.
+            batch: Target distribution samples, or a tuple
+                ``(samples, n_patch, n_context)`` for patch training.
             key: PRNG key (required for internal sampling).
 
         Returns:
             Tuple ``(loss, aux)``.
         """
-        x1 = batch
-        batch_size = jax.tree.leaves(batch)[0].shape[0]
+        samples, per_sample_args = _split_batch_metadata(batch)
+        batch_size = jax.tree.leaves(samples)[0].shape[0]
         key1, key2, key3 = jax.random.split(key, 3)
-        mle_term, _ = self.mle_loss(model, x1, key=key2)
+        mle_term, _ = self.mle_loss(model, batch, key=key2)
 
         if self.mle_loss.selection_protocol is not None:
-            # In partial update mode, target samples x1 act as the context templates
-            energy_term, _ = self.energy_loss(model, x1, key=key3)
+            energy_term, _ = self.energy_loss(model, batch, key=key3)
         else:
             keys = jax.random.split(key1, batch_size)
             x0 = jax.vmap(self.base_distribution.sample)(keys)
-            energy_term, _ = self.energy_loss(model, x0, key=key3)
+            if per_sample_args is not None:
+                energy_batch = (x0, *per_sample_args)
+            else:
+                energy_batch = x0
+            energy_term, _ = self.energy_loss(model, energy_batch, key=key3)
 
         return self.alpha * mle_term + (1 - self.alpha) * energy_term, {}
 
@@ -449,8 +521,10 @@ class StochasticInterpolantLoss(eqx.Module):
                 ``None``, this is the velocity field itself. When a denoiser
                 is configured, the velocity and denoiser are extracted via
                 the accessor callables provided at init.
-            batch: A tuple ``(x0, x1)`` of paired samples. Each element
-                is a pytree whose leaves have a leading batch dimension.
+            batch: A tuple ``(x0, x1)`` of paired samples, or
+                ``(x0, x1, n_patch, n_context)`` for patch training with
+                per-sample velocity args. Each element is a pytree whose
+                leaves have a leading batch dimension.
             key: PRNG key for sampling ``t`` and (optionally) ``z``.
 
         Returns:
@@ -458,13 +532,13 @@ class StochasticInterpolantLoss(eqx.Module):
             is a dict. When a denoiser is active, ``aux`` contains
             ``{"velocity_loss": ..., "denoiser_loss": ...}``.
         """
-        x0, x1 = batch
+        x0, x1, per_sample_args = _split_paired_batch_metadata(batch)
         batch_size = jax.tree.leaves(x0)[0].shape[0]
 
         key1, key2, key_sel = jax.random.split(key, 3)
         t = jax.random.uniform(key1, (batch_size,))
 
-        user_args = self.velocity_kwargs.get("args")
+        user_args = per_sample_args if per_sample_args is not None else self.velocity_kwargs.get("args")
         velocity_field = self._get_velocity(model)
 
         use_per_sample_mask = self.selection_protocol is not None
@@ -479,22 +553,44 @@ class StochasticInterpolantLoss(eqx.Module):
 
     def _call_deterministic(self, t, x0, x1, velocity_field, user_args, sel_keys):
         """Deterministic interpolant (no noise)."""
+        is_per_sample = (
+            user_args is not None
+            and isinstance(user_args, tuple)
+            and hasattr(user_args[0], "ndim")
+            and user_args[0].ndim > 0
+        )
 
         if sel_keys is None:
+            if is_per_sample:
 
-            def _sample_loss(ti, x0i, x1i):
-                y0i, ctxi, spec_i = state_context_partition(x0i, self.dynamic_mask)
-                y1i, _, _ = state_context_partition(x1i, self.dynamic_mask)
+                def _sample_loss(ti, x0i, x1i, *ua_i):
+                    y0i, ctxi, spec_i = state_context_partition(x0i, self.dynamic_mask)
+                    y1i, _, _ = state_context_partition(x1i, self.dynamic_mask)
 
-                yt = self.interpolant(ti, y0i, y1i)
-                target = self.dt_interpolant(ti, y0i, y1i)
+                    yt = self.interpolant(ti, y0i, y1i)
+                    target = self.dt_interpolant(ti, y0i, y1i)
 
-                index_meta = spec_i.index_meta if isinstance(spec_i, PartitionSpec) else None
-                pred = velocity_field(ti, yt, _pack_args(ctxi, index_meta, user_args))
-                sq_res = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), pred, target))
-                return sum(sq_res)
+                    index_meta = spec_i.index_meta if isinstance(spec_i, PartitionSpec) else None
+                    pred = velocity_field(ti, yt, _pack_args(ctxi, index_meta, ua_i))
+                    sq_res = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), pred, target))
+                    return sum(sq_res)
 
-            per_sample = jax.vmap(_sample_loss)(t, x0, x1)
+                per_sample = jax.vmap(_sample_loss)(t, x0, x1, *user_args)
+            else:
+
+                def _sample_loss(ti, x0i, x1i):
+                    y0i, ctxi, spec_i = state_context_partition(x0i, self.dynamic_mask)
+                    y1i, _, _ = state_context_partition(x1i, self.dynamic_mask)
+
+                    yt = self.interpolant(ti, y0i, y1i)
+                    target = self.dt_interpolant(ti, y0i, y1i)
+
+                    index_meta = spec_i.index_meta if isinstance(spec_i, PartitionSpec) else None
+                    pred = velocity_field(ti, yt, _pack_args(ctxi, index_meta, user_args))
+                    sq_res = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), pred, target))
+                    return sum(sq_res)
+
+                per_sample = jax.vmap(_sample_loss)(t, x0, x1)
         else:
 
             def _sample_loss(ti, x0i, x1i, sel_key_i):
@@ -516,6 +612,12 @@ class StochasticInterpolantLoss(eqx.Module):
 
     def _call_gamma(self, t, x0, x1, key2, velocity_field, user_args, sel_keys):
         """Noisy interpolant without denoiser."""
+        is_per_sample = (
+            user_args is not None
+            and isinstance(user_args, tuple)
+            and hasattr(user_args[0], "ndim")
+            and user_args[0].ndim > 0
+        )
 
         if sel_keys is None:
             y0, ctx, spec = state_context_partition(x0, self.dynamic_mask)
@@ -530,20 +632,38 @@ class StochasticInterpolantLoss(eqx.Module):
 
             index_meta = spec.index_meta if isinstance(spec, PartitionSpec) else None
 
-            def _sample_loss(ti, y0i, y1i, ctxi, zi):
-                interp = self.interpolant(ti, y0i, y1i)
-                gamma_t = self.gamma(ti)
-                yt = jax.tree.map(lambda i, zp: i + gamma_t * zp, interp, zi)
+            if is_per_sample:
 
-                dt_interp = self.dt_interpolant(ti, y0i, y1i)
-                dt_gamma_t = self.dt_gamma(ti)
-                target = jax.tree.map(lambda d, zp: d + dt_gamma_t * zp, dt_interp, zi)
+                def _sample_loss(ti, y0i, y1i, ctxi, zi, *ua_i):
+                    interp = self.interpolant(ti, y0i, y1i)
+                    gamma_t = self.gamma(ti)
+                    yt = jax.tree.map(lambda i, zp: i + gamma_t * zp, interp, zi)
 
-                pred = velocity_field(ti, yt, _pack_args(ctxi, index_meta, user_args))
-                sq_res = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), pred, target))
-                return sum(sq_res)
+                    dt_interp = self.dt_interpolant(ti, y0i, y1i)
+                    dt_gamma_t = self.dt_gamma(ti)
+                    target = jax.tree.map(lambda d, zp: d + dt_gamma_t * zp, dt_interp, zi)
 
-            per_sample = jax.vmap(_sample_loss)(t, y0, y1, ctx, z)
+                    pred = velocity_field(ti, yt, _pack_args(ctxi, index_meta, ua_i))
+                    sq_res = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), pred, target))
+                    return sum(sq_res)
+
+                per_sample = jax.vmap(_sample_loss)(t, y0, y1, ctx, z, *user_args)
+            else:
+
+                def _sample_loss(ti, y0i, y1i, ctxi, zi):
+                    interp = self.interpolant(ti, y0i, y1i)
+                    gamma_t = self.gamma(ti)
+                    yt = jax.tree.map(lambda i, zp: i + gamma_t * zp, interp, zi)
+
+                    dt_interp = self.dt_interpolant(ti, y0i, y1i)
+                    dt_gamma_t = self.dt_gamma(ti)
+                    target = jax.tree.map(lambda d, zp: d + dt_gamma_t * zp, dt_interp, zi)
+
+                    pred = velocity_field(ti, yt, _pack_args(ctxi, index_meta, user_args))
+                    sq_res = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), pred, target))
+                    return sum(sq_res)
+
+                per_sample = jax.vmap(_sample_loss)(t, y0, y1, ctx, z)
         else:
 
             def _sample_loss(ti, x0i, x1i, sel_key_i, noise_key_i):
@@ -579,6 +699,12 @@ class StochasticInterpolantLoss(eqx.Module):
 
     def _call_gamma_denoiser(self, t, x0, x1, key2, velocity_field, denoiser, user_args, sel_keys):
         """Noisy interpolant with denoiser."""
+        is_per_sample = (
+            user_args is not None
+            and isinstance(user_args, tuple)
+            and hasattr(user_args[0], "ndim")
+            and user_args[0].ndim > 0
+        )
 
         if sel_keys is None:
             y0, ctx, spec = state_context_partition(x0, self.dynamic_mask)
@@ -593,26 +719,50 @@ class StochasticInterpolantLoss(eqx.Module):
 
             index_meta = spec.index_meta if isinstance(spec, PartitionSpec) else None
 
-            def _sample_loss(ti, y0i, y1i, ctxi, zi):
-                interp = self.interpolant(ti, y0i, y1i)
-                gamma_t = self.gamma(ti)
-                yt = jax.tree.map(lambda i, zp: i + gamma_t * zp, interp, zi)
+            if is_per_sample:
 
-                dt_interp = self.dt_interpolant(ti, y0i, y1i)
-                dt_gamma_t = self.dt_gamma(ti)
-                vel_target = jax.tree.map(lambda d, zp: d + dt_gamma_t * zp, dt_interp, zi)
+                def _sample_loss(ti, y0i, y1i, ctxi, zi, *ua_i):
+                    interp = self.interpolant(ti, y0i, y1i)
+                    gamma_t = self.gamma(ti)
+                    yt = jax.tree.map(lambda i, zp: i + gamma_t * zp, interp, zi)
 
-                args_i = _pack_args(ctxi, index_meta, user_args)
+                    dt_interp = self.dt_interpolant(ti, y0i, y1i)
+                    dt_gamma_t = self.dt_gamma(ti)
+                    vel_target = jax.tree.map(lambda d, zp: d + dt_gamma_t * zp, dt_interp, zi)
 
-                v_pred = velocity_field(ti, yt, args_i)
-                vel_sq = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), v_pred, vel_target))
+                    args_i = _pack_args(ctxi, index_meta, ua_i)
 
-                eta_pred = denoiser(ti, yt, args_i)
-                den_sq = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), eta_pred, zi))
+                    v_pred = velocity_field(ti, yt, args_i)
+                    vel_sq = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), v_pred, vel_target))
 
-                return sum(vel_sq), sum(den_sq)
+                    eta_pred = denoiser(ti, yt, args_i)
+                    den_sq = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), eta_pred, zi))
 
-            vel_per_sample, den_per_sample = jax.vmap(_sample_loss)(t, y0, y1, ctx, z)
+                    return sum(vel_sq), sum(den_sq)
+
+                vel_per_sample, den_per_sample = jax.vmap(_sample_loss)(t, y0, y1, ctx, z, *user_args)
+            else:
+
+                def _sample_loss(ti, y0i, y1i, ctxi, zi):
+                    interp = self.interpolant(ti, y0i, y1i)
+                    gamma_t = self.gamma(ti)
+                    yt = jax.tree.map(lambda i, zp: i + gamma_t * zp, interp, zi)
+
+                    dt_interp = self.dt_interpolant(ti, y0i, y1i)
+                    dt_gamma_t = self.dt_gamma(ti)
+                    vel_target = jax.tree.map(lambda d, zp: d + dt_gamma_t * zp, dt_interp, zi)
+
+                    args_i = _pack_args(ctxi, index_meta, user_args)
+
+                    v_pred = velocity_field(ti, yt, args_i)
+                    vel_sq = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), v_pred, vel_target))
+
+                    eta_pred = denoiser(ti, yt, args_i)
+                    den_sq = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), eta_pred, zi))
+
+                    return sum(vel_sq), sum(den_sq)
+
+                vel_per_sample, den_per_sample = jax.vmap(_sample_loss)(t, y0, y1, ctx, z)
         else:
 
             def _sample_loss(ti, x0i, x1i, sel_key_i, noise_key_i):
