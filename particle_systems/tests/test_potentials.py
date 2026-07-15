@@ -296,6 +296,24 @@ def test_build_energy_fn_smooth_jbb():
     assert jnp.isfinite(U)
 
 
+def test_energy_gerhard_reference():
+    """Verify potential energy on Gerhard's JBB reference configuration."""
+    from pathlib import Path
+
+    from particle_systems.particle_system import TrajectoryDataSource
+
+    data_path = Path(__file__).parent.parent / "data" / "gerhard.xyz"
+    source = TrajectoryDataSource(data_path)
+    system = source[0]
+
+    # GERHARD reference energy per particle: -2.676832
+    energy_fn = build_energy_fn(JBB_MODEL, system.box, n_species=3)
+    U = energy_fn(system.positions, system.species)
+    energy_per_particle = U / system.N
+
+    assert jnp.allclose(energy_per_particle, -2.676832, atol=1e-6)
+
+
 def test_energy_fn_jit_compatible():
     """Energy function should work under jax.jit."""
     L = 5.0
