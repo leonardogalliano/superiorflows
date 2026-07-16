@@ -146,12 +146,17 @@ class MaximumLikelihoodLoss(eqx.Module):
         batch_size = jax.tree.leaves(samples)[0].shape[0]
         keys = jax.random.split(key, batch_size)
 
-        def conditional_log_prob(xi, key_i):
+        def conditional_log_prob(xi, key_i, *ua_i):
             k_sel, k_lp = jax.random.split(key_i)
             mask = self.selection_protocol(k_sel, xi)
+            if ua_i:
+                return updater.log_prob(xi, mask, key=k_lp, args=ua_i, **self.flow_kwargs)
             return updater.log_prob(xi, mask, key=k_lp, **self.flow_kwargs)
 
-        log_probs = jax.vmap(conditional_log_prob)(samples, keys)
+        if per_sample_args is not None:
+            log_probs = jax.vmap(conditional_log_prob)(samples, keys, *per_sample_args)
+        else:
+            log_probs = jax.vmap(conditional_log_prob)(samples, keys)
         return -jnp.mean(log_probs), {}
 
 
@@ -231,14 +236,20 @@ class EnergyBasedLoss(eqx.Module):
         batch_size = jax.tree.leaves(samples)[0].shape[0]
         keys = jax.random.split(key, batch_size)
 
-        def energy_single(xi, key_i):
+        def energy_single(xi, key_i, *ua_i):
             k_sel, k_rest = jax.random.split(key_i)
             mask = self.selection_protocol(k_sel, xi)
-            x1_i, logq_i = updater.update_and_log_prob(xi, mask, key=k_rest, **self.flow_kwargs)
+            if ua_i:
+                x1_i, logq_i = updater.update_and_log_prob(xi, mask, key=k_rest, args=ua_i, **self.flow_kwargs)
+            else:
+                x1_i, logq_i = updater.update_and_log_prob(xi, mask, key=k_rest, **self.flow_kwargs)
             logp_i = self.target_distribution.log_prob(x1_i)
             return logq_i - logp_i
 
-        per_sample = jax.vmap(energy_single)(samples, keys)
+        if per_sample_args is not None:
+            per_sample = jax.vmap(energy_single)(samples, keys, *per_sample_args)
+        else:
+            per_sample = jax.vmap(energy_single)(samples, keys)
         return jnp.mean(per_sample), {}
 
 

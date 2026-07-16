@@ -124,7 +124,11 @@ class PatchEGNNVelocity(eqx.Module):
             for each patch particle, shape ``(N_patch, d)``, and
             ``species=None``, ``box=None``.
         """
-        ctx, (_, user_args) = args
+        ctx, extra = args
+        if isinstance(extra, tuple) and len(extra) == 2 and isinstance(extra[1], tuple):
+            _, user_args = extra
+        else:
+            user_args = extra
         n_patch, n_context = user_args
 
         patch_pos = x_dyn.positions

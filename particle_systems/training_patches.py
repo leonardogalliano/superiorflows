@@ -41,8 +41,9 @@ from particle_systems.training_particles import (
     build_schedule_fn,
     merge_config,
 )
-from particle_systems.velocities import ParticlesEGNNVelocity, ParticlesMLPVelocity
+from particle_systems.velocities.conditional_egnn import PatchEGNNVelocity
 from superiorflows import ODEBijector
+from superiorflows.partial import fixed_selection
 from superiorflows.train import (
     CheckpointCallback,
     EnergyBasedLoss,
@@ -133,19 +134,18 @@ DEFAULT_CONFIG = {
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 VELOCITY_REGISTRY = {
-    "mlp": ParticlesMLPVelocity,
-    "egnn": ParticlesEGNNVelocity,
+    "egnn": PatchEGNNVelocity,
 }
 
 
-def build_velocity_patch(config: dict, M: int, d: int, n_species: int, *, key):
-    """Instantiate a velocity field for subsystems of size M (padded total)."""
+def build_velocity_patch(config: dict, N_patch: int, N_context: int, d: int, n_species: int, *, key):
+    """Instantiate a PatchEGNNVelocity for subsystems of N_patch + N_context particles."""
     vtype = config["velocity"]["type"]
     cls = VELOCITY_REGISTRY.get(vtype)
     if cls is None:
         raise ValueError(f"Unknown velocity type '{vtype}'. Available: {list(VELOCITY_REGISTRY)}")
     kwargs = config["velocity"].get("kwargs", {})
-    return cls(N=M, d=d, n_species=n_species, **kwargs, key=key)
+    return cls(N_patch=N_patch, N_context=N_context, d=d, n_species=n_species, **kwargs, key=key)
 
 
 def build_solver_patch(config: dict) -> dict:
@@ -165,7 +165,7 @@ def build_solver_patch(config: dict) -> dict:
     slv = solvers[stype]()
 
     bijector_kwargs: dict[str, Any] = dict(
-        dynamic_mask=ParticleSystem.get_dynamic_mask(),
+        dynamic_mask=ParticleSystem(positions=jnp.arange(config["patch"]["N_patch"]), species=False, box=False),
         solver=slv,
         augmented_solver=slv,
     )
@@ -250,6 +250,10 @@ def train_single_model(config: dict):
         seed=seed,
     )
 
+    # Fixed selection protocol for Energy-Based Loss
+    mask = ParticleSystem(positions=jnp.arange(N_patch), species=False, box=False)
+    selection_protocol = fixed_selection(mask)
+
     # Solver configuration
     bijector_kwargs = build_solver_patch(config)
 
@@ -285,10 +289,11 @@ def train_single_model(config: dict):
         si_kwargs = {k: v for k, v in bijector_kwargs.items() if k in ("dynamic_mask",)}
         loss_fn = StochasticInterpolantLoss(interpolant=interpolant, gamma=gamma_fn, **si_kwargs)
         dataset = (
-            source.to_dataset(batch_size=1, shuffle=True, seed=seed)
-            .map_with_index(extract_transform)
-            .batch(batch_size)
+            grain.MapDataset.source(source)
+            .shuffle(seed=seed)
             .repeat()
+            .map_with_index(extract_transform)
+            .batch(batch_size, drop_remainder=True)
             .map_with_index(CouplePatchBase(N_patch=N_patch, d=d, L=L, sigma=sigma_base, seed=seed))
         )
         if use_ot:
@@ -300,12 +305,14 @@ def train_single_model(config: dict):
                 center=jnp.full((d,), L / 2.0), sigma=sigma_base, N_patch=N_patch, d=d, L=L
             ),
             make_bijector=make_bijector,
+            selection_protocol=selection_protocol,
         )
         dataset = (
-            source.to_dataset(batch_size=1, shuffle=True, seed=seed)
-            .map_with_index(extract_transform)
-            .batch(batch_size)
+            grain.MapDataset.source(source)
+            .shuffle(seed=seed)
             .repeat()
+            .map_with_index(extract_transform)
+            .batch(batch_size, drop_remainder=True)
         )
 
     elif loss_type == "energy_based":
@@ -316,12 +323,14 @@ def train_single_model(config: dict):
             base_distribution=base_dist,
             target_distribution=target_dist,
             make_bijector=make_bijector,
+            selection_protocol=selection_protocol,
         )
         dataset = (
-            source.to_dataset(batch_size=1, shuffle=True, seed=seed)
-            .map_with_index(extract_transform)
-            .batch(batch_size)
+            grain.MapDataset.source(source)
+            .shuffle(seed=seed)
             .repeat()
+            .map_with_index(extract_transform)
+            .batch(batch_size, drop_remainder=True)
         )
 
     elif loss_type == "hybrid":
@@ -333,12 +342,14 @@ def train_single_model(config: dict):
             target_distribution=target_dist,
             make_bijector=make_bijector,
             alpha=0.5,
+            selection_protocol=selection_protocol,
         )
         dataset = (
-            source.to_dataset(batch_size=1, shuffle=True, seed=seed)
-            .map_with_index(extract_transform)
-            .batch(batch_size)
+            grain.MapDataset.source(source)
+            .shuffle(seed=seed)
             .repeat()
+            .map_with_index(extract_transform)
+            .batch(batch_size, drop_remainder=True)
         )
     else:
         raise ValueError(
@@ -348,7 +359,7 @@ def train_single_model(config: dict):
 
     # Model
     key, model_key = jax.random.split(key)
-    model = build_velocity_patch(config, M_total, d, n_species, key=model_key)
+    model = build_velocity_patch(config, N_patch, N_context, d, n_species, key=model_key)
     num_params = sum(x.size for x in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_inexact_array)))
 
     # Optimizer
@@ -358,18 +369,18 @@ def train_single_model(config: dict):
     read_options_val = grain.ReadOptions(num_threads=1, prefetch_buffer_size=1)
     if loss_type == "stochastic_interpolant":
         val_ds = (
-            source.to_dataset(batch_size=1, shuffle=False, seed=seed + 1)
+            grain.MapDataset.source(source)
             .map_with_index(ExtractAndShiftSubsystem(N_patch, N_context, r_patch, r_context, sigma_r, seed=seed + 1))
-            .batch(batch_size)
+            .batch(batch_size, drop_remainder=True)
             .map_with_index(CouplePatchBase(N_patch=N_patch, d=d, L=L, sigma=sigma_base, seed=seed + 1))
         )
         if use_ot:
             val_ds = val_ds.map(PatchEquivariantOptimalTransport(N_patch=N_patch))
     else:
         val_ds = (
-            source.to_dataset(batch_size=1, shuffle=False, seed=seed + 1)
+            grain.MapDataset.source(source)
             .map_with_index(ExtractAndShiftSubsystem(N_patch, N_context, r_patch, r_context, sigma_r, seed=seed + 1))
-            .batch(batch_size)
+            .batch(batch_size, drop_remainder=True)
         )
     val_batch = next(iter(val_ds.to_iter_dataset(read_options_val)))
     val_data = [val_batch]
