@@ -22,7 +22,13 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-__all__ = ["SelectionResult", "torus_distances_from_point", "random_point_select", "soft_log_pi_ratio"]
+__all__ = [
+    "SelectionResult",
+    "torus_distances_from_point",
+    "random_point_select",
+    "soft_log_pi_ratio",
+    "check_patch_remainder_separation",
+]
 
 
 class SelectionResult(NamedTuple):
@@ -204,11 +210,16 @@ def soft_log_pi_ratio(dists_before, dists_after, patch_idx, context_idx, n_patch
     ctx_d = jnp.where(jnp.arange(context_idx.shape[0]) < n_context, dists_before[context_idx], jnp.inf)
     r_high = jnp.min(ctx_d)
 
+    is_patch_full = n_patch == patch_idx.shape[0]
+    z_high = jnp.where(is_patch_full, jnp.inf, (r_high - r_mean) / sigma_r)
+
+    valid_order = jnp.where(is_patch_full, (r_low < r_high) & (r_low_new < r_high), True)
+
     z_low = (r_low - r_mean) / sigma_r
     z_low_new = (r_low_new - r_mean) / sigma_r
-    z_high = (r_high - r_mean) / sigma_r
 
-    return _log_cdf_diff(z_low_new, z_high) - _log_cdf_diff(z_low, z_high)
+    log_ratio = _log_cdf_diff(z_low_new, z_high) - _log_cdf_diff(z_low, z_high)
+    return jnp.where(valid_order, log_ratio, -jnp.inf)
 
 
 def _hard_log_ratio(dists_after, patch_idx, n_patch, r_mean):
@@ -216,3 +227,51 @@ def _hard_log_ratio(dists_after, patch_idx, n_patch, r_mean):
     patch_d = jnp.where(jnp.arange(patch_idx.shape[0]) < n_patch, dists_after[patch_idx], -jnp.inf)
     all_in = jnp.max(patch_d) < r_mean
     return jnp.where(all_in, 0.0, -jnp.inf)
+
+
+def check_patch_remainder_separation(
+    pos_all: jax.Array,
+    pos_patch_new: jax.Array,
+    patch_idx: jax.Array,
+    context_idx: jax.Array,
+    n_patch: int,
+    n_context: int,
+    box: jax.Array,
+    r_cut: float,
+) -> jax.Array:
+    """Check if all valid patch particles (both before and after the move)
+    are strictly further than r_cut from all remainder particles.
+
+    Returns:
+        Scalar boolean array: True if min distance > r_cut, False otherwise.
+    """
+    N = pos_all.shape[0]
+    N_patch = patch_idx.shape[0]
+    N_context = context_idx.shape[0]
+
+    valid_patch_mask = jnp.arange(N_patch) < n_patch
+    valid_ctx_mask = jnp.arange(N_context) < n_context
+
+    is_patch = jnp.any((jnp.arange(N)[:, None] == patch_idx[None, :]) & valid_patch_mask[None, :], axis=1)
+    is_context = jnp.any((jnp.arange(N)[:, None] == context_idx[None, :]) & valid_ctx_mask[None, :], axis=1)
+    is_remainder = ~(is_patch | is_context)
+
+    pos_patch_old = pos_all[patch_idx]
+
+    # Manual vectorized min-image distance (faster than map_product here)
+    # Old patch distances
+    diff_old = pos_patch_old[:, None, :] - pos_all[None, :, :]
+    diff_old = diff_old - jnp.round(diff_old / box) * box
+    dists_old = jnp.sqrt(jnp.sum(diff_old**2, axis=-1))
+
+    valid_dists_old = jnp.where(valid_patch_mask[:, None] & is_remainder[None, :], dists_old, jnp.inf)
+
+    # New patch distances
+    diff_new = pos_patch_new[:, None, :] - pos_all[None, :, :]
+    diff_new = diff_new - jnp.round(diff_new / box) * box
+    dists_new = jnp.sqrt(jnp.sum(diff_new**2, axis=-1))
+
+    valid_dists_new = jnp.where(valid_patch_mask[:, None] & is_remainder[None, :], dists_new, jnp.inf)
+
+    min_dist = jnp.minimum(jnp.min(valid_dists_old), jnp.min(valid_dists_new))
+    return min_dist > r_cut

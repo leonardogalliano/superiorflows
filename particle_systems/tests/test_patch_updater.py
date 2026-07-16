@@ -36,13 +36,20 @@ def key():
 
 @pytest.fixture
 def config(key):
-    """Random JBB-like particle system configuration."""
-    k1, k2 = jax.random.split(key)
-    species = jnp.array([0] * 20 + [1] * 12 + [2] * 12)
+    """JBB particle system configuration loaded from data."""
+    import os
+
+    import jax.numpy as jnp
+
+    from particle_systems.particle_system import ParticleSystem, TrajectoryDataSource
+
+    data_path = os.path.join(os.path.dirname(__file__), "..", "data", "jbb_T1.0.xyz")
+    source = TrajectoryDataSource(data_path)
+
+    # Pick a specific frame to be deterministic, e.g. index 0
+    frame = source[0]
     return ParticleSystem(
-        positions=jax.random.uniform(k1, (N, D), maxval=L),
-        species=species,
-        box=jnp.full((D,), L),
+        positions=jnp.array(frame.positions), species=jnp.array(frame.species), box=jnp.array(frame.box)
     )
 
 
@@ -134,6 +141,37 @@ class TestSelectionProtocol:
         results = vmapped(keys, config)
         assert results.patch_idx.shape == (16, N_PATCH)
         assert results.n_patch.shape == (16,)
+
+    def test_soft_log_pi_ratio_full_patch(self):
+        from particle_systems.selection import soft_log_pi_ratio
+
+        # Test full patch (capacity reached)
+        patch_idx = jnp.array([0, 1, 2])
+        context_idx = jnp.array([3, 4, 5, 6, 7])
+        n_patch = jnp.array(3)
+        n_context = jnp.array(5)
+
+        # Distances before: patch is [0.1, 0.2, 0.3], context is [0.4, 0.5, 0.6, 0.7, 0.8]
+        dists_before = jnp.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+        # Distances after: patch moved to [0.15, 0.25, 0.35], which is still < context
+        dists_after_valid = jnp.array([0.15, 0.25, 0.35, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+        # Distances after: patch moved to [0.5, 0.6, 0.7], which overlaps with context!
+        dists_after_invalid = jnp.array([0.5, 0.6, 0.7, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+
+        r_mean = 0.35
+        sigma_r = 0.1
+
+        log_pi_valid = soft_log_pi_ratio(
+            dists_before, dists_after_valid, patch_idx, context_idx, n_patch, n_context, r_mean, sigma_r
+        )
+        # Should be finite and > -inf
+        assert jnp.isfinite(log_pi_valid)
+
+        log_pi_invalid = soft_log_pi_ratio(
+            dists_before, dists_after_invalid, patch_idx, context_idx, n_patch, n_context, r_mean, sigma_r
+        )
+        # Should be exactly -inf because order is violated
+        assert log_pi_invalid == -jnp.inf
 
 
 # ── PatchEGNNVelocity tests ─────────────────────────────────────────────────
@@ -373,3 +411,63 @@ class TestScatterCorrectness:
         assert jnp.allclose(scattered, expected, atol=1e-6), (
             f"Last valid particle must get its updated position, not the original. Got {scattered}, expected {expected}"
         )
+
+
+# ── Distance check tests ────────────────────────────────────────────────────
+
+
+class TestDistanceCheck:
+    def test_check_patch_remainder_separation(self, config, key):
+        from particle_systems.selection import check_patch_remainder_separation, random_point_select
+
+        select = random_point_select(N_PATCH, N_CONTEXT, R_PATCH, R_CONTEXT)
+        sel = select(key, config)
+
+        n_p = int(sel.n_patch)
+        n_c = int(sel.n_context)
+
+        # We need a selection that actually has some remainder particles
+        assert n_p + n_c < N, "Test requires some remainder particles"
+
+        # Identify remainder particles
+        valid_patch_mask = jnp.arange(N_PATCH) < n_p
+        valid_ctx_mask = jnp.arange(N_CONTEXT) < n_c
+
+        is_patch = jnp.any((jnp.arange(N)[:, None] == sel.patch_idx[None, :]) & valid_patch_mask[None, :], axis=1)
+        is_context = jnp.any((jnp.arange(N)[:, None] == sel.context_idx[None, :]) & valid_ctx_mask[None, :], axis=1)
+        is_remainder = ~(is_patch | is_context)
+
+        r_cut = 2.5
+        L_half = config.box[0] / 2.0
+        assert L_half * 1.414 > r_cut, "Box too small for test"
+
+        # Override all positions to create a controlled environment
+        # Place all particles at the origin initially
+        new_positions = jnp.zeros_like(config.positions)
+
+        # Place all remainder particles at L/2, L/2
+        safe_remainder_pos = jnp.array([L_half, L_half])
+        new_positions = jnp.where(is_remainder[:, None], safe_remainder_pos, new_positions)
+
+        # Place patch particles at origin (distance to remainder is L_half*sqrt(2) > r_cut)
+        import equinox as eqx
+
+        config = eqx.tree_at(lambda c: c.positions, config, new_positions)
+
+        # Case 1: Valid move. The new patch stays at origin.
+        pos_patch_new_safe = jnp.zeros((N_PATCH, D))
+
+        is_safe = check_patch_remainder_separation(
+            config.positions, pos_patch_new_safe, sel.patch_idx, sel.context_idx, n_p, n_c, config.box, r_cut
+        )
+        assert bool(is_safe) is True
+
+        # Case 2: Invalid move. One patch particle moves to be exactly r_cut - 0.1 away from the remainder cluster.
+        # Remainder is at [L_half, L_half]. Move patch[0] to [L_half - (r_cut - 0.1), L_half].
+        invalid_pos_new = safe_remainder_pos - jnp.array([r_cut - 0.1, 0.0])
+        pos_patch_new_invalid = pos_patch_new_safe.at[0].set(invalid_pos_new)
+
+        is_safe_invalid = check_patch_remainder_separation(
+            config.positions, pos_patch_new_invalid, sel.patch_idx, sel.context_idx, n_p, n_c, config.box, r_cut
+        )
+        assert bool(is_safe_invalid) is False
