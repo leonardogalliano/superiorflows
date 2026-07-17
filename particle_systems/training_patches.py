@@ -116,6 +116,12 @@ DEFAULT_CONFIG = {
         },
     },
     "callbacks": {
+        "acceptance": {
+            "enabled": False,
+            "freq": 250,
+            "samples": 64,
+            "batch_size": 32,
+        },
         "tensorboard": {
             "enabled": False,
             "freq": 10,
@@ -274,6 +280,15 @@ def train_single_model(config: dict):
             composition=composition,
         )
 
+        max_rcut = max(
+            float(np.max(c["parameters"]["rcut"]))
+            if isinstance(c["parameters"]["rcut"], list)
+            else float(c["parameters"]["rcut"])
+            for c in boltzmann_model["cutoff"]
+        )
+    else:
+        max_rcut = None
+
     def make_bijector(vf):
         return ODEBijector(vf, **bijector_kwargs)
 
@@ -426,6 +441,62 @@ def train_single_model(config: dict):
             "solver": config["solver"]["type"],
         }
         tb_logger = TensorBoardLogger(log_dir=tb_run_dir, log_freq=tb_cfg.get("freq", log_freq), hparams=hparams)
+        tb_writer = tb_logger._writer
+    else:
+        tb_writer = None
+
+    acc_cfg = ccfg.get("acceptance", {})
+    if target_dist is not None and acc_cfg.get("enabled", False):
+        from particle_systems.callbacks_patches import AcceptanceCallback
+        from particle_systems.patch_updater import PatchUpdater
+        from particle_systems.potentials import build_masked_energy_fn
+        from particle_systems.selection import random_point_select
+
+        acc_samples = acc_cfg.get("samples", 64)
+        acc_batch_size = acc_cfg.get("batch_size", batch_size)
+
+        val_full_ds = grain.MapDataset.source(source).batch(acc_batch_size, drop_remainder=True)
+        val_full_iter = iter(val_full_ds.to_iter_dataset(read_options_val))
+        num_batches = max(1, acc_samples // acc_batch_size)
+        val_full_data = [next(val_full_iter) for _ in range(num_batches)]
+
+        sel_fn = random_point_select(
+            N_patch=N_patch,
+            N_context=N_context,
+            r_patch=r_patch,
+            r_context=r_context,
+            sigma_r=sigma_r,
+        )
+
+        def make_patch_updater(vf):
+            bij = make_bijector(vf)
+            return PatchUpdater(
+                bijector=bij,
+                selection_fn=sel_fn,
+                N_patch=N_patch,
+                N_context=N_context,
+                sigma=sigma_base,
+                L=L,
+                d=d,
+            )
+
+        masked_energy_fn = build_masked_energy_fn(boltzmann_model, source.box_size, n_species)
+
+        callbacks.append(
+            AcceptanceCallback(
+                val_data=val_full_data,
+                make_patch_updater=make_patch_updater,
+                masked_energy_fn=masked_energy_fn,
+                temperature=temperature,
+                r_mean=r_patch,
+                sigma_r=sigma_r,
+                r_cut=max_rcut,
+                r_context=r_context,
+                eval_freq=acc_cfg.get("freq", log_freq),
+                tb_writer=tb_writer,
+                species_radii=np.array(acc_cfg.get("sigmas", [1.0, 0.8, 0.9])),
+            )
+        )
 
     save_freq = max(1, nsteps // num_checkpoints) if num_checkpoints > 0 else nsteps + 1
     callbacks += [
@@ -522,6 +593,9 @@ def main(
     n_context: Annotated[int | None, typer.Option("--n-context", help="Number of context particles")] = None,
     r_patch: Annotated[float | None, typer.Option("--r-patch", help="Patch selection radius")] = None,
     r_context: Annotated[float | None, typer.Option("--r-context", help="Context selection radius")] = None,
+    acceptance: Annotated[
+        bool | None, typer.Option("--acceptance/--no-acceptance", help="Enable acceptance monitoring")
+    ] = None,
     tensorboard: Annotated[
         bool | None, typer.Option("--tensorboard/--no-tensorboard", help="Enable TensorBoard")
     ] = None,
@@ -565,6 +639,8 @@ def main(
         cfg["patch"]["r_patch"] = r_patch
     if r_context is not None:
         cfg["patch"]["r_context"] = r_context
+    if acceptance is not None:
+        cfg["callbacks"]["acceptance"]["enabled"] = acceptance
     if tensorboard is not None:
         cfg["callbacks"]["tensorboard"]["enabled"] = tensorboard
     if profile is not None:

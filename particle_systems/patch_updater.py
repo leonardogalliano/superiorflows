@@ -166,6 +166,34 @@ class PatchUpdater(eqx.Module):
         """Build a fresh PartialFlowUpdater with a base centred on ``center``."""
         return PartialFlowUpdater(self.bijector, self._make_base(center))
 
+    def update(self, x, key, **kwargs):
+        """Propose a new patch.
+
+        Draws a random patch/context partition via the selection protocol,
+        constructs a Gaussian base centred on the selection anchor, samples
+        from the base, pushes through the flow, and returns the updated full
+        configuration.
+
+        Args:
+            x: Full particle system configuration.
+            key: PRNG key.
+            **kwargs: Forwarded to the bijector (e.g. ``key`` for Hutchinson).
+
+        Returns:
+            ``(x_new, selection_result)``: updated full config and the selection
+            result.
+        """
+        k_sel, k_flow = jax.random.split(key)
+        sel = self.selection_fn(k_sel, x)
+        x_active = self._build_subsystem(x, sel)
+        mask = self._inner_mask()
+        updater = self._make_updater(sel.anchor)
+
+        x_active_new = updater.update(x_active, mask, k_flow, args=(sel.n_patch, sel.n_context), **kwargs)
+        x_new = self._scatter_patch(x, x_active_new, sel)
+
+        return x_new, sel
+
     def update_and_log_prob(self, x, key, **kwargs):
         """Propose a new patch and compute its log-density.
 
