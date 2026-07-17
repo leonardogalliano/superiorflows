@@ -1631,3 +1631,86 @@ class TestIndexMetaLossesAndBijectors:
         # Run SI
         l_si, _ = si_loss(model, (target_batch, target_batch), key=key)
         assert jnp.isfinite(l_si)
+
+
+class TestLossesEdgeCases:
+    def test_missing_key_raises_error(self):
+        """Verify that ValueError is raised when key is missing but selection_protocol is set."""
+        import pytest
+
+        from superiorflows.train.losses import EnergyBasedLoss, MaximumLikelihoodLoss
+
+        base = MockDynBase(n=3, d=2)
+
+        def protocol(key, x):
+            return MockParticleSystem(positions=jnp.array([1, 3]), species=False, box=False)
+
+        def make_bijector(m):
+            return m
+
+        batch = MockParticleSystem(
+            positions=jnp.zeros((2, 6, 2)), species=jnp.zeros((2, 6), dtype=int), box=jnp.zeros((2, 2))
+        )
+
+        mle = MaximumLikelihoodLoss(base_distribution=base, make_bijector=make_bijector, selection_protocol=protocol)
+        with pytest.raises(ValueError, match="key is required when selection_protocol is set"):
+            mle(None, batch, key=None)
+
+        ebl = EnergyBasedLoss(
+            base_distribution=base, target_distribution=None, make_bijector=make_bijector, selection_protocol=protocol
+        )
+        with pytest.raises(ValueError, match="key is required when selection_protocol is set"):
+            ebl(None, batch, key=None)
+
+    def test_denoiser_requires_gamma(self):
+        """Verify that StochasticInterpolantLoss raises ValueError when denoiser is set but gamma is None."""
+        import pytest
+
+        from superiorflows.train.losses import StochasticInterpolantLoss
+
+        with pytest.raises(ValueError, match="Denoiser learning requires a noise schedule gamma"):
+            StochasticInterpolantLoss(
+                interpolant=lambda t, x0, x1: x0,
+                gamma=None,
+                get_denoiser=lambda m: m,
+            )
+
+    def test_metadata_splitting_helpers(self):
+        """Test the batch metadata splitting utilities under various structures."""
+        from superiorflows.train.losses import _split_batch_metadata, _split_paired_batch_metadata
+
+        # 1. Normal batch (not a tuple)
+        x = jnp.zeros(5)
+        b, m = _split_batch_metadata(x)
+        assert b is x
+        assert m is None
+
+        # 2. Tuple but not enough elements or elements lack shapes
+        x_tup = (jnp.zeros(5), "metadata_string")
+        b, m = _split_batch_metadata(x_tup)
+        assert b == x_tup
+        assert m is None
+
+        # 3. Valid extended batch structure: (pytree, array1, array2)
+        x_ext = (jnp.zeros(5), jnp.ones(3), jnp.zeros(2))
+        b, m = _split_batch_metadata(x_ext)
+        assert jnp.array_equal(b, x_ext[0])
+        assert len(m) == 2
+        assert jnp.array_equal(m[0], x_ext[1])
+        assert jnp.array_equal(m[1], x_ext[2])
+
+        # 4. Normal paired batch
+        pair = (jnp.zeros(5), jnp.ones(5))
+        x0, x1, m = _split_paired_batch_metadata(pair)
+        assert jnp.array_equal(x0, pair[0])
+        assert jnp.array_equal(x1, pair[1])
+        assert m is None
+
+        # 5. Paired batch with metadata
+        pair_ext = (jnp.zeros(5), jnp.ones(5), jnp.array(10), jnp.array(20))
+        x0, x1, m = _split_paired_batch_metadata(pair_ext)
+        assert jnp.array_equal(x0, pair_ext[0])
+        assert jnp.array_equal(x1, pair_ext[1])
+        assert len(m) == 2
+        assert jnp.array_equal(m[0], pair_ext[2])
+        assert jnp.array_equal(m[1], pair_ext[3])

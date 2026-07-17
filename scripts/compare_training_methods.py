@@ -213,7 +213,7 @@ def main():
     def get_trajectories(model):
         flow = Flow(ODEBijector(model), base_dist)
         # return shape: (n_particles, n_frames, dim)
-        return jax.vmap(lambda x: flow.bijector.integrate(x, saveat=dfx.SaveAt(ts=save_times)).ys)(x0)
+        return jax.vmap(lambda x: flow.bijector._integrate(x, saveat=dfx.SaveAt(ts=save_times)).ys)(x0)
 
     traj_mle = get_trajectories(model_mle)
     traj_energy = get_trajectories(model_energy)

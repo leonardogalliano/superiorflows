@@ -228,7 +228,7 @@ x0 = jax.vmap(base_dist.sample)(jax.random.split(subkey, n_particles))
 
 def get_trajectories(model):
     flow = Flow(ODEBijector(model), base_dist)
-    return jax.vmap(lambda x: flow.bijector.integrate(x, saveat=dfx.SaveAt(ts=save_times)).ys)(x0)
+    return jax.vmap(lambda x: flow.bijector._integrate(x, saveat=dfx.SaveAt(ts=save_times)).ys)(x0)
 
 
 trajectory = get_trajectories(model)
