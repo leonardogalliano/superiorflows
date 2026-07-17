@@ -30,12 +30,12 @@ from particle_systems.particle_system import (
     TrajectoryDataSource,
     particle_geodesic_interpolant,
 )
-from particle_systems.patch_data import (
+from particle_systems.patch_updater import (
     CouplePatchBase,
     ExtractAndShiftSubsystem,
+    GaussianPatchBase,
     PatchEquivariantOptimalTransport,
 )
-from particle_systems.patch_updater import GaussianPatchBase
 from particle_systems.training_particles import (
     build_optimizer,
     build_schedule_fn,
@@ -447,7 +447,7 @@ def train_single_model(config: dict):
 
     acc_cfg = ccfg.get("acceptance", {})
     if target_dist is not None and acc_cfg.get("enabled", False):
-        from particle_systems.callbacks_patches import AcceptanceCallback
+        from particle_systems.callbacks_particles import AcceptanceCallback
         from particle_systems.patch_updater import PatchUpdater
         from particle_systems.potentials import build_masked_energy_fn
         from particle_systems.selection import random_point_select

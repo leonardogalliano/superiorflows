@@ -7,10 +7,18 @@ invariants, masking, and JIT compatibility.
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from particle_systems.particle_system import ParticleSystem
-from particle_systems.patch_updater import GaussianPatchBase, PatchUpdater, UniformPatchBase
+from particle_systems.patch_updater import (
+    CouplePatchBase,
+    ExtractAndShiftSubsystem,
+    GaussianPatchBase,
+    PatchEquivariantOptimalTransport,
+    PatchUpdater,
+    UniformPatchBase,
+)
 from particle_systems.selection import random_point_select
 from particle_systems.velocities.conditional_egnn import PatchEGNNVelocity
 from superiorflows.ode import ODEBijector
@@ -471,3 +479,116 @@ class TestDistanceCheck:
             config.positions, pos_patch_new_invalid, sel.patch_idx, sel.context_idx, n_p, n_c, config.box, r_cut
         )
         assert bool(is_safe_invalid) is False
+
+
+class TestPatchDataTransforms:
+    @pytest.fixture
+    def patch_data_config(self):
+        key = jax.random.key(42)
+        k1, k2 = jax.random.split(key)
+        species = jnp.array([0] * 20 + [1] * 12 + [2] * 12)
+        return ParticleSystem(
+            positions=jax.random.uniform(k1, (44, 2), maxval=6.075),
+            species=species,
+            box=jnp.full((2,), 6.075),
+        )
+
+    def test_extract_and_shift(self, patch_data_config):
+        transform = ExtractAndShiftSubsystem(10, 20, 1.5, 3.0, sigma_r=0.2, seed=42)
+
+        result = transform(0, patch_data_config)
+        sub_sys, n_patch, n_context = result
+
+        assert isinstance(sub_sys, ParticleSystem)
+        assert sub_sys.positions.shape == (30, 2)
+        assert sub_sys.species.shape == (30,)
+        assert np.allclose(sub_sys.box, patch_data_config.box)
+        assert int(n_patch) + int(n_context) <= 30
+
+        # Check that all shifted positions are within the box [0, L)^D
+        assert jnp.all(sub_sys.positions >= 0.0)
+        assert jnp.all(sub_sys.positions < 6.075)
+
+    def test_couple_patch_base(self, patch_data_config):
+        transform = ExtractAndShiftSubsystem(10, 20, 1.5, 3.0, sigma_r=0.2, seed=42)
+        sub_sys, n_p, n_c = transform(0, patch_data_config)
+
+        # CouplePatchBase expects a batched input because it is applied after batching.
+        batched_sub_sys = ParticleSystem(
+            positions=sub_sys.positions[None, ...],
+            species=sub_sys.species[None, ...],
+            box=sub_sys.box[None, ...],
+        )
+        batched_n_p = jnp.array([n_p])
+        batched_n_c = jnp.array([n_c])
+
+        coupler = CouplePatchBase(10, d=2, L=6.075, sigma=0.5, seed=42)
+        x0, x1, out_np, out_nc = coupler(0, (batched_sub_sys, batched_n_p, batched_n_c))
+
+        # Shapes should preserve batch dimension
+        assert x0.positions.shape == (1, 30, 2)
+        assert x1.positions.shape == (1, 30, 2)
+
+        # Context particles (from N_PATCH onwards) must be identical in base and target
+        assert np.allclose(x0.positions[0, 10:], x1.positions[0, 10:])
+
+        # Species and box must be identical
+        assert np.allclose(x0.species, x1.species)
+        assert np.allclose(x0.box, x1.box)
+
+        # Counts must be passed through
+        assert np.allclose(out_np, batched_n_p)
+        assert np.allclose(out_nc, batched_n_c)
+
+    def test_patch_equivariant_ot(self, patch_data_config):
+        transform = ExtractAndShiftSubsystem(10, 20, 1.5, 3.0, sigma_r=0.2, seed=42)
+        sub_sys, n_p, n_c = transform(0, patch_data_config)
+
+        # Create manual batch of size 2
+        batched_sub_sys = ParticleSystem(
+            positions=jnp.stack([sub_sys.positions, sub_sys.positions]),
+            species=jnp.stack([sub_sys.species, sub_sys.species]),
+            box=jnp.stack([sub_sys.box, sub_sys.box]),
+        )
+        batched_n_p = jnp.array([n_p, n_p])
+        batched_n_c = jnp.array([n_c, n_c])
+
+        coupler = CouplePatchBase(10, d=2, L=6.075, sigma=0.5, seed=42)
+        x0, x1, np_out, nc_out = coupler(0, (batched_sub_sys, batched_n_p, batched_n_c))
+
+        ot = PatchEquivariantOptimalTransport(10)
+        x0_aligned, x1_out, np_ot, nc_ot = ot((x0, x1, np_out, nc_out))
+
+        # Check that context particles (indices N_PATCH:) are completely untouched
+        assert np.allclose(x0_aligned.positions[:, 10:], x0.positions[:, 10:])
+
+        # Check that the patch positions have same shape
+        assert x0_aligned.positions.shape == x0.positions.shape
+
+        # Alignment should not alter species or box
+        assert np.allclose(x0_aligned.species, x0.species)
+        assert np.allclose(x0_aligned.box, x0.box)
+
+        # Counts must be passed through
+        assert np.allclose(np_ot, np_out)
+        assert np.allclose(nc_ot, nc_out)
+
+    def test_base_permutation_invariance(self):
+        center = jnp.full((2,), 6.075 / 2.0)
+        base_dist = GaussianPatchBase(
+            center=center,
+            sigma=0.5,
+            N_patch=10,
+            d=2,
+            L=6.075,
+        )
+        x = base_dist.sample(jax.random.key(123))
+        log_p = base_dist.log_prob(x)
+
+        # Permute the particles
+        import numpy as np
+
+        perm = np.random.permutation(10)
+        x_perm = ParticleSystem(positions=x.positions[perm], species=None, box=None)
+        log_p_perm = base_dist.log_prob(x_perm)
+        assert np.isclose(log_p, log_p_perm)

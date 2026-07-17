@@ -156,9 +156,8 @@ class EmpiricalLogoDistribution:
     def event_shape(self):
         return (self.samples.shape[-1],)
 
-    def sample(self, seed, sample_shape):
-        n = sample_shape[0]
-        idx = jax.random.randint(seed, (n,), 0, len(self.samples))
+    def sample(self, seed, sample_shape=()):
+        idx = jax.random.randint(seed, sample_shape, 0, len(self.samples))
         return self.samples[idx]
 
 

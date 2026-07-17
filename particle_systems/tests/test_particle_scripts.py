@@ -7,11 +7,12 @@ from typer.testing import CliRunner
 from particle_systems.evaluate_log_prob import app as evaluate_app
 from particle_systems.sampling_particles import app as sampling_app
 from particle_systems.training_particles import app as training_app
+from particle_systems.training_patches import app as training_patches_app
 
 runner = CliRunner()
 
 CONFIG_DIR = Path("particle_systems") / "config"
-CONFIG_FILES = sorted(list(CONFIG_DIR.glob("*.json")))
+CONFIG_FILES = sorted([p for p in CONFIG_DIR.glob("*.json") if not p.name.startswith("patches_")])
 
 
 def get_latest_run_dir(base_ckpt_dir: Path) -> Path:
@@ -446,4 +447,27 @@ def test_evaluate_log_prob_forward_vs_backward(sampled_with_density, tmp_path):
     assert bwd_lps.shape == fwd_lps.shape, (
         f"Log-prob shape mismatch: backward {bwd_lps.shape} vs forward {fwd_lps.shape}"
     )
-    np.testing.assert_allclose(fwd_lps, bwd_lps, atol=0.1, err_msg="Forward-pass log-probs deviate from backward-pass")
+    np.testing.assert_allclose(fwd_lps, bwd_lps, atol=0.1, err_msg="Reverse-pass log-probs deviate from forward-pass")
+
+
+PATCH_CONFIG_FILES = [
+    CONFIG_DIR / "patches_ml_egnn.json",
+    CONFIG_DIR / "patches_si_egnn.json",
+]
+
+
+@pytest.mark.parametrize("config_path", PATCH_CONFIG_FILES, ids=[p.name for p in PATCH_CONFIG_FILES])
+def test_patch_training(config_path):
+    # Run training for 2 steps using the patch training app
+    result = runner.invoke(training_patches_app, ["--config", str(config_path), "--nsteps", "2", "--batch-size", "8"])
+
+    if result.exit_code != 0:
+        if result.exception:
+            raise result.exception
+        assert result.exit_code == 0, f"Patch training failed: {result.stdout}"
+
+    # Extract checkpoint dir using assumed tmp/ckpt_patches_test or look directly in tmp/
+    ckpt_root = Path("tmp") / "ckpt_patches_test"
+    run_dir = get_latest_run_dir(ckpt_root)
+    assert run_dir is not None, f"Could not find run directory in {ckpt_root}"
+    assert (run_dir / "config.json").exists(), f"Configuration file config.json not found in {run_dir}"
