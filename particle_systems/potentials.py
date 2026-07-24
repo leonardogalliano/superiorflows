@@ -347,3 +347,45 @@ def build_masked_energy_fn(model, box, n_species):
         return 0.5 * total
 
     return energy_fn
+
+
+def build_masked_local_energy_fn(model, box, n_species):
+    """Build a masked local energy function for subsystems with patch and context.
+
+    Calculates U_loc(xp, xc) = U_p(xp) + U_pc(xp, xc), excluding context-context
+    interactions U_c(xc) and padded particles (index >= n_valid).
+
+    Args:
+        model: A berni model dict.
+        box: Box side lengths, array of shape ``(d,)``.
+        n_species: Number of distinct species types.
+
+    Returns:
+        A function ``energy_fn(positions, species, n_patch, n_valid) -> scalar``.
+    """
+    displacement_fn, _ = space.periodic(box)
+    metric_fn = space.metric(displacement_fn)
+    d_fn = space.map_product(metric_fn)
+    terms = _build_pair_terms(model, n_species)
+
+    def energy_fn(positions, species, n_patch, n_valid):
+        M = positions.shape[0]
+        dr = d_fn(positions, positions)
+
+        valid = (jnp.arange(M) < n_valid).astype(positions.dtype)
+        pair_mask = valid[:, None] * valid[None, :]
+        diag_mask = 1.0 - jnp.eye(M)
+
+        in_patch = jnp.arange(M) < n_patch
+        patch_mask = (in_patch[:, None] | in_patch[None, :]).astype(positions.dtype)
+
+        mask = pair_mask * diag_mask * patch_mask
+
+        total = jnp.float32(0.0)
+        for pair_fn, params in terms:
+            kw = {k: v[species[:, None], species[None, :]] for k, v in params.items()}
+            u = pair_fn(dr, **kw)
+            total = total + jnp.sum(u * mask)
+        return 0.5 * total
+
+    return energy_fn

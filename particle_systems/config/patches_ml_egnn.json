@@ -49,6 +49,12 @@
             "samples": 64,
             "batch_size": 16
         },
+        "patch_energy": {
+            "enabled": true,
+            "freq": 250,
+            "samples": 128,
+            "batch_size": 16
+        },
         "tensorboard": {
             "enabled": true,
             "freq": 1,

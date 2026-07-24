@@ -592,3 +592,83 @@ class TestPatchDataTransforms:
         x_perm = ParticleSystem(positions=x.positions[perm], species=None, box=None)
         log_p_perm = base_dist.log_prob(x_perm)
         assert np.isclose(log_p, log_p_perm)
+
+
+class TestPatchCallbacks:
+    def test_patch_acceptance_callback(self, patch_updater, config):
+        from particle_systems.callbacks_particles import PatchAcceptanceCallback
+
+        def dummy_energy(pos, spec, n_valid):
+            return jnp.sum(pos**2)
+
+        batched_config = ParticleSystem(
+            positions=config.positions[None, ...],
+            species=config.species[None, ...],
+            box=config.box[None, ...],
+        )
+
+        cb = PatchAcceptanceCallback(
+            val_data=[batched_config],
+            make_patch_updater=lambda m: patch_updater,
+            masked_energy_fn=dummy_energy,
+            temperature=1.0,
+            r_mean=R_PATCH,
+            sigma_r=0.2,
+            r_cut=2.5,
+            r_context=R_CONTEXT,
+            eval_freq=1,
+        )
+
+        class MockTrainer:
+            model = None
+            key = jax.random.key(123)
+
+        trainer = MockTrainer()
+        cb.on_train_start(trainer)
+
+        logs = {}
+        cb.on_step_end(trainer, step=1, logs=logs)
+
+        assert "acc_mean" in logs
+        assert "log_pi_ratio_mean" in logs
+        assert "log_q_ratio_mean" in logs
+        assert "dU_T_mean" in logs
+        assert np.isfinite(logs["acc_mean"])
+
+    def test_patch_local_energy_callback(self, patch_updater, config):
+        from particle_systems.callbacks_particles import PatchLocalEnergyCallback
+
+        def dummy_local_energy(pos, spec, n_patch, n_valid):
+            mask = jnp.arange(pos.shape[0]) < n_patch
+            masked_pos = jnp.where(mask[:, None], pos, 0.0)
+            return jnp.sum(masked_pos**2)
+
+        batched_config = ParticleSystem(
+            positions=config.positions[None, ...],
+            species=config.species[None, ...],
+            box=config.box[None, ...],
+        )
+
+        cb = PatchLocalEnergyCallback(
+            val_data=[batched_config],
+            make_patch_updater=lambda m: patch_updater,
+            masked_local_energy_fn=dummy_local_energy,
+            eval_freq=1,
+        )
+
+        class MockTrainer:
+            model = None
+            key = jax.random.key(123)
+
+        trainer = MockTrainer()
+        cb.on_train_start(trainer)
+
+        assert cb._target_u_loc is not None
+        assert np.isfinite(cb._target_u_loc_mean)
+
+        logs = {}
+        cb.on_step_end(trainer, step=1, logs=logs)
+
+        assert "u_loc_mean" in logs
+        assert "u_loc_median" in logs
+        assert np.isfinite(logs["u_loc_mean"])

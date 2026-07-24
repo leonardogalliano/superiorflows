@@ -479,7 +479,7 @@ def _safe_mean(arr):
     return float(np.mean(valid))
 
 
-class AcceptanceCallback(Callback):
+class PatchAcceptanceCallback(Callback):
     def __init__(
         self,
         val_data,
@@ -712,4 +712,158 @@ class AcceptanceCallback(Callback):
         fig.tight_layout()
 
         self.tb_writer.add_figure("acceptance/histograms", fig, step)
+        plt.close(fig)
+
+
+class PatchLocalEnergyCallback(Callback):
+    """Evaluates patch local interaction energy U_loc(xp, xc) = U_p(xp) + U_pc(xp, xc).
+
+    Precomputes target local energy distribution from validation target configurations,
+    and periodically samples updated patches using fast forward ODE flow (patch_updater.update,
+    no log-prob integration) to track u_loc_mean, u_loc_median, and output a TensorBoard
+    histogram figure comparing Target vs Model local patch energies.
+    """
+
+    def __init__(
+        self,
+        val_data,
+        make_patch_updater,
+        masked_local_energy_fn,
+        eval_freq: int = 250,
+        tb_writer=None,
+        energy_filter_sigma: float = 10.0,
+        seed: int = 0,
+    ):
+        self.val_data = val_data
+        self.make_patch_updater = make_patch_updater
+        self.masked_local_energy_fn = masked_local_energy_fn
+        self.eval_freq = eval_freq
+        self.tb_writer = tb_writer
+        self.energy_filter_sigma = energy_filter_sigma
+        self.seed = seed
+
+        self._target_u_loc = None
+        self._target_u_loc_mean = None
+        self._target_u_loc_std = None
+
+    def on_train_start(self, trainer, **kwargs):
+        self.total_steps = kwargs.get("total_steps", -1)
+        self._precompute_target_observables(trainer)
+
+    def _precompute_target_observables(self, trainer):
+        """Compute target patch local energies U_loc from validation data."""
+        patch_updater = self.make_patch_updater(trainer.model)
+        target_u_locs = []
+
+        key = jax.random.key(self.seed)
+        for batch in self.val_data:
+            key, subkey = jax.random.split(key)
+            batch = jax.device_put(batch)
+            batch_size = batch.positions.shape[0]
+            subkeys = jax.random.split(subkey, batch_size)
+
+            sels = jax.vmap(patch_updater.selection_fn)(subkeys, batch)
+            active = jax.vmap(patch_updater._build_subsystem)(batch, sels)
+            n_valids = sels.n_patch + sels.n_context
+
+            u_loc = jax.vmap(self.masked_local_energy_fn)(active.positions, active.species, sels.n_patch, n_valids)
+            target_u_locs.append(np.asarray(u_loc))
+
+        if target_u_locs:
+            self._target_u_loc = np.concatenate(target_u_locs)
+            self._target_u_loc_mean = float(np.mean(self._target_u_loc))
+            self._target_u_loc_std = float(np.std(self._target_u_loc))
+
+    def on_step_end(self, trainer, step: int, logs: Dict[str, Any], **kwargs):
+        is_last = hasattr(self, "total_steps") and step == self.total_steps
+        if step % self.eval_freq != 0 and step != 1 and not is_last:
+            return
+
+        patch_updater = self.make_patch_updater(trainer.model)
+        all_model_u_locs = []
+
+        try:
+            for batch in self.val_data:
+                key, subkey = jax.random.split(trainer.key)
+                trainer.key = key
+
+                batch = jax.device_put(batch)
+                batch_size = batch.positions.shape[0]
+                subkeys = jax.random.split(subkey, batch_size)
+
+                systems_new, sels = jax.vmap(patch_updater.update)(batch, subkeys)
+
+                active_new = jax.vmap(patch_updater._build_subsystem)(systems_new, sels)
+                n_valids = sels.n_patch + sels.n_context
+
+                u_loc_new = jax.vmap(self.masked_local_energy_fn)(
+                    active_new.positions, active_new.species, sels.n_patch, n_valids
+                )
+                all_model_u_locs.append(np.asarray(u_loc_new))
+
+            if not all_model_u_locs:
+                return
+
+            model_u_loc = np.concatenate(all_model_u_locs)
+            logs["u_loc_median"] = float(np.median(model_u_loc))
+            logs["u_loc_mean"] = float(np.mean(model_u_loc))
+
+            if self.tb_writer is not None and self._target_u_loc is not None:
+                self._write_tb(step, model_u_loc)
+
+        except Exception as e:
+            logs["u_loc_median"] = float("nan")
+            logs["u_loc_mean"] = float("nan")
+            print(f"[PatchLocalEnergyCallback] Error at step {step}: {e}")
+
+    def _write_tb(self, step, model_u_loc):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        sigma = self.energy_filter_sigma
+        lo = self._target_u_loc_mean - sigma * self._target_u_loc_std
+        hi = self._target_u_loc_mean + sigma * self._target_u_loc_std
+
+        mask = (model_u_loc >= lo) & (model_u_loc <= hi)
+        filtered = model_u_loc[mask]
+        pct = 100.0 * len(filtered) / max(len(model_u_loc), 1)
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        bins = np.linspace(lo, hi, 30)
+        ax.hist(
+            self._target_u_loc,
+            bins=bins,
+            alpha=0.6,
+            color="#FF9800",
+            label="Target",
+            density=True,
+        )
+        if len(filtered) > 0:
+            ax.hist(
+                filtered,
+                bins=bins,
+                alpha=0.6,
+                color="#2196F3",
+                label=f"Model ({pct:.0f}% samples)",
+                density=True,
+            )
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "No model samples\nin target range",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+                fontsize=12,
+                color="#2196F3",
+            )
+        ax.set_xlabel(r"$U_{\text{loc}}$")
+        ax.set_ylabel("Density")
+        ax.legend()
+        ax.set_title(f"Patch local energy — step {step}")
+        fig.tight_layout()
+        self.tb_writer.add_figure("patch/local_energy", fig, step)
         plt.close(fig)

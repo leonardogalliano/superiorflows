@@ -122,6 +122,12 @@ DEFAULT_CONFIG = {
             "samples": 64,
             "batch_size": 32,
         },
+        "patch_energy": {
+            "enabled": False,
+            "freq": 250,
+            "samples": 256,
+            "batch_size": 32,
+        },
         "tensorboard": {
             "enabled": False,
             "freq": 10,
@@ -446,19 +452,11 @@ def train_single_model(config: dict):
         tb_writer = None
 
     acc_cfg = ccfg.get("acceptance", {})
-    if target_dist is not None and acc_cfg.get("enabled", False):
-        from particle_systems.callbacks_particles import AcceptanceCallback
+    pe_cfg = ccfg.get("patch_energy", {})
+
+    if target_dist is not None and (acc_cfg.get("enabled", False) or pe_cfg.get("enabled", False)):
         from particle_systems.patch_updater import PatchUpdater
-        from particle_systems.potentials import build_masked_energy_fn
         from particle_systems.selection import random_point_select
-
-        acc_samples = acc_cfg.get("samples", 64)
-        acc_batch_size = acc_cfg.get("batch_size", batch_size)
-
-        val_full_ds = grain.MapDataset.source(source).batch(acc_batch_size, drop_remainder=True)
-        val_full_iter = iter(val_full_ds.to_iter_dataset(read_options_val))
-        num_batches = max(1, acc_samples // acc_batch_size)
-        val_full_data = [next(val_full_iter) for _ in range(num_batches)]
 
         sel_fn = random_point_select(
             N_patch=N_patch,
@@ -480,10 +478,22 @@ def train_single_model(config: dict):
                 d=d,
             )
 
+    if target_dist is not None and acc_cfg.get("enabled", False):
+        from particle_systems.callbacks_particles import PatchAcceptanceCallback
+        from particle_systems.potentials import build_masked_energy_fn
+
+        acc_samples = acc_cfg.get("samples", 64)
+        acc_batch_size = acc_cfg.get("batch_size", batch_size)
+
+        val_full_ds = grain.MapDataset.source(source).repeat().batch(acc_batch_size, drop_remainder=True)
+        val_full_iter = iter(val_full_ds.to_iter_dataset(read_options_val))
+        num_batches = max(1, acc_samples // acc_batch_size)
+        val_full_data = [next(val_full_iter) for _ in range(num_batches)]
+
         masked_energy_fn = build_masked_energy_fn(boltzmann_model, source.box_size, n_species)
 
         callbacks.append(
-            AcceptanceCallback(
+            PatchAcceptanceCallback(
                 val_data=val_full_data,
                 make_patch_updater=make_patch_updater,
                 masked_energy_fn=masked_energy_fn,
@@ -495,6 +505,30 @@ def train_single_model(config: dict):
                 eval_freq=acc_cfg.get("freq", log_freq),
                 tb_writer=tb_writer,
                 species_radii=np.array(acc_cfg.get("sigmas", [1.0, 0.8, 0.9])),
+            )
+        )
+
+    if target_dist is not None and pe_cfg.get("enabled", False):
+        from particle_systems.callbacks_particles import PatchLocalEnergyCallback
+        from particle_systems.potentials import build_masked_local_energy_fn
+
+        pe_samples = pe_cfg.get("samples", 256)
+        pe_batch_size = pe_cfg.get("batch_size", batch_size)
+
+        val_full_ds_pe = grain.MapDataset.source(source).repeat().batch(pe_batch_size, drop_remainder=True)
+        val_full_iter_pe = iter(val_full_ds_pe.to_iter_dataset(read_options_val))
+        num_batches_pe = max(1, pe_samples // pe_batch_size)
+        val_full_data_pe = [next(val_full_iter_pe) for _ in range(num_batches_pe)]
+
+        masked_local_energy_fn = build_masked_local_energy_fn(boltzmann_model, source.box_size, n_species)
+
+        callbacks.append(
+            PatchLocalEnergyCallback(
+                val_data=val_full_data_pe,
+                make_patch_updater=make_patch_updater,
+                masked_local_energy_fn=masked_local_energy_fn,
+                eval_freq=pe_cfg.get("freq", log_freq),
+                tb_writer=tb_writer,
             )
         )
 

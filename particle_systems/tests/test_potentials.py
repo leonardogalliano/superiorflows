@@ -8,6 +8,8 @@ from particle_systems.particle_system import BoltzmannDistribution, ParticleSyst
 from particle_systems.potentials import (
     _exact_derivatives,
     build_energy_fn,
+    build_masked_energy_fn,
+    build_masked_local_energy_fn,
     energy,
     inverse_power,
     make_cut_shift,
@@ -452,3 +454,63 @@ def test_boltzmann_batched(boltzmann_setup):
         [dist.log_prob(ParticleSystem(positions=positions[i], species=species[i], box=boxes[i])) for i in range(M)]
     )
     assert jnp.allclose(log_probs, single_lps, atol=1e-5)
+
+
+def test_build_masked_local_energy_fn():
+    """Verify that U_full(active) = U_loc(patch, context) + U(context)."""
+    L = 10.0
+    box = jnp.array([L, L])
+    full_energy_fn = build_masked_energy_fn(HIWATARI_MODEL, box, n_species=2)
+    local_energy_fn = build_masked_local_energy_fn(HIWATARI_MODEL, box, n_species=2)
+
+    n_patch = 4
+    n_context = 6
+    n_valid = n_patch + n_context
+    M_total = 15  # 15 particles total, 5 padded
+
+    key = jax.random.key(123)
+    positions = jax.random.uniform(key, (M_total, 2)) * L
+    species = jnp.array([0] * 7 + [1] * 8)
+
+    # Compute full active energy, local energy, and context-only energy
+    u_full = full_energy_fn(positions, species, n_valid)
+    u_loc = local_energy_fn(positions, species, n_patch, n_valid)
+    u_context = full_energy_fn(positions[n_patch:], species[n_patch:], n_context)
+
+    assert jnp.isfinite(u_loc)
+    # Check identity U_full = U_loc + U_context
+    assert jnp.allclose(u_full, u_loc + u_context, atol=1e-5)
+
+
+def test_build_masked_local_energy_fn_gerhard():
+    """Verify local energy decomposition on Gerhard's JBB reference configuration."""
+    from pathlib import Path
+
+    from particle_systems.particle_system import TrajectoryDataSource
+    from particle_systems.selection import random_point_select
+
+    data_path = Path(__file__).parent.parent / "data" / "gerhard.xyz"
+    source = TrajectoryDataSource(str(data_path))
+    system = source[0]
+
+    masked_e_fn = build_masked_energy_fn(JBB_MODEL, system.box, n_species=3)
+    masked_local_e_fn = build_masked_local_energy_fn(JBB_MODEL, system.box, n_species=3)
+
+    N_patch = 10
+    N_context = 40
+    select_fn = random_point_select(N_patch, N_context, r_patch=1.8, r_context=4.3)
+    sel = select_fn(jax.random.key(42), system)
+
+    active_idx = jnp.concatenate([sel.patch_idx, sel.context_idx])
+    active_pos = system.positions[active_idx]
+    active_spec = system.species[active_idx]
+    n_p = int(sel.n_patch)
+    n_c = int(sel.n_context)
+    n_valid = n_p + n_c
+
+    u_active = masked_e_fn(active_pos, active_spec, n_valid)
+    u_loc = masked_local_e_fn(active_pos, active_spec, n_p, n_valid)
+    u_context = masked_e_fn(active_pos[n_p:], active_spec[n_p:], n_c)
+
+    assert jnp.isfinite(u_loc)
+    assert jnp.allclose(u_active, u_loc + u_context, atol=1e-5)
