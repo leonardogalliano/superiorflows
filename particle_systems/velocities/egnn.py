@@ -30,7 +30,18 @@ import jax.numpy as jnp
 
 from particle_systems.particle_system import log_map
 
-__all__ = ["ParticlesEGNNVelocity"]
+__all__ = ["ParticlesEGNNVelocity", "sinusoidal_time_embedding"]
+
+
+def sinusoidal_time_embedding(t: float, dim: int, max_period: float = 10000.0) -> jnp.ndarray:
+    """Fourier time embedding for scalar time."""
+    half_dim = dim // 2
+    frequencies = jnp.exp(-jnp.log(max_period) * jnp.arange(half_dim) / (half_dim - 1))
+    angles = t * frequencies
+    embedding = jnp.concatenate([jnp.sin(angles), jnp.cos(angles)], axis=-1)
+    if dim % 2 == 1:
+        embedding = jnp.concatenate([embedding, jnp.zeros((1,))], axis=-1)
+    return embedding
 
 
 # ── Periodic geometry helpers ─────────────────────────────────────────────────
@@ -395,6 +406,7 @@ class ParticlesEGNNVelocity(eqx.Module):
     N: int = eqx.field(static=True)
     d: int = eqx.field(static=True)
     n_species: int = eqx.field(static=True)
+    time_embedding_dim: int = eqx.field(static=True)
 
     def __init__(
         self,
@@ -407,16 +419,20 @@ class ParticlesEGNNVelocity(eqx.Module):
         attention: bool = False,
         tanh: bool = False,
         coords_range: float = 15.0,
+        time_embedding_dim: int = 0,
         *,
         key,
     ):
         self.N = N
         self.d = d
         self.n_species = n_species
+        self.time_embedding_dim = time_embedding_dim
 
-        # Node feature dimension: time (1 scalar) + one-hot species (n_species)
-        # Mirrors: in_node_nf = 1 + n_species in the original EGNN_dynamics
-        in_node_nf = 1 + n_species
+        # Node feature dimension
+        if time_embedding_dim > 0:
+            in_node_nf = time_embedding_dim + n_species
+        else:
+            in_node_nf = 1 + n_species
 
         k_egnn, k_spec = jax.random.split(key)
 
@@ -470,11 +486,15 @@ class ParticlesEGNNVelocity(eqx.Module):
         # Consistent with training_particles.py:  L = float(source.box_size[0])
         L = box[0]
 
-        # ── Build initial node features: [t_broadcast || one_hot(species)] ──
-        # shape: (N, 1 + n_species)
-        t_feat = jnp.broadcast_to(jnp.reshape(t, (1, 1)), (self.N, 1))  # (N, 1)
+        # ── Build initial node features: [t_feat || one_hot(species)] ───────
+        if self.time_embedding_dim > 0:
+            t_emb = sinusoidal_time_embedding(t, self.time_embedding_dim)
+            t_feat = jnp.broadcast_to(t_emb, (self.N, self.time_embedding_dim))
+        else:
+            t_feat = jnp.broadcast_to(jnp.reshape(t, (1, 1)), (self.N, 1))
+
         species_feat = jax.vmap(self.species_embedding)(species)  # (N, n_species)
-        h0 = jnp.concatenate([t_feat, species_feat], axis=-1)  # (N, 1+n_species)
+        h0 = jnp.concatenate([t_feat, species_feat], axis=-1)  # (N, time_dim + n_species)
 
         # ── EGNN forward (L passed as traced argument through the stack) ──────
         _, x_final = self.egnn(h0, pos, L)

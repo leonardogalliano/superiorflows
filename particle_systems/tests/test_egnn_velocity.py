@@ -175,3 +175,15 @@ def test_egnn_parameter_count(egnn_velocity):
     num_params = sum(x.size for x in jax.tree_util.tree_leaves(eqx.filter(egnn_velocity, eqx.is_inexact_array)))
     print(f"\nEGNN parameter count (n_layers=2, hidden_nf=32): {num_params:,}")
     assert num_params > 0
+
+
+def test_egnn_velocity_time_embedding(single_frame):
+    """Test that sinusoidal time embedding does not break output shapes."""
+    key = jax.random.key(0)
+    egnn = ParticlesEGNNVelocity(
+        N=N, d=d, n_species=n_species, hidden_nf=32, n_layers=2, time_embedding_dim=16, key=key
+    )
+    x_dyn, ctx = eqx.partition(single_frame, ParticleSystem.get_dynamic_mask())
+    v = egnn(0.5, x_dyn, ctx)
+    assert v.positions.shape == (N, d)
+    assert jnp.all(jnp.isfinite(v.positions))

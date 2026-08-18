@@ -16,7 +16,7 @@ import jax
 import jax.numpy as jnp
 
 from particle_systems.particle_system import log_map
-from particle_systems.velocities.egnn import EGNN
+from particle_systems.velocities.egnn import EGNN, sinusoidal_time_embedding
 
 __all__ = ["PatchEGNNVelocity"]
 
@@ -59,6 +59,7 @@ class PatchEGNNVelocity(eqx.Module):
     N_context: int = eqx.field(static=True)
     d: int = eqx.field(static=True)
     n_species: int = eqx.field(static=True)
+    time_embedding_dim: int = eqx.field(static=True)
 
     def __init__(
         self,
@@ -72,6 +73,7 @@ class PatchEGNNVelocity(eqx.Module):
         attention: bool = False,
         tanh: bool = False,
         coords_range: float = 15.0,
+        time_embedding_dim: int = 0,
         *,
         key,
     ):
@@ -79,8 +81,12 @@ class PatchEGNNVelocity(eqx.Module):
         self.N_context = N_context
         self.d = d
         self.n_species = n_species
+        self.time_embedding_dim = time_embedding_dim
 
-        in_node_nf = 1 + n_species
+        if time_embedding_dim > 0:
+            in_node_nf = time_embedding_dim + n_species
+        else:
+            in_node_nf = 1 + n_species
         k_egnn, k_spec = jax.random.split(key)
 
         self.egnn = EGNN(
@@ -140,7 +146,12 @@ class PatchEGNNVelocity(eqx.Module):
         M = self.N_patch + self.N_context
         all_pos = jnp.concatenate([patch_pos, context_pos])
 
-        t_feat = jnp.broadcast_to(jnp.reshape(t, (1, 1)), (M, 1))
+        if self.time_embedding_dim > 0:
+            t_emb = sinusoidal_time_embedding(t, self.time_embedding_dim)
+            t_feat = jnp.broadcast_to(t_emb, (M, self.time_embedding_dim))
+        else:
+            t_feat = jnp.broadcast_to(jnp.reshape(t, (1, 1)), (M, 1))
+
         species_feat = jax.vmap(self.species_embedding)(all_species)
         h0 = jnp.concatenate([t_feat, species_feat], axis=-1)
 

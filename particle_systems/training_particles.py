@@ -603,6 +603,10 @@ def main(
     load_from_checkpoint: Annotated[
         str | None, typer.Option("--load-from-checkpoint", help="Checkpoint directory to resume from")
     ] = None,
+    time_embedding_dim: Annotated[
+        int | None, typer.Option("--time-embedding-dim", help="Dimension of sinusoidal time embedding")
+    ] = None,
+    coords_range: Annotated[float | None, typer.Option("--coords-range", help="EGNN coordinate jump range")] = None,
 ):
     """Train a CNF on MD particle trajectory data."""
     if device is not None:
@@ -641,6 +645,10 @@ def main(
         cfg["callbacks"]["profile"]["enabled"] = profile
     if load_from_checkpoint is not None:
         cfg["training"]["load_from_checkpoint"] = load_from_checkpoint
+    if time_embedding_dim is not None:
+        cfg["velocity"]["kwargs"]["time_embedding_dim"] = time_embedding_dim
+    if coords_range is not None:
+        cfg["velocity"]["kwargs"]["coords_range"] = coords_range
 
     # 4. Validate mandatory fields
     missing = []

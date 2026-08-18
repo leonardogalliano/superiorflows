@@ -229,6 +229,28 @@ class TestPatchEGNNVelocity:
                 "Valid patch velocities must be identical regardless of padded positions"
             )
 
+    def test_time_embedding(self, config, key):
+        """Test that time embedding does not break output shapes in PatchEGNNVelocity."""
+        egnn = PatchEGNNVelocity(
+            N_patch=N_PATCH, N_context=N_CONTEXT, d=D, n_species=N_SPECIES, time_embedding_dim=16, key=key
+        )
+        select = random_point_select(N_PATCH, N_CONTEXT, R_PATCH, R_CONTEXT)
+        sel = select(key, config)
+
+        active_idx = jnp.concatenate([sel.patch_idx, sel.context_idx])
+        x_active = ParticleSystem(
+            positions=config.positions[active_idx], species=config.species[active_idx], box=config.box
+        )
+        inner_mask = ParticleSystem(positions=jnp.arange(N_PATCH), species=False, box=False)
+        from superiorflows.bijector import _pack_args
+        from superiorflows.partial import state_context_partition
+
+        x_dyn, ctx, spec = state_context_partition(x_active, inner_mask)
+        args = _pack_args(ctx, spec.index_meta, (sel.n_patch, sel.n_context))
+        v = egnn(0.5, x_dyn, args)
+        assert v.positions.shape == (N_PATCH, D)
+        assert jnp.all(jnp.isfinite(v.positions))
+
 
 # ── PatchUpdater end-to-end tests ────────────────────────────────────────────
 
