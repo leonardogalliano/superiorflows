@@ -239,15 +239,40 @@ def build_optimizer(config: dict) -> tuple:
     except (ValueError, TypeError):
         schedule = eval(lr_expr, env)
 
-    optimizers = {
-        "adam": optax.adam,
-        "adamw": optax.adamw,
-        "sgd": optax.sgd,
-    }
-    if otype not in optimizers:
-        raise ValueError(f"Unknown optimizer type '{otype}'. Available: {list(optimizers)}")
+    if otype in ("schedule_free_adamw", "schedule_free"):
+        try:
+            lr_val = float(lr_expr)
+        except (ValueError, TypeError):
+            lr_val = 1e-3
+        schedule = optax.constant_schedule(lr_val)
+        b1 = float(ocfg.get("b1", 0.9))
+        b2 = float(ocfg.get("b2", 0.999))
+        weight_decay = float(ocfg.get("weight_decay", 0.0))
+        warmup_steps = ocfg.get("warmup_steps", None)
+        if warmup_steps is not None:
+            warmup_steps = int(warmup_steps)
+            if warmup_steps <= 0:
+                warmup_steps = None
 
-    base_opt = optimizers[otype](learning_rate=schedule)
+        base_opt = optax.contrib.schedule_free_adamw(
+            learning_rate=lr_val,
+            b1=b1,
+            b2=b2,
+            weight_decay=weight_decay,
+            warmup_steps=warmup_steps,
+        )
+    else:
+        optimizers = {
+            "adam": optax.adam,
+            "adamw": optax.adamw,
+            "sgd": optax.sgd,
+        }
+        if otype not in optimizers:
+            raise ValueError(
+                f"Unknown optimizer type '{otype}'. Available: {list(optimizers) + ['schedule_free_adamw']}"
+            )
+
+        base_opt = optimizers[otype](learning_rate=schedule)
 
     clip_cfg = ocfg.get("clip")
     if clip_cfg is not None:

@@ -21,7 +21,7 @@
         }
     },
     "optimizer": {
-        "type": "adam",
+        "type": "schedule_free_adamw",
         "lr_schedule": "1e-3",
         "clip": {
             "type": "value",

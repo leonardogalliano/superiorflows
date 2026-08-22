@@ -49,7 +49,7 @@ def train_step(model, opt_state, batch, key, loss_module, optimizer):
         where ``aux`` is a dict of per-component metrics from the loss.
     """
     (loss, aux), grads = eqx.filter_value_and_grad(loss_module, has_aux=True)(model, batch, key)
-    updates, opt_state = optimizer.update(grads, opt_state, model)
+    updates, opt_state = optimizer.update(grads, opt_state, eqx.filter(model, eqx.is_array))
     model = eqx.apply_updates(model, updates)
     return model, opt_state, loss, grads, aux
 
