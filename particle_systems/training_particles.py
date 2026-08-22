@@ -471,13 +471,16 @@ def train_single_model(config: dict):
     tb_logger = None
     if tb_cfg["enabled"]:
         tb_run_dir = Path(tb_cfg["log_dir"]) / run_name
+        v_kwargs = config["velocity"].get("kwargs", {})
         hparams = {
             "loss_type": loss_type,
             "velocity_type": vtype,
             "N": N,
             "d": d,
             "L": L,
+            "optimizer_type": config["optimizer"].get("type", "adam"),
             "lr_schedule": lr_schedule_str,
+            "clip": str(config["optimizer"].get("clip", "none")),
             "batch_size": batch_size,
             "seed": seed,
             "nsteps": nsteps,
@@ -485,8 +488,12 @@ def train_single_model(config: dict):
             "prefetch": prefetch_buffer_size,
             "ot": use_ot,
             "box_sym": use_ot_box_symmetry,
+            "interpolant_scheduler": str(config.get("stochastic_interpolant", {}).get("interpolant_scheduler", "t")),
+            "noise_scheduler": str(config.get("stochastic_interpolant", {}).get("noise_scheduler", "None")),
+            "time_embedding_dim": int(v_kwargs.get("time_embedding_dim", 0)),
+            "coords_range": float(v_kwargs.get("coords_range", 15.0)),
             "temp": temperature if temperature is not None else -1.0,
-            "v_kwargs": str(config["velocity"].get("kwargs", {})),
+            "v_kwargs": str(v_kwargs),
             "solver": config["solver"]["type"],
             "ess_enabled": ccfg["ess"]["enabled"],
         }
