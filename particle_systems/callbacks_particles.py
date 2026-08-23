@@ -335,8 +335,13 @@ class BoltzmannCallback(Callback):
         pct = 100.0 * len(filtered) / max(len(model_energies), 1)
 
         fig, ax = plt.subplots(figsize=(6, 4))
-        bins = np.linspace(lo, hi, 30)
-        ax.hist(
+        if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+            bins = np.linspace(lo, hi, 30)
+        else:
+            bins = 30
+
+        _safe_hist(
+            ax,
             self._target_energies,
             bins=bins,
             alpha=0.6,
@@ -345,7 +350,8 @@ class BoltzmannCallback(Callback):
             density=True,
         )
         if len(filtered) > 0:
-            ax.hist(
+            _safe_hist(
+                ax,
                 filtered,
                 bins=bins,
                 alpha=0.6,
@@ -479,6 +485,44 @@ def _safe_mean(arr):
     return float(np.mean(valid))
 
 
+def _safe_median(arr):
+    # Filter out infinite and NaN values for statistics
+    arr = np.asarray(arr)
+    valid = arr[np.isfinite(arr)]
+    if len(valid) == 0:
+        return float("nan")
+    return float(np.median(valid))
+
+
+def _safe_hist(ax, arr, bins=30, **kwargs):
+    """Plot a histogram safely, handling empty, non-finite, and zero-variance data."""
+    if arr is None:
+        ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", va="center", color="gray")
+        return
+    arr_np = np.asarray(arr)
+    finite_data = arr_np[np.isfinite(arr_np)]
+    if len(finite_data) == 0:
+        ax.text(
+            0.5,
+            0.5,
+            "No finite data\n(NaNs / Infs)",
+            transform=ax.transAxes,
+            ha="center",
+            va="center",
+            color="red",
+        )
+    elif np.ptp(finite_data) == 0:
+        ax.hist(finite_data, bins=1, **kwargs)
+    else:
+        if isinstance(bins, np.ndarray):
+            if np.all(np.isfinite(bins)) and np.all(np.diff(bins) > 0):
+                ax.hist(finite_data, bins=bins, **kwargs)
+            else:
+                ax.hist(finite_data, bins=30, **kwargs)
+        else:
+            ax.hist(finite_data, bins=bins, **kwargs)
+
+
 class PatchAcceptanceCallback(Callback):
     def __init__(
         self,
@@ -514,68 +558,73 @@ class PatchAcceptanceCallback(Callback):
         if step % self.eval_freq != 0 and step != 1 and not is_last:
             return
 
-        patch_updater = self.make_patch_updater(trainer.model)
+        try:
+            patch_updater = self.make_patch_updater(trainer.model)
 
-        all_accept_probs = []
-        all_is_safe = []
-        all_log_pi_ratios = []
-        all_log_q_ratios = []
-        all_delta_U_T = []
+            all_accept_probs = []
+            all_is_safe = []
+            all_log_pi_ratios = []
+            all_log_q_ratios = []
+            all_delta_U_T = []
 
-        for i, batch in enumerate(self.val_data):
-            key, subkey = jax.random.split(trainer.key)
-            trainer.key = key
+            for i, batch in enumerate(self.val_data):
+                key, subkey = jax.random.split(trainer.key)
+                trainer.key = key
 
-            # Put the batch on device manually just in case
-            batch = jax.device_put(batch)
-            batch_size = batch.positions.shape[0]
-            subkeys = jax.random.split(subkey, batch_size)
+                # Put the batch on device manually just in case
+                batch = jax.device_put(batch)
+                batch_size = batch.positions.shape[0]
+                subkeys = jax.random.split(subkey, batch_size)
 
-            ap, safe, pi, q, du, systems_new, sels, log_qs = compute_acceptance_metrics(
-                patch_updater,
-                batch,
-                subkeys,
-                self.masked_energy_fn,
-                self.temperature,
-                self.r_mean,
-                self.sigma_r,
-                self.r_cut,
-            )
+                ap, safe, pi, q, du, systems_new, sels, log_qs = compute_acceptance_metrics(
+                    patch_updater,
+                    batch,
+                    subkeys,
+                    self.masked_energy_fn,
+                    self.temperature,
+                    self.r_mean,
+                    self.sigma_r,
+                    self.r_cut,
+                )
 
-            all_accept_probs.append(ap)
-            all_is_safe.append(safe)
-            all_log_pi_ratios.append(pi)
-            all_log_q_ratios.append(q)
-            all_delta_U_T.append(du)
+                all_accept_probs.append(ap)
+                all_is_safe.append(safe)
+                all_log_pi_ratios.append(pi)
+                all_log_q_ratios.append(q)
+                all_delta_U_T.append(du)
 
-            if i == 0:
-                first_batch = batch
-                first_systems_new = systems_new
-                first_sels = sels
-                first_log_q_ratios = q
-                first_delta_U_T = du
+                if i == 0:
+                    first_batch = batch
+                    first_systems_new = systems_new
+                    first_sels = sels
+                    first_log_q_ratios = q
+                    first_delta_U_T = du
 
-        if not all_accept_probs:
-            return
+            if not all_accept_probs:
+                return
 
-        # Combine across batches
-        ap = jnp.concatenate(all_accept_probs)
-        safe = jnp.concatenate(all_is_safe)
-        pi = jnp.concatenate(all_log_pi_ratios)
-        q = jnp.concatenate(all_log_q_ratios)
-        du = jnp.concatenate(all_delta_U_T)
+            # Combine across batches
+            ap = jnp.concatenate(all_accept_probs)
+            safe = jnp.concatenate(all_is_safe)
+            pi = jnp.concatenate(all_log_pi_ratios)
+            q = jnp.concatenate(all_log_q_ratios)
+            du = jnp.concatenate(all_delta_U_T)
 
-        logs["acc_mean"] = _safe_mean(ap)
-        logs["log_pi_ratio_mean"] = _safe_mean(pi)
-        logs["log_q_ratio_mean"] = _safe_mean(q)
-        logs["dU_T_mean"] = _safe_mean(du)
-        logs["safe_rate"] = float(jnp.mean(safe))
+            logs["acc_mean"] = _safe_mean(ap)
+            logs["log_pi_ratio_mean"] = _safe_mean(pi)
+            logs["log_q_ratio_mean"] = _safe_mean(q)
+            logs["dU_T_mean"] = _safe_mean(du)
+            logs["safe_rate"] = float(jnp.mean(safe))
 
-        if self.tb_writer is not None:
-            self._write_tb(step, ap, pi, q, du)
-            self._write_patch_grids(
-                step, first_batch, first_systems_new, first_sels, first_log_q_ratios, first_delta_U_T
-            )
+            if self.tb_writer is not None:
+                self._write_tb(step, ap, pi, q, du)
+                self._write_patch_grids(
+                    step, first_batch, first_systems_new, first_sels, first_log_q_ratios, first_delta_U_T
+                )
+        except Exception as e:
+            logs["acc_mean"] = float("nan")
+            logs["safe_rate"] = float("nan")
+            print(f"[PatchAcceptanceCallback] Warning at step {step}: {e}")
 
     def _write_patch_grids(self, step, batch, systems_new, sels, log_q_ratios, delta_U_T):
         import matplotlib
@@ -685,27 +734,18 @@ class PatchAcceptanceCallback(Callback):
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        def _filter(arr):
-            arr = np.asarray(arr)
-            return arr[np.isfinite(arr)]
-
-        ap_val = _filter(ap)
-        pi_val = _filter(pi)
-        q_val = _filter(q)
-        du_val = _filter(du)
-
         fig, axes = plt.subplots(2, 2, figsize=(10, 8))
 
-        axes[0, 0].hist(ap_val, bins=30, color="#2196F3", alpha=0.7)
+        _safe_hist(axes[0, 0], ap, bins=30, color="#2196F3", alpha=0.7)
         axes[0, 0].set_title("Acceptance Probability")
 
-        axes[0, 1].hist(pi_val, bins=30, color="#4CAF50", alpha=0.7)
+        _safe_hist(axes[0, 1], pi, bins=30, color="#4CAF50", alpha=0.7)
         axes[0, 1].set_title(r"$\log \pi$ ratio")
 
-        axes[1, 0].hist(q_val, bins=30, color="#FF9800", alpha=0.7)
+        _safe_hist(axes[1, 0], q, bins=30, color="#FF9800", alpha=0.7)
         axes[1, 0].set_title(r"$\log q$ ratio")
 
-        axes[1, 1].hist(du_val, bins=30, color="#F44336", alpha=0.7)
+        _safe_hist(axes[1, 1], du, bins=30, color="#F44336", alpha=0.7)
         axes[1, 1].set_title(r"$\Delta U / T$")
 
         fig.suptitle(f"Acceptance Metrics — step {step}")
@@ -805,8 +845,8 @@ class PatchLocalEnergyCallback(Callback):
                 return
 
             model_u_loc = np.concatenate(all_model_u_locs)
-            logs["u_loc_median"] = float(np.median(model_u_loc))
-            logs["u_loc_mean"] = float(np.mean(model_u_loc))
+            logs["u_loc_median"] = _safe_median(model_u_loc)
+            logs["u_loc_mean"] = _safe_mean(model_u_loc)
 
             if self.tb_writer is not None and self._target_u_loc is not None:
                 self._write_tb(step, model_u_loc)
@@ -814,7 +854,7 @@ class PatchLocalEnergyCallback(Callback):
         except Exception as e:
             logs["u_loc_median"] = float("nan")
             logs["u_loc_mean"] = float("nan")
-            print(f"[PatchLocalEnergyCallback] Error at step {step}: {e}")
+            print(f"[PatchLocalEnergyCallback] Warning at step {step}: {e}")
 
     def _write_tb(self, step, model_u_loc):
         import matplotlib
@@ -831,8 +871,13 @@ class PatchLocalEnergyCallback(Callback):
         pct = 100.0 * len(filtered) / max(len(model_u_loc), 1)
 
         fig, ax = plt.subplots(figsize=(6, 4))
-        bins = np.linspace(lo, hi, 30)
-        ax.hist(
+        if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+            bins = np.linspace(lo, hi, 30)
+        else:
+            bins = 30
+
+        _safe_hist(
+            ax,
             self._target_u_loc,
             bins=bins,
             alpha=0.6,
@@ -841,7 +886,8 @@ class PatchLocalEnergyCallback(Callback):
             density=True,
         )
         if len(filtered) > 0:
-            ax.hist(
+            _safe_hist(
+                ax,
                 filtered,
                 bins=bins,
                 alpha=0.6,

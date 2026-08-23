@@ -394,9 +394,18 @@ def build_solver(config: dict) -> dict:
 
     slv = solvers[stype]()
 
+    extra_args = dict(throw=False)
+    augmented_extra_args = dict(throw=False)
+    if "extra_args" in scfg:
+        extra_args.update(scfg["extra_args"])
+    if "augmented_extra_args" in scfg:
+        augmented_extra_args.update(scfg["augmented_extra_args"])
+
     bijector_kwargs: dict[str, Any] = dict(
         solver=slv,
         augmented_solver=slv,
+        extra_args=extra_args,
+        augmented_extra_args=augmented_extra_args,
     )
 
     if solver_steps is not None:
