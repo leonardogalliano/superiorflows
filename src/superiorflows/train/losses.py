@@ -208,7 +208,51 @@ class KullbackLeiblerLoss(eqx.Module):
 
 
 class StochasticInterpolantLoss(eqx.Module):
-    """Stochastic Interpolant loss for flow matching training."""
+    """Stochastic Interpolant loss for flow matching training.
+
+    Supports three training regimes:
+
+    1. **Velocity-only** (default): learns ``v(t, x) ≈ dI/dt``.
+    2. **Velocity + denoiser**: jointly learns the velocity and a denoiser
+       ``η_z(t, x) ≈ z`` for score estimation.
+    3. **Denoiser-only** (``compute_velocity_loss=False``): learns only the
+       denoiser.  Suitable for one-sided linear interpolants where the
+       velocity can be derived analytically from the denoiser at sampling
+       time.
+
+    An optional **boundary target score matching** (TSM) loss can be added
+    in any mode that learns a score, enforcing score accuracy near ``t = 0``
+    and ``t = 1``.
+
+    Args:
+        interpolant: ``(t, x0, x1) → x_t``.
+        gamma: Optional noise schedule ``t → γ(t)``.  When provided, the
+            interpolated state is perturbed as ``x_t = I(t, x0, x1) + γ(t) z``
+            with ``z ~ N(0, I)`` and the denoiser target is ``z``.  When
+            ``None``, no extra noise is injected and the denoiser target
+            (if requested) is the base sample ``x0`` itself — appropriate
+            for one-sided linear interpolants where the noise scaling is
+            already encoded in the interpolant.
+        dynamic_mask: Mask selecting dynamic DOFs.
+        get_velocity: ``model → velocity_field(t, x, args)``.
+        get_denoiser: ``model → denoiser(t, x, args)``.
+        denoiser_weight: Scalar weight for the denoiser loss term.
+        compute_velocity_loss: If ``False``, the velocity loss term is
+            omitted entirely.  Requires ``get_denoiser``.
+        get_score: ``model → score_fn(t, x, args)``.  Required when
+            ``tsm_weight > 0``.  The user defines the mapping from the
+            learned fields to the score (e.g. ``s = -η_z / α`` for
+            one-sided interpolants, ``s = -η_z / γ`` for the general case).
+        base_score_fn: ``(full_state) → score_pytree``.  Gradient of
+            ``log ρ_0`` evaluated on the full state.  The loss partitions
+            the result to the dynamic part internally.
+        target_score_fn: ``(full_state) → score_pytree``.  Gradient of
+            ``log ρ_1``.
+        tsm_weight: Weight of the boundary TSM loss.  ``0.0`` disables
+            TSM (default, no overhead).
+        selection_protocol: Optional callable for partial updates.
+        **velocity_kwargs: Extra keyword arguments (e.g. ``args``).
+    """
 
     interpolant: Callable = eqx.field(static=True)
     gamma: Optional[Callable] = eqx.field(static=True)
@@ -216,8 +260,13 @@ class StochasticInterpolantLoss(eqx.Module):
     dt_interpolant: Callable = eqx.field(static=True)
     dt_gamma: Optional[Callable] = eqx.field(static=True)
     denoiser_weight: float = eqx.field(static=True)
+    compute_velocity_loss: bool = eqx.field(static=True)
     _get_velocity: Callable = eqx.field(static=True)
     _get_denoiser: Optional[Callable] = eqx.field(static=True)
+    _get_score: Optional[Callable] = eqx.field(static=True)
+    base_score_fn: Optional[Callable] = eqx.field(static=True)
+    target_score_fn: Optional[Callable] = eqx.field(static=True)
+    tsm_weight: float = eqx.field(static=True)
     dynamic_mask: object = eqx.field(default=None)
     selection_protocol: Optional[Callable] = eqx.field(default=None, static=True)
 
@@ -229,6 +278,11 @@ class StochasticInterpolantLoss(eqx.Module):
         get_velocity: Optional[Callable] = None,
         get_denoiser: Optional[Callable] = None,
         denoiser_weight: float = 1.0,
+        compute_velocity_loss: bool = True,
+        get_score: Optional[Callable] = None,
+        base_score_fn: Optional[Callable] = None,
+        target_score_fn: Optional[Callable] = None,
+        tsm_weight: float = 0.0,
         selection_protocol: Optional[Callable] = None,
         **velocity_kwargs,
     ):
@@ -244,8 +298,13 @@ class StochasticInterpolantLoss(eqx.Module):
         self.selection_protocol = selection_protocol
         self.velocity_kwargs = velocity_kwargs
         self.denoiser_weight = denoiser_weight
+        self.compute_velocity_loss = compute_velocity_loss
         self._get_velocity = get_velocity if get_velocity is not None else lambda m: m
         self._get_denoiser = get_denoiser
+        self._get_score = get_score
+        self.base_score_fn = base_score_fn
+        self.target_score_fn = target_score_fn
+        self.tsm_weight = tsm_weight
 
         # Precompute time derivatives via JVP
         def _dt_interpolant(t, x0, x1):
@@ -269,10 +328,32 @@ class StochasticInterpolantLoss(eqx.Module):
             self.dt_gamma = None
 
     def __check_init__(self):
-        if self._get_denoiser is not None and self.gamma is None:
+        if not self.compute_velocity_loss and self._get_denoiser is None:
             raise ValueError(
-                "Denoiser learning requires a noise schedule gamma(t). Pass gamma= to StochasticInterpolantLoss."
+                "compute_velocity_loss=False requires a denoiser. Pass get_denoiser= to StochasticInterpolantLoss."
             )
+        if self._get_denoiser is not None and self.gamma is None and self.compute_velocity_loss:
+            raise ValueError(
+                "Joint velocity + denoiser learning requires a noise schedule gamma(t). "
+                "Pass gamma= to StochasticInterpolantLoss, or set compute_velocity_loss=False "
+                "for denoiser-only training with one-sided linear interpolants."
+            )
+        if self.tsm_weight > 0.0 and self._get_score is None:
+            raise ValueError("Boundary TSM requires a score extractor. Pass get_score= to StochasticInterpolantLoss.")
+
+    def _extract_interpolant_coefficients(self, ti, y0i, y1i):
+        """Extract α(t) and β(t) from the interpolant via forward-mode AD.
+
+        For a linear interpolant ``I(t, x0, x1) = α(t) x0 + β(t) x1``,
+        the JVP with respect to ``x0`` yields ``α(t)`` and the JVP with
+        respect to ``x1`` yields ``β(t)``.  Both are returned as pytrees
+        matching the dynamic-state structure.
+        """
+        ones_y0 = jax.tree.map(jnp.ones_like, y0i)
+        _, alpha_t = jax.jvp(lambda x: self.interpolant(ti, x, y1i), (y0i,), (ones_y0,))
+        ones_y1 = jax.tree.map(jnp.ones_like, y1i)
+        _, beta_t = jax.jvp(lambda x: self.interpolant(ti, y0i, x), (y1i,), (ones_y1,))
+        return alpha_t, beta_t
 
     @eqx.filter_jit
     def __call__(self, model, batch, key):
@@ -283,11 +364,14 @@ class StochasticInterpolantLoss(eqx.Module):
         t = jax.random.uniform(key1, (batch_size,))
 
         user_args = per_sample_args if per_sample_args is not None else self.velocity_kwargs.get("args")
-        velocity_field = self._get_velocity(model)
+        velocity_field = self._get_velocity(model) if self.compute_velocity_loss else None
         denoiser = self._get_denoiser(model) if self._get_denoiser is not None else None
+        score_field = self._get_score(model) if self._get_score is not None and self.tsm_weight > 0.0 else None
 
         sel_keys = jax.random.split(key_sel, batch_size) if self.selection_protocol is not None else None
         noise_keys = jax.random.split(key2, batch_size) if self.gamma is not None else None
+
+        _has_extended = denoiser is not None or score_field is not None
 
         def single_interpolant_loss(ti, x0i, x1i, sel_key_i, noise_key_i, *ua_i):
             mask_i = (
@@ -297,7 +381,6 @@ class StochasticInterpolantLoss(eqx.Module):
             y1i, ctxi, spec_i = state_context_partition(x1i, mask_i)
 
             if self.gamma is not None:
-                # Generate noise matching y0i structure
                 y0i_leaves, y0i_treedef = jax.tree.flatten(y0i)
                 nk = jax.random.split(noise_key_i, len(y0i_leaves))
                 zi = jax.tree.unflatten(
@@ -319,22 +402,59 @@ class StochasticInterpolantLoss(eqx.Module):
             index_meta = spec_i.index_meta if isinstance(spec_i, PartitionSpec) else None
             args_i = _pack_args(ctxi, index_meta, ua_i if ua_i else user_args)
 
-            v_pred = velocity_field(ti, yt, args_i)
-            vel_sq = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), v_pred, vel_target))
-            vel_loss_i = sum(vel_sq)
+            # Velocity loss
+            if self.compute_velocity_loss:
+                v_pred = velocity_field(ti, yt, args_i)
+                vel_sq = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), v_pred, vel_target))
+                vel_loss_i = sum(vel_sq)
+            else:
+                vel_loss_i = jnp.array(0.0)
 
+            # Denoiser loss
             if denoiser is not None:
+                denoiser_target = zi if zi is not None else y0i
                 eta_pred = denoiser(ti, yt, args_i)
-                den_sq = jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), eta_pred, zi))
+                den_sq = jax.tree.leaves(
+                    jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), eta_pred, denoiser_target)
+                )
                 den_loss_i = sum(den_sq)
-                return vel_loss_i, den_loss_i
+            else:
+                den_loss_i = jnp.array(0.0)
 
+            # Boundary target score matching (TSM)
+            if score_field is not None:
+                score_pred = score_field(ti, yt, args_i)
+                alpha_t, beta_t = self._extract_interpolant_coefficients(ti, y0i, y1i)
+
+                tsm_loss_i = jnp.array(0.0)
+
+                if self.base_score_fn is not None:
+                    base_score_full = self.base_score_fn(x0i)
+                    base_score, _, _ = state_context_partition(base_score_full, mask_i)
+                    tsm0_target = jax.tree.map(lambda s, a: s / a, base_score, alpha_t)
+                    tsm0_sq = sum(
+                        jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), score_pred, tsm0_target))
+                    )
+                    tsm_loss_i = tsm_loss_i + jnp.where(ti < 0.5, tsm0_sq, 0.0)
+
+                if self.target_score_fn is not None:
+                    target_score_full = self.target_score_fn(x1i)
+                    target_score, _, _ = state_context_partition(target_score_full, mask_i)
+                    tsm1_target = jax.tree.map(lambda s, b: s / b, target_score, beta_t)
+                    tsm1_sq = sum(
+                        jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), score_pred, tsm1_target))
+                    )
+                    tsm_loss_i = tsm_loss_i + jnp.where(ti >= 0.5, tsm1_sq, 0.0)
+            else:
+                tsm_loss_i = jnp.array(0.0)
+
+            if _has_extended:
+                return vel_loss_i, den_loss_i, tsm_loss_i
             return vel_loss_i
 
         # Setup standard mapping arguments
         vmap_args = (t, x0, x1)
 
-        # Add sel_keys if present, otherwise None mapped as constant
         if sel_keys is not None:
             vmap_args += (sel_keys,)
             in_axes_sel = 0
@@ -342,7 +462,6 @@ class StochasticInterpolantLoss(eqx.Module):
             vmap_args += (None,)
             in_axes_sel = None
 
-        # Add noise_keys if present, otherwise None mapped as constant
         if noise_keys is not None:
             vmap_args += (noise_keys,)
             in_axes_noise = 0
@@ -350,7 +469,6 @@ class StochasticInterpolantLoss(eqx.Module):
             vmap_args += (None,)
             in_axes_noise = None
 
-        # Add user_args if they are per-sample
         is_per_sample = (
             user_args is not None
             and isinstance(user_args, tuple)
@@ -366,12 +484,16 @@ class StochasticInterpolantLoss(eqx.Module):
 
         out = jax.vmap(single_interpolant_loss, in_axes=in_axes)(*vmap_args)
 
-        if denoiser is not None:
-            vel_per_sample, den_per_sample = out
+        if _has_extended:
+            vel_per_sample, den_per_sample, tsm_per_sample = out
             vel_loss = jnp.mean(vel_per_sample)
             den_loss = jnp.mean(den_per_sample)
-            total = vel_loss + self.denoiser_weight * den_loss
-            return total, {"velocity_loss": vel_loss, "denoiser_loss": den_loss}
+            tsm_loss = jnp.mean(tsm_per_sample)
+            total = vel_loss + self.denoiser_weight * den_loss + self.tsm_weight * tsm_loss
+            aux = {"velocity_loss": vel_loss, "denoiser_loss": den_loss}
+            if self.tsm_weight > 0.0:
+                aux["tsm_loss"] = tsm_loss
+            return total, aux
 
         vel_loss = jnp.mean(out)
         return vel_loss, {}

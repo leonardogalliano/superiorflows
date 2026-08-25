@@ -1668,7 +1668,7 @@ class TestLossesEdgeCases:
 
         from superiorflows.train.losses import StochasticInterpolantLoss
 
-        with pytest.raises(ValueError, match="Denoiser learning requires a noise schedule gamma"):
+        with pytest.raises(ValueError, match="Joint velocity .* denoiser"):
             StochasticInterpolantLoss(
                 interpolant=lambda t, x0, x1: x0,
                 gamma=None,

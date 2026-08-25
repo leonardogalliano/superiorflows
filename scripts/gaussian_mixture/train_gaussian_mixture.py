@@ -90,6 +90,8 @@ DEFAULT_CONFIG = {
         "noise_scheduler": "None",
         "learn_denoiser": False,
         "denoiser_weight": 1.0,
+        "denoiser_only": False,
+        "tsm_weight": 0.0,
     },
     "callbacks": {
         "ess": {
@@ -367,15 +369,21 @@ def build_model(config: dict, d: int, *, key):
 
     time_emb_dim = vcfg.get("time_embedding_dim", 0)
     learn_denoiser = config["stochastic_interpolant"].get("learn_denoiser", False)
+    denoiser_only = config["stochastic_interpolant"].get("denoiser_only", False)
 
-    if learn_denoiser and loss_type == "stochastic_interpolant":
+    if denoiser_only and loss_type == "stochastic_interpolant":
+        return MLPVelocity(d=d, width=vcfg["width"], depth=vcfg["depth"], time_embedding_dim=time_emb_dim, key=key)
+    elif learn_denoiser and loss_type == "stochastic_interpolant":
         vel_key, den_key = jax.random.split(key)
         vel = MLPVelocity(d=d, width=vcfg["width"], depth=vcfg["depth"], time_embedding_dim=time_emb_dim, key=vel_key)
         den = MLPVelocity(d=d, width=vcfg["width"], depth=vcfg["depth"], time_embedding_dim=time_emb_dim, key=den_key)
         return VelocityDenoiserPair(velocity_field=vel, denoiser=den)
     else:
-        if learn_denoiser:
-            print("Warning: learn_denoiser=True is only supported for loss_type='stochastic_interpolant'. Ignoring.")
+        if learn_denoiser or denoiser_only:
+            print(
+                "Warning: learn_denoiser/denoiser_only is only supported for "
+                "loss_type='stochastic_interpolant'. Ignoring."
+            )
         return MLPVelocity(d=d, width=vcfg["width"], depth=vcfg["depth"], time_embedding_dim=time_emb_dim, key=key)
 
 
@@ -605,7 +613,39 @@ def train_single_model(config: dict):
 
         si_kwargs = {k: v for k, v in bijector_kwargs.items() if k in ("dynamic_mask",)}
 
-        if config["stochastic_interpolant"].get("learn_denoiser", False):
+        denoiser_only = config["stochastic_interpolant"].get("denoiser_only", False)
+        tsm_weight = config["stochastic_interpolant"].get("tsm_weight", 0.0)
+
+        if denoiser_only:
+
+            def get_score_fn(model):
+                def score_fn(t, x, args):
+                    eta = model(t, x, args)
+                    alpha_t = 1.0 - t
+                    return jax.tree.map(lambda e: -e / alpha_t, eta)
+
+                return score_fn
+
+            score_kwargs = {}
+            if tsm_weight > 0.0:
+                score_kwargs = dict(
+                    get_score=get_score_fn,
+                    base_score_fn=lambda x: jax.grad(base_dist.log_prob)(x),
+                    target_score_fn=lambda x: jax.grad(target_dist.log_prob)(x),
+                    tsm_weight=tsm_weight,
+                )
+
+            loss_fn = StochasticInterpolantLoss(
+                interpolant=interpolant,
+                gamma=gamma_fn,
+                get_denoiser=lambda m: m,
+                compute_velocity_loss=False,
+                denoiser_weight=1.0,
+                selection_protocol=selection_protocol,
+                **score_kwargs,
+                **si_kwargs,
+            )
+        elif config["stochastic_interpolant"].get("learn_denoiser", False):
             loss_fn = StochasticInterpolantLoss(
                 interpolant=interpolant,
                 gamma=gamma_fn,

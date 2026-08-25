@@ -1729,3 +1729,350 @@ class TestDenoiserLearning:
 
         assert jnp.allclose(aux1["denoiser_loss"], aux2["denoiser_loss"], atol=1e-6)
         assert not jnp.allclose(aux1["velocity_loss"], aux2["velocity_loss"], atol=1e-2)
+
+
+# =============================================================================
+# Denoiser-Only Training Tests
+# =============================================================================
+
+
+class TestDenoiserOnlyTraining:
+    """Tests for denoiser-only training (compute_velocity_loss=False)."""
+
+    def test_denoiser_only_requires_denoiser(self):
+        """compute_velocity_loss=False without get_denoiser must raise ValueError."""
+        with pytest.raises(ValueError, match="compute_velocity_loss=False requires a denoiser"):
+            StochasticInterpolantLoss(
+                _linear_interpolant,
+                compute_velocity_loss=False,
+            )
+
+    def test_denoiser_only_without_gamma(self, model):
+        """Denoiser-only with gamma=None uses y0i (base sample) as target."""
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            compute_velocity_loss=False,
+            get_denoiser=lambda m: m,
+        )
+        x0 = jnp.zeros((16, 2))
+        x1 = jnp.ones((16, 2))
+        loss, aux = loss_fn(model, (x0, x1), key=jax.random.key(0))
+
+        assert loss.shape == ()
+        assert jnp.isfinite(loss)
+        assert "denoiser_loss" in aux
+        assert jnp.isfinite(aux["denoiser_loss"])
+        assert jnp.allclose(aux["velocity_loss"], 0.0)
+
+    def test_denoiser_only_with_gamma(self):
+        """Denoiser-only with gamma uses zi (injected noise) as target."""
+        den = MLPVelocity(input_dim=2, width=16, depth=2, key=jax.random.key(42))
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            gamma=_gamma_schedule,
+            compute_velocity_loss=False,
+            get_denoiser=lambda m: m,
+        )
+        x0 = jnp.zeros((16, 2))
+        x1 = jnp.ones((16, 2))
+        loss, aux = loss_fn(den, (x0, x1), key=jax.random.key(0))
+
+        assert loss.shape == ()
+        assert jnp.isfinite(loss)
+        assert "denoiser_loss" in aux
+        assert jnp.isfinite(aux["denoiser_loss"])
+        assert jnp.allclose(aux["velocity_loss"], 0.0)
+
+    def test_denoiser_only_gradient_flows(self, model):
+        """Gradients must be non-zero for denoiser params in denoiser-only mode."""
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            compute_velocity_loss=False,
+            get_denoiser=lambda m: m,
+        )
+        x0 = jnp.zeros((16, 2))
+        x1 = jnp.ones((16, 2))
+        batch = (x0, x1)
+
+        @eqx.filter_jit
+        def loss_and_grad(m):
+            return eqx.filter_value_and_grad(loss_fn, has_aux=True)(m, batch, jax.random.key(1))
+
+        (loss, aux), grads = loss_and_grad(model)
+
+        assert jnp.isfinite(loss)
+        grad_norms = jax.tree.map(lambda x: jnp.linalg.norm(x), eqx.filter(grads, eqx.is_array))
+        total_grad_norm = sum(jax.tree.leaves(grad_norms))
+        assert total_grad_norm > 0
+
+    def test_denoiser_only_training_integration(self, base_dist, target_dist, model):
+        """Full training loop with denoiser-only mode completes."""
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            compute_velocity_loss=False,
+            get_denoiser=lambda m: m,
+        )
+        optimizer = optax.adam(1e-3)
+        trainer = Trainer(model, optimizer, loss_fn, seed=0)
+
+        source = CoupledDataSource(
+            DistributionDataSource(base_dist, batch_size=16, seed=0),
+            DistributionDataSource(target_dist, batch_size=16, seed=1),
+        )
+        dataset = grain.MapDataset.source(source).repeat()
+        trained_model = trainer.train(dataset, max_steps=20)
+
+        assert trainer.step == 20
+        assert trained_model is not None
+        assert "denoiser_loss" in trainer.logs
+
+    def test_denoiser_only_no_recompilation(self, base_dist, target_dist, model):
+        """Training steps must not trigger recompilation."""
+        import time
+
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            compute_velocity_loss=False,
+            get_denoiser=lambda m: m,
+        )
+        optimizer = optax.adam(1e-3)
+        trainer = Trainer(model, optimizer, loss_fn, seed=0)
+
+        source = CoupledDataSource(
+            DistributionDataSource(base_dist, batch_size=32, seed=0),
+            DistributionDataSource(target_dist, batch_size=32, seed=1),
+        )
+        dataset = grain.MapDataset.source(source).repeat()
+
+        times = []
+
+        start = time.perf_counter()
+        trainer.train(dataset, max_steps=1)
+        jax.block_until_ready(trainer.model)
+        times.append(time.perf_counter() - start)
+
+        for i in range(1, 5):
+            start = time.perf_counter()
+            trainer.train(dataset, max_steps=i + 1)
+            jax.block_until_ready(trainer.model)
+            times.append(time.perf_counter() - start)
+
+        compilation_time = times[0]
+        avg_execution_time = sum(times[1:]) / len(times[1:])
+
+        if avg_execution_time > 0.001:
+            assert compilation_time > 2.0 * avg_execution_time, "Recompilation likely occurred!"
+
+    def test_joint_denoiser_requires_gamma(self):
+        """Joint velocity + denoiser without gamma must raise ValueError."""
+        with pytest.raises(ValueError, match="Joint velocity .* denoiser"):
+            StochasticInterpolantLoss(
+                _linear_interpolant,
+                get_velocity=lambda m: m.velocity_field,
+                get_denoiser=lambda m: m.denoiser,
+            )
+
+
+# =============================================================================
+# Boundary Target Score Matching (TSM) Tests
+# =============================================================================
+
+
+class TestBoundaryTSM:
+    """Tests for boundary target score matching losses."""
+
+    @pytest.fixture
+    def score_model(self):
+        """Single MLP used as both denoiser and score network."""
+        return MLPVelocity(input_dim=2, width=16, depth=2, key=jax.random.key(42))
+
+    @pytest.fixture
+    def base_dist(self):
+        """Standard 2D Gaussian for TSM tests."""
+        return dsx.MultivariateNormalDiag(jnp.zeros(2), jnp.ones(2))
+
+    @pytest.fixture
+    def target_dist(self):
+        """Simple 2D Gaussian target for TSM tests."""
+        return dsx.MultivariateNormalDiag(jnp.array([2.0, 2.0]), jnp.ones(2) * 0.5)
+
+    def test_tsm_requires_get_score(self):
+        """tsm_weight > 0 without get_score must raise ValueError."""
+        with pytest.raises(ValueError, match="Boundary TSM requires a score extractor"):
+            StochasticInterpolantLoss(
+                _linear_interpolant,
+                tsm_weight=1.0,
+            )
+
+    def test_tsm_forward_pass(self, score_model, base_dist, target_dist):
+        """TSM loss returns finite scalar with tsm_loss in aux."""
+
+        def get_score_fn(model):
+            def score_fn(t, x, args):
+                eta = model(t, x, args)
+                alpha_t = 1.0 - t
+                return jax.tree.map(lambda e: -e / alpha_t, eta)
+
+            return score_fn
+
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            compute_velocity_loss=False,
+            get_denoiser=lambda m: m,
+            get_score=get_score_fn,
+            base_score_fn=lambda x: jax.grad(base_dist.log_prob)(x),
+            target_score_fn=lambda x: jax.grad(target_dist.log_prob)(x),
+            tsm_weight=1.0,
+        )
+
+        x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(0), 16))
+        x1 = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(1), 16))
+        loss, aux = loss_fn(score_model, (x0, x1), key=jax.random.key(2))
+
+        assert loss.shape == ()
+        assert jnp.isfinite(loss)
+        assert "tsm_loss" in aux
+        assert jnp.isfinite(aux["tsm_loss"])
+        assert "denoiser_loss" in aux
+        assert jnp.isfinite(aux["denoiser_loss"])
+
+    def test_tsm_gradient_flows(self, score_model, base_dist, target_dist):
+        """Gradients must flow through the score network from TSM loss."""
+
+        def get_score_fn(model):
+            def score_fn(t, x, args):
+                eta = model(t, x, args)
+                alpha_t = 1.0 - t
+                return jax.tree.map(lambda e: -e / alpha_t, eta)
+
+            return score_fn
+
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            compute_velocity_loss=False,
+            get_denoiser=lambda m: m,
+            get_score=get_score_fn,
+            base_score_fn=lambda x: jax.grad(base_dist.log_prob)(x),
+            target_score_fn=lambda x: jax.grad(target_dist.log_prob)(x),
+            tsm_weight=1.0,
+        )
+
+        x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(0), 16))
+        x1 = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(1), 16))
+        batch = (x0, x1)
+
+        @eqx.filter_jit
+        def loss_and_grad(m):
+            return eqx.filter_value_and_grad(loss_fn, has_aux=True)(m, batch, jax.random.key(2))
+
+        (loss, aux), grads = loss_and_grad(score_model)
+        assert jnp.isfinite(loss)
+        grad_norms = jax.tree.map(lambda x: jnp.linalg.norm(x), eqx.filter(grads, eqx.is_array))
+        total_grad_norm = sum(jax.tree.leaves(grad_norms))
+        assert total_grad_norm > 0
+
+    def test_tsm_with_denoiser_and_velocity(self, base_dist, target_dist):
+        """TSM works with joint velocity + denoiser training."""
+        vel = MLPVelocity(input_dim=2, width=16, depth=2, key=jax.random.key(42))
+        den = MLPVelocity(input_dim=2, width=16, depth=2, key=jax.random.key(99))
+        model_pair = VelocityDenoiserPair(velocity_field=vel, denoiser=den)
+
+        def get_score_fn(model):
+            def score_fn(t, x, args):
+                eta = model.denoiser(t, x, args)
+                alpha_t = 1.0 - t
+                return jax.tree.map(lambda e: -e / alpha_t, eta)
+
+            return score_fn
+
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            gamma=_gamma_schedule,
+            get_velocity=lambda m: m.velocity_field,
+            get_denoiser=lambda m: m.denoiser,
+            get_score=get_score_fn,
+            base_score_fn=lambda x: jax.grad(base_dist.log_prob)(x),
+            target_score_fn=lambda x: jax.grad(target_dist.log_prob)(x),
+            tsm_weight=0.5,
+        )
+
+        x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(0), 16))
+        x1 = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(1), 16))
+        loss, aux = loss_fn(model_pair, (x0, x1), key=jax.random.key(2))
+
+        assert loss.shape == ()
+        assert jnp.isfinite(loss)
+        assert "velocity_loss" in aux
+        assert "denoiser_loss" in aux
+        assert "tsm_loss" in aux
+
+    def test_tsm_training_integration(self, score_model, base_dist, target_dist):
+        """Full training loop with denoiser-only + TSM completes."""
+
+        def get_score_fn(model):
+            def score_fn(t, x, args):
+                eta = model(t, x, args)
+                alpha_t = 1.0 - t
+                return jax.tree.map(lambda e: -e / alpha_t, eta)
+
+            return score_fn
+
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            compute_velocity_loss=False,
+            get_denoiser=lambda m: m,
+            get_score=get_score_fn,
+            base_score_fn=lambda x: jax.grad(base_dist.log_prob)(x),
+            target_score_fn=lambda x: jax.grad(target_dist.log_prob)(x),
+            tsm_weight=1.0,
+        )
+        optimizer = optax.adam(1e-3)
+        trainer = Trainer(score_model, optimizer, loss_fn, seed=0)
+
+        source = CoupledDataSource(
+            DistributionDataSource(base_dist, batch_size=16, seed=0),
+            DistributionDataSource(target_dist, batch_size=16, seed=1),
+        )
+        dataset = grain.MapDataset.source(source).repeat()
+        trained_model = trainer.train(dataset, max_steps=20)
+
+        assert trainer.step == 20
+        assert trained_model is not None
+        assert "tsm_loss" in trainer.logs
+        assert "denoiser_loss" in trainer.logs
+
+    def test_tsm_only_base_score(self, score_model, base_dist, target_dist):
+        """TSM with only base_score_fn (no target_score_fn) works."""
+
+        def get_score_fn(model):
+            def score_fn(t, x, args):
+                eta = model(t, x, args)
+                alpha_t = 1.0 - t
+                return jax.tree.map(lambda e: -e / alpha_t, eta)
+
+            return score_fn
+
+        loss_fn = StochasticInterpolantLoss(
+            _linear_interpolant,
+            compute_velocity_loss=False,
+            get_denoiser=lambda m: m,
+            get_score=get_score_fn,
+            base_score_fn=lambda x: jax.grad(base_dist.log_prob)(x),
+            tsm_weight=1.0,
+        )
+
+        x0 = jax.vmap(base_dist.sample)(jax.random.split(jax.random.key(0), 16))
+        x1 = jax.vmap(target_dist.sample)(jax.random.split(jax.random.key(1), 16))
+        loss, aux = loss_fn(score_model, (x0, x1), key=jax.random.key(2))
+
+        assert loss.shape == ()
+        assert jnp.isfinite(loss)
+        assert "tsm_loss" in aux
+
+    def test_tsm_disabled_by_default(self, model):
+        """tsm_weight=0.0 (default) means no TSM overhead."""
+        loss_fn = StochasticInterpolantLoss(_linear_interpolant, gamma=_gamma_schedule)
+        x0 = jnp.zeros((8, 2))
+        x1 = jnp.ones((8, 2))
+        _, aux = loss_fn(model, (x0, x1), key=jax.random.key(0))
+        assert "tsm_loss" not in aux
