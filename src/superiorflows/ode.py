@@ -187,12 +187,14 @@ class ODEBijector(AbstractBijector):
 
     def _forward(self, x, *, args=None, **kwargs):
         kw = dict(kwargs)
+        kw.pop("key", None)
         saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
         sol = self._integrate(x, args=args, saveat=saveat, **kw)
         return jax.tree.map(lambda y: y[-1], sol.ys)
 
     def _inverse(self, y, *, args=None, **kwargs):
         kw = dict(kwargs)
+        kw.pop("key", None)
         t0 = kw.pop("t0", self.t0)
         t1 = kw.pop("t1", self.t1)
         saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
@@ -245,6 +247,7 @@ class ODEBijector(AbstractBijector):
             **self.extra_args,
         )
         solver_args.update(kwargs)
+        solver_args.pop("key", None)
         if solver_args["dt0"] is not None:
             solver_args["dt0"] = jnp.sign(solver_args["t1"] - solver_args["t0"]) * abs(solver_args["dt0"])
         solver_args["args"] = args
@@ -275,6 +278,7 @@ class ODEBijector(AbstractBijector):
             **self.augmented_extra_args,
         )
         solver_args.update(kwargs)
+        solver_args.pop("key", None)
         if solver_args["dt0"] is not None:
             solver_args["dt0"] = jnp.sign(solver_args["t1"] - solver_args["t0"]) * abs(solver_args["dt0"])
 

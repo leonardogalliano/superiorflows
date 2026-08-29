@@ -1,30 +1,33 @@
-"""Generic normalising flow.
+"""Normalising flow: bijective transport + base distribution.
 
-A :class:`Flow` composes an invertible transformation (bijector) with a base
-distribution to define a new distribution via the change-of-variables formula.
-It is agnostic to the nature of the bijector — ODE-based continuous flows,
-discrete invertible architectures, or custom wrapped bijectors all work.
+A :class:`Flow` extends :class:`NeuralSampler` with inverse operations
+and exact ``log_prob`` evaluation, available only when the transport is
+bijective.  It also provides backward-compatible aliases
+``sample_and_log_prob`` and ``push_forward_and_log_prob`` which delegate
+to the unified ``*_log_weight`` methods.
 
 The class operates on arbitrary pytree states; all leaf-level handling
 (dynamic/static partitioning, divergence computation) is delegated to the
-bijector.
+bijector (transport).
 """
 
 import equinox as eqx
-import jax
 
 from superiorflows.bijector import AbstractBijector
+from superiorflows.sampler import NeuralSampler
 
 __all__ = ["Flow"]
 
 
-class Flow(eqx.Module):
+class Flow(NeuralSampler):
     """Normalising flow: pushforward of a base distribution through a bijector.
 
-    Composes an invertible transformation with a base distribution to provide
-    ``sample``, ``log_prob``, and ``sample_and_log_prob``.
+    Extends :class:`NeuralSampler` with inverse operations and exact
+    ``log_prob`` evaluation.  For bijective transport, the log-weight
+    IS the exact log-probability density, so ``sample_and_log_prob``
+    and ``push_forward_and_log_prob`` are provided as aliases.
 
-    The change-of-variables formula used internally:
+    The change-of-variables formula used internally::
 
         log p(y) = log p_base(f⁻¹(y)) + log|det J_{f⁻¹}(y)|
                  = log p_base(x)       − log|det J_f(x)|
@@ -32,52 +35,50 @@ class Flow(eqx.Module):
     where ``f`` is the bijector's forward map.
 
     Attributes:
-        bijector: The invertible transformation defining the flow.
+        transport: The invertible transformation (bijector).
         base_distribution: The base (prior) distribution.  Must provide
             ``sample(key=...)``, ``log_prob(value)``, and ``event_shape``.
     """
 
-    bijector: AbstractBijector
-    base_distribution: eqx.Module
+    transport: AbstractBijector
 
     @property
-    def event_shape(self):
-        return self.base_distribution.event_shape
+    def bijector(self):
+        """Backward-compatible alias for ``transport``."""
+        return self.transport
 
-    @eqx.filter_jit
-    def sample(self, key, **kwargs):
-        """Draw a sample from the flow.
+    # --- Backward-compatible aliases (log_weight IS log_prob for flows) ---
 
-        Args:
-            key: PRNG key for base-distribution sampling.
-            **kwargs: Forwarded to ``bijector.forward``.
-
-        Returns:
-            A sample from the pushforward distribution.
-        """
-        x = self.base_distribution.sample(key=key)
-        return self.bijector.forward(x, **kwargs)
-
-    @eqx.filter_jit
     def sample_and_log_prob(self, key, **kwargs):
-        """Draw a sample and compute its log-probability under the flow.
+        """Draw a sample and compute its exact log-probability.
 
-        More efficient than calling ``sample`` and ``log_prob`` separately
-        because the forward pass computes the log-det in tandem.
+        Alias for :meth:`sample_and_log_weight` — for bijective transport,
+        the log-weight is the exact log-density.
 
         Args:
-            key: PRNG key.  When the bijector requires a key (e.g. for
-                Hutchinson trace estimation), a subkey is split automatically.
-            **kwargs: Forwarded to ``bijector.forward_and_log_det``.
+            key: PRNG key.
+            **kwargs: Forwarded to the bijector.
 
         Returns:
             Tuple ``(y, log_prob_y)``.
         """
-        key_sample, key_bijector = jax.random.split(key)
-        x = self.base_distribution.sample(key=key_sample)
-        if "key" not in kwargs:
-            kwargs = dict(kwargs, key=key_bijector)
-        return self.push_forward_and_log_prob(x, **kwargs)
+        return self.sample_and_log_weight(key, **kwargs)
+
+    def push_forward_and_log_prob(self, x, **kwargs):
+        """Push a base sample through the bijector and return its log-prob.
+
+        Alias for :meth:`push_forward_and_log_weight`.
+
+        Args:
+            x: A sample from the base distribution.
+            **kwargs: Forwarded to the bijector.
+
+        Returns:
+            Tuple ``(y, log_prob_y)``.
+        """
+        return self.push_forward_and_log_weight(x, **kwargs)
+
+    # --- Bijector-specific operations ---
 
     @eqx.filter_jit
     def log_prob(self, value, **kwargs):
@@ -94,23 +95,8 @@ class Flow(eqx.Module):
         Returns:
             Scalar log-probability density.
         """
-        x, inv_logdet = self.bijector.inverse_and_log_det(value, **kwargs)
+        x, inv_logdet = self.transport.inverse_and_log_det(value, **kwargs)
         return self.base_distribution.log_prob(x) + inv_logdet
-
-    @eqx.filter_jit
-    def push_forward_and_log_prob(self, x, **kwargs):
-        """Push a base sample through the bijector and return its log-prob.
-
-        Args:
-            x: A sample from the base distribution.
-            **kwargs: Forwarded to ``bijector.forward_and_log_det``.
-
-        Returns:
-            Tuple ``(y, log_prob_y)``.
-        """
-        y, fwd_logdet = self.bijector.forward_and_log_det(x, **kwargs)
-        log_prob_base = self.base_distribution.log_prob(x)
-        return y, log_prob_base - fwd_logdet
 
     @eqx.filter_jit
     def pull_back_and_log_prob(self, y, **kwargs):
@@ -126,6 +112,6 @@ class Flow(eqx.Module):
             Tuple ``(x, log_prob_y)`` where ``x`` is the recovered base
             sample and ``log_prob_y`` is the log-probability density at ``y``.
         """
-        x, inv_logdet = self.bijector.inverse_and_log_det(y, **kwargs)
+        x, inv_logdet = self.transport.inverse_and_log_det(y, **kwargs)
         log_prob_base = self.base_distribution.log_prob(x)
         return x, log_prob_base + inv_logdet

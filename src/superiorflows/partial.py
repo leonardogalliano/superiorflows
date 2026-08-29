@@ -18,6 +18,7 @@ __all__ = [
     "uniform_index_selection",
     "fixed_selection",
     "PartialBase",
+    "PartialUpdater",
     "PartialFlowUpdater",
 ]
 
@@ -308,35 +309,35 @@ class PartialBase(eqx.Module):
         return x, self.log_prob(x)
 
 
-class PartialFlowUpdater(eqx.Module):
-    """Partial updater: update state ``s`` whilst conditioning on context ``c``.
+class PartialUpdater(eqx.Module):
+    """Unified partial updater for conditional sampling / Gibbs moves.
 
-    Composes a bijector with a base distribution.  Each method receives
-    a ``dynamic_mask`` that selects which DOFs are state vs context,
-    enabling the same updater to be called with different masks (e.g.
-    different random particle selections per sample in a batch).
+    Works with any :class:`AbstractTransport` — bijective or stochastic.
+    Each method receives a ``dynamic_mask`` selecting which DOFs to update
+    while conditioning on the rest.
 
     When ``conditional=True``, the :class:`PartialBase` constructed
     internally will forward the static context to the base distribution,
     enabling genuinely conditional bases :math:`q_0(s \\mid c)`.
 
-    Used directly for inference (MCMC inner loops) and internally by
-    the training losses when a selection protocol is active.
-
     Attributes:
-        bijector: The invertible transformation (e.g.
-            :class:`ODEBijector`).
+        transport: The transport mechanism (e.g. :class:`ODEBijector`,
+            :class:`SDETransport`).
         base_distribution: Distribution over the dynamic DOFs.
         conditional: If ``True``, the static context is forwarded to the
             base distribution.
     """
 
-    bijector: eqx.Module
+    transport: eqx.Module
     base_distribution: eqx.Module
     conditional: bool = eqx.field(static=True, default=False)
 
+    @property
+    def bijector(self):
+        return self.transport
+
     def log_prob(self, x, dynamic_mask, **kwargs):
-        """Evaluate ``log q_θ(s | c)`` for a given full state and mask.
+        """Evaluate ``log q_θ(s | c)`` — only for bijective transport.
 
         Args:
             x: Full state.
@@ -350,50 +351,63 @@ class PartialFlowUpdater(eqx.Module):
         from superiorflows.flow import Flow
 
         partial_base = PartialBase(self.base_distribution, x, dynamic_mask, conditional=self.conditional)
-        flow = Flow(self.bijector, partial_base)
+        flow = Flow(self.transport, partial_base)
         return flow.log_prob(x, dynamic_mask=dynamic_mask, **kwargs)
 
     def update(self, x, dynamic_mask, key, **kwargs):
         """Update the dynamic DOFs of ``x``, keeping context fixed.
 
-        Draws from the partial base, pushes through the bijector, and
-        merges the result with the static context.
-
         Args:
             x: Full state (context is extracted from this).
             dynamic_mask: Mask selecting the dynamic DOFs.
             key: PRNG key for base-distribution sampling.
-            **kwargs: Forwarded to the bijector.
+            **kwargs: Forwarded to the transport.
 
         Returns:
             Updated full state with new dynamic DOFs.
         """
-        from superiorflows.flow import Flow
+        from superiorflows.sampler import NeuralSampler
 
         partial_base = PartialBase(self.base_distribution, x, dynamic_mask, conditional=self.conditional)
-        flow = Flow(self.bijector, partial_base)
-        return flow.sample(key=key, dynamic_mask=dynamic_mask, **kwargs)
+        sampler = NeuralSampler(self.transport, partial_base)
+        return sampler.sample(key=key, dynamic_mask=dynamic_mask, **kwargs)
 
-    def update_and_log_prob(self, x, dynamic_mask, key, **kwargs):
-        """Update dynamic DOFs and return the log-probability.
+    def update_and_log_weight(self, x, dynamic_mask, key, **kwargs):
+        """Update dynamic DOFs and return the log-weight.
 
         Args:
             x: Full state.
             dynamic_mask: Mask selecting the dynamic DOFs.
             key: PRNG key.
-            **kwargs: Forwarded to the bijector.
+            **kwargs: Forwarded to the transport.
 
         Returns:
-            Tuple ``(x_updated, log_prob)``.
+            Tuple ``(x_updated, log_weight)``.
         """
-        from superiorflows.flow import Flow
+        from superiorflows.sampler import NeuralSampler
 
         partial_base = PartialBase(self.base_distribution, x, dynamic_mask, conditional=self.conditional)
-        flow = Flow(self.bijector, partial_base)
-        return flow.sample_and_log_prob(key=key, dynamic_mask=dynamic_mask, **kwargs)
+        sampler = NeuralSampler(self.transport, partial_base)
+        return sampler.sample_and_log_weight(key=key, dynamic_mask=dynamic_mask, **kwargs)
 
-    def push_forward_and_log_prob(self, x, dynamic_mask, **kwargs):
-        """Push a partial base sample through the bijector.
+    def update_and_log_prob(self, x, dynamic_mask, key, **kwargs):
+        """Update dynamic DOFs and return log-prob (bijective alias).
+
+        Backward-compatible alias for :meth:`update_and_log_weight`.
+
+        Args:
+            x: Full state.
+            dynamic_mask: Mask selecting the dynamic DOFs.
+            key: PRNG key.
+            **kwargs: Forwarded to the transport.
+
+        Returns:
+            Tuple ``(x_updated, log_weight)``.
+        """
+        return self.update_and_log_weight(x, dynamic_mask, key, **kwargs)
+
+    def push_forward_and_log_weight(self, x, dynamic_mask, **kwargs):
+        """Push a partial base sample through the transport.
 
         Assumes ``x`` already contains a base sample in the dynamic
         DOFs (i.e. the dynamic part of ``x`` was drawn from the base
@@ -402,13 +416,20 @@ class PartialFlowUpdater(eqx.Module):
         Args:
             x: Full state with base sample in dynamic DOFs.
             dynamic_mask: Mask selecting the dynamic DOFs.
-            **kwargs: Forwarded to the bijector.
+            **kwargs: Forwarded to the transport.
 
         Returns:
-            Tuple ``(x_pushed, log_prob)``.
+            Tuple ``(x_pushed, log_weight)``.
         """
-        from superiorflows.flow import Flow
+        from superiorflows.sampler import NeuralSampler
 
         partial_base = PartialBase(self.base_distribution, x, dynamic_mask, conditional=self.conditional)
-        flow = Flow(self.bijector, partial_base)
-        return flow.push_forward_and_log_prob(x, dynamic_mask=dynamic_mask, **kwargs)
+        sampler = NeuralSampler(self.transport, partial_base)
+        return sampler.push_forward_and_log_weight(x, dynamic_mask=dynamic_mask, **kwargs)
+
+    def push_forward_and_log_prob(self, x, dynamic_mask, **kwargs):
+        """Backward-compatible alias for :meth:`push_forward_and_log_weight`."""
+        return self.push_forward_and_log_weight(x, dynamic_mask, **kwargs)
+
+
+PartialFlowUpdater = PartialUpdater

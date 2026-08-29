@@ -5,14 +5,8 @@ import jax
 import jax.numpy as jnp
 
 from superiorflows.flow import Flow
-from superiorflows.partial import PartialFlowUpdater, PartitionSpec, state_context_partition
-
-
-def _pack_args(ctx, index_meta, user_args=None):
-    """Combine partition context, index mapping metadata, and user-supplied args."""
-    if index_meta is None:
-        return (ctx, user_args) if user_args is not None else ctx
-    return (ctx, (index_meta, user_args)) if user_args is not None else (ctx, index_meta)
+from superiorflows.partial import PartialUpdater, PartitionSpec, state_context_partition
+from superiorflows.transport import _pack_args
 
 
 def _split_batch_metadata(batch):
@@ -77,7 +71,7 @@ class MaximumLikelihoodLoss(eqx.Module):
             else:
                 k_sel, k_lp = jax.random.split(key_i)
                 mask = self.selection_protocol(k_sel, xi)
-                updater = PartialFlowUpdater(bijector, self.base_distribution)
+                updater = PartialUpdater(bijector, self.base_distribution)
                 return updater.log_prob(xi, mask, key=k_lp, **args_kw, **fk)
 
         if key is not None:
@@ -137,7 +131,7 @@ class EnergyBasedLoss(eqx.Module):
             else:
                 k_sel, k_lp = jax.random.split(key_i)
                 mask = self.selection_protocol(k_sel, xi)
-                updater = PartialFlowUpdater(bijector, self.base_distribution)
+                updater = PartialUpdater(bijector, self.base_distribution)
                 args_val = ua_i if ua_i else self.flow_kwargs.get("args")
                 args_kw = {"args": args_val} if args_val is not None else {}
                 x1_i, logq_i = updater.update_and_log_prob(xi, mask, key=k_lp, **args_kw, **fk)
