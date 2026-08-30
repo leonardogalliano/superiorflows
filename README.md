@@ -4,8 +4,7 @@
 [![codecov](https://codecov.io/gh/leonardogalliano/superiorflows/branch/main/graph/badge.svg)](https://codecov.io/gh/leonardogalliano/superiorflows)
 
 **Superiorflows** is a JAX-based library for sampling physical systems using generic transport maps.
-
-The project is developed at the Centre des Sciences des Données at the École Normale Supérieure (Paris), and is largely inspired by the PyTorch implementation [learndiffeq](https://github.com/h2o64/learndiffeq).
+The project is developed at the Centre des Sciences des Données at the École Normale Supérieure (Paris).
 
 ## Installation
 
@@ -25,16 +24,17 @@ uv sync --extra cuda
 
 ## Design principles
 
-**Superiorflows** relies on a composable bijector-based architecture designed to operate on *arbitrary structured inputs*, ranging from arrays of any rank to complex pytrees representing physical systems.
+**Superiorflows** relies on a composable architecture designed to operate on *arbitrary structured inputs*, ranging from flat arrays to complex PyTrees representing physical systems. It unifies *normalising flows* and *diffusion models* under a single sampling and importance-weighting interface.
+
+A generalised state-context partitioning mechanism enables seamless *partial updates*, conditional generation, and Gibbs-like patch moves over dynamic degrees of freedom while conditioning on the static environment.
 
 While a primary focus is on particle-based systems, the core abstractions are intentionally fully general and not tied to a specific domain. The library provides flexible building blocks rather than fixed pipelines.
-
 Users are expected to define:
 - custom input structures (e.g. arrays, particle systems, graphs, fields),
-- velocity / vector field architectures,
+- velocity, score, or vector field architectures,
 - and data pipelines tailored to their problem.
 
-This design enables the same framework to be applied across a wide range of sampling tasks beyond its original scope.
+This design enables the same framework to be applied across a wide range of sampling and free-energy calculation tasks beyond its original scope.
 
 ## Ecosystem
 
