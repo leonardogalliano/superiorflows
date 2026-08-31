@@ -83,9 +83,8 @@ class EulerMaruyama(dfx.AbstractItoSolver):
 
     def step(self, terms, t0, t1, y0, args, solver_state, made_jump):
         del solver_state, made_jump
-        dt = t1 - t0
-        _, dW = terms.contr(t0, t1)
-        dy = terms.vf_prod(t0, y0, args, (dt, dW))
+        control = terms.contr(t0, t1)
+        dy = terms.vf_prod(t0, y0, args, control)
         y1 = jax.tree.map(lambda y, dy_: y + dy_, y0, dy)
         return y1, None, dict(y0=y0, y1=y1), None, dfx.RESULTS.successful
 
@@ -132,18 +131,23 @@ class EulerMaruyamaWithAction(dfx.AbstractItoSolver):
         x0 = y0["x"]
         action0 = y0["action"]
 
-        dt = t1 - t0
-        _, dW = terms.contr(t0, t1)
+        dt, dW = terms.contr(t0, t1)
+        abs_dt = jnp.abs(dt)
 
-        eps_t0 = self.noise_schedule(t0)
+        # Diffrax negates internal times for backward integration;
+        # recover physical time for drift and noise schedule evaluation.
+        t0_phys = jnp.abs(t0)
+        t1_phys = jnp.abs(t1)
+
+        eps_t0 = self.noise_schedule(t0_phys)
         sigma_t0 = jnp.sqrt(2.0 * eps_t0)
 
-        mu_fwd_x0 = self.forward_drift_fn(t0, x0, args)
+        mu_fwd_x0 = self.forward_drift_fn(t0_phys, x0, args)
         x1 = jax.tree.map(lambda x, m, dw: x + m * dt + sigma_t0 * dw, x0, mu_fwd_x0, dW)
 
-        eps_t1 = self.noise_schedule(t1)
-        sigma2_fwd = 2.0 * eps_t0 * dt
-        sigma2_bwd = 2.0 * eps_t1 * dt
+        eps_t1 = self.noise_schedule(t1_phys)
+        sigma2_fwd = 2.0 * eps_t0 * abs_dt
+        sigma2_bwd = 2.0 * eps_t1 * abs_dt
         d = sum(leaf.size for leaf in jax.tree.leaves(x0))
 
         res_fwd_sq = sum(
@@ -152,7 +156,7 @@ class EulerMaruyamaWithAction(dfx.AbstractItoSolver):
         )
         log_p_fwd = -0.5 * res_fwd_sq / sigma2_fwd - 0.5 * d * jnp.log(2.0 * jnp.pi * sigma2_fwd)
 
-        mu_bwd_x1 = self.backward_drift_fn(t1, x1, args)
+        mu_bwd_x1 = self.backward_drift_fn(t1_phys, x1, args)
         res_bwd_sq = sum(
             jnp.sum(jnp.square(x0_l - (x1_l - m_b_l * dt)))
             for x0_l, x1_l, m_b_l in zip(jax.tree.leaves(x0), jax.tree.leaves(x1), jax.tree.leaves(mu_bwd_x1))
@@ -256,7 +260,8 @@ class SDETransport(AbstractTransport):
     def _make_brownian_tree(self, x0, key, t0, t1, dt0):
         """Create a VirtualBrownianTree matching the PyTree structure of ``x0``."""
         shape = jax.tree.map(lambda leaf: jax.ShapeDtypeStruct(leaf.shape, leaf.dtype), x0)
-        return dfx.VirtualBrownianTree(t0=t0, t1=t1, tol=dt0 / 2, shape=shape, key=key)
+        t_min, t_max = min(t0, t1), max(t0, t1)
+        return dfx.VirtualBrownianTree(t0=t_min, t1=t_max, tol=abs(dt0) / 2, shape=shape, key=key)
 
     def _noise_coefficient(self, t, x, _args):
         """Isotropic diffusion coefficient ``σ(t) = √(2ε(t))``."""
@@ -354,3 +359,112 @@ class SDETransport(AbstractTransport):
         solver_args.update(kwargs)
 
         return dfx.diffeqsolve(term, y0=u0, **solver_args)
+
+    # --- Backward transport ---
+
+    def _backward(self, y, *, args=None, key, **kwargs):
+        """Backward EM integration on pre-partitioned dynamic state.
+
+        Integrates the time-reversed SDE from ``t1`` back to ``t0``
+        using the backward drift μ⁻ = b̂ − εŝ as the generating drift.
+
+        Args:
+            y: Dynamic state at ``t1``.
+            args: Context from partition.
+            key: PRNG key for Brownian motion.
+            **kwargs: Override parameters.
+
+        Returns:
+            State at ``t0``.
+        """
+        kw = dict(kwargs)
+        saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
+        t0 = kw.pop("t0", self.t1)
+        t1 = kw.pop("t1", self.t0)
+        num_steps = kw.pop("num_steps", self.num_steps)
+        dt0 = (t1 - t0) / num_steps
+
+        _, bwd_drift = self._make_drifts()
+        bm = self._make_brownian_tree(y, key, t0, t1, dt0)
+
+        term = SDETerm(
+            forward_drift_fn=bwd_drift,
+            noise_coefficient_fn=self._noise_coefficient,
+            brownian_motion=bm,
+        )
+        solver = EulerMaruyama()
+
+        solver_args = dict(
+            solver=solver,
+            t0=t0,
+            t1=t1,
+            dt0=dt0,
+            stepsize_controller=dfx.ConstantStepSize(),
+            args=args,
+            **self.extra_args,
+        )
+        solver_args.update(kw)
+
+        sol = dfx.diffeqsolve(term, y0=y, saveat=saveat, **solver_args)
+        return jax.tree.map(lambda arr: arr[-1], sol.ys)
+
+    def _backward_and_log_weight(self, y, *, args=None, key, **kwargs):
+        """Backward EM integration with Girsanov path action.
+
+        Integrates backward from ``t1`` to ``t0`` with the backward
+        drift μ⁻ as the generating drift and the forward drift μ⁺ as
+        the ghost kernel.  The accumulated action equals
+        S^bwd = Σ(log p⁻ − log p⁺) = −S^fwd.
+
+        Args:
+            y: Dynamic state at ``t1``.
+            args: Context from partition.
+            key: PRNG key for Brownian motion.
+            **kwargs: Override parameters.
+
+        Returns:
+            Tuple ``(x, action_bwd)`` where ``x`` is the state at ``t0``
+            and ``action_bwd`` is the backward path action.
+        """
+        kw = dict(kwargs)
+        saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
+        t0 = kw.pop("t0", self.t1)
+        t1 = kw.pop("t1", self.t0)
+        num_steps = kw.pop("num_steps", self.num_steps)
+        dt0 = (t1 - t0) / num_steps
+
+        fwd_drift, bwd_drift = self._make_drifts()
+        bm = self._make_brownian_tree(y, key, t0, t1, dt0)
+
+        term = SDETerm(
+            forward_drift_fn=bwd_drift,
+            noise_coefficient_fn=self._noise_coefficient,
+            brownian_motion=bm,
+        )
+        solver = EulerMaruyamaWithAction(
+            forward_drift_fn=bwd_drift,
+            backward_drift_fn=fwd_drift,
+            noise_schedule=self.noise_schedule,
+        )
+
+        u0 = {"x": y, "action": jnp.zeros(())}
+
+        solver_args = dict(
+            solver=solver,
+            t0=t0,
+            t1=t1,
+            dt0=dt0,
+            stepsize_controller=dfx.ConstantStepSize(),
+            args=args,
+            **self.action_extra_args,
+        )
+        solver_args.update(kw)
+
+        sol = dfx.diffeqsolve(term, y0=u0, saveat=saveat, **solver_args)
+        x0 = jax.tree.map(lambda arr: arr[-1], sol.ys["x"])
+        action = sol.ys["action"][-1]
+        return x0, action
+
+    def backward_and_path_action(self, y, **kwargs):
+        """SDE-native alias for :meth:`backward_and_log_weight`."""
+        return self.backward_and_log_weight(y, **kwargs)

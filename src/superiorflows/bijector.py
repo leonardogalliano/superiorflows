@@ -57,6 +57,18 @@ class AbstractBijector(AbstractTransport):
         y, log_det = self._forward_and_log_det(x, args=args, **kwargs)
         return y, -log_det
 
+    def _backward(self, y, *, args=None, **kwargs):
+        """Backward transport delegates to inverse for bijectors."""
+        return self._inverse(y, args=args, **kwargs)
+
+    def _backward_and_log_weight(self, y, *, args=None, **kwargs):
+        """Backward transport with log-weight via inverse_and_log_det.
+
+        Returns ``(x, inv_logdet)`` where ``inv_logdet = log|det J_{f⁻¹}|``.
+        """
+        x, inv_logdet = self._inverse_and_log_det(y, args=args, **kwargs)
+        return x, inv_logdet
+
     # --- Bijector-specific public interface ---
 
     @eqx.filter_jit

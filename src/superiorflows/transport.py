@@ -117,6 +117,33 @@ class AbstractTransport(eqx.Module):
         user_args = kw.pop("args", None)
         return _partition_and_apply(self._forward_and_log_weight, x, mask, user_args, **kw)
 
+    @eqx.filter_jit
+    def backward(self, y, **kwargs):
+        """Backward transport: ``x = f⁻¹(y)`` (or reverse SDE).
+
+        Partitions ``y`` via the dynamic mask, delegates to
+        :meth:`_backward`, and merges the result.
+        """
+        kw = dict(kwargs)
+        mask = kw.pop("dynamic_mask", self.dynamic_mask)
+        user_args = kw.pop("args", None)
+        return _partition_and_apply(self._backward, y, mask, user_args, **kw)
+
+    @eqx.filter_jit
+    def backward_and_log_weight(self, y, **kwargs):
+        """Backward transport with log-weight contribution.
+
+        Returns ``(x, c)`` where ``c`` is the transport's additive
+        correction for the backward direction.
+
+        For bijectors: ``c = log|det J_{f⁻¹}(y)|``.
+        For SDEs: ``c = S^bwd = Σ(log p⁻ − log p⁺)``.
+        """
+        kw = dict(kwargs)
+        mask = kw.pop("dynamic_mask", self.dynamic_mask)
+        user_args = kw.pop("args", None)
+        return _partition_and_apply(self._backward_and_log_weight, y, mask, user_args, **kw)
+
     # --- Abstract extension points ---
 
     def _forward(self, x, *, args=None, **kwargs):
@@ -143,5 +170,21 @@ class AbstractTransport(eqx.Module):
         Returns:
             Tuple ``(y, c)`` where ``y`` is the transformed dynamic
             state and ``c`` is the scalar log-weight contribution.
+        """
+        raise NotImplementedError
+
+    def _backward(self, y, *, args=None, **kwargs):
+        """Compute ``x = f⁻¹(y)`` on pre-partitioned dynamic state.
+
+        Default implementation discards the log-weight from
+        :meth:`_backward_and_log_weight`.
+        """
+        x, _ = self._backward_and_log_weight(y, args=args, **kwargs)
+        return x
+
+    def _backward_and_log_weight(self, y, *, args=None, **kwargs):
+        """Compute ``(x, c)`` for backward transport on the dynamic state.
+
+        Must be implemented by subclasses that support backward transport.
         """
         raise NotImplementedError

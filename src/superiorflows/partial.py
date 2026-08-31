@@ -431,5 +431,36 @@ class PartialUpdater(eqx.Module):
         """Backward-compatible alias for :meth:`push_forward_and_log_weight`."""
         return self.push_forward_and_log_weight(x, dynamic_mask, **kwargs)
 
+    def backward_update(self, y, dynamic_mask, **kwargs):
+        """Pull dynamic DOFs of ``y`` back through the transport.
+
+        Args:
+            y: Full state at the target end.
+            dynamic_mask: Mask selecting the dynamic DOFs.
+            **kwargs: Forwarded to the transport.
+
+        Returns:
+            Full state with dynamic DOFs mapped backward.
+        """
+        return self.transport.backward(y, dynamic_mask=dynamic_mask, **kwargs)
+
+    def backward_update_and_log_weight(self, y, dynamic_mask, **kwargs):
+        """Pull dynamic DOFs backward with log-weight contribution.
+
+        Args:
+            y: Full state at the target end.
+            dynamic_mask: Mask selecting the dynamic DOFs.
+            **kwargs: Forwarded to the transport.
+
+        Returns:
+            Tuple ``(x_updated, c)`` where ``c`` is the backward
+            transport correction.
+        """
+        return self.transport.backward_and_log_weight(y, dynamic_mask=dynamic_mask, **kwargs)
+
+    def pull_back_and_log_weight(self, y, dynamic_mask, **kwargs):
+        """Alias for :meth:`backward_update_and_log_weight`."""
+        return self.backward_update_and_log_weight(y, dynamic_mask=dynamic_mask, **kwargs)
+
 
 PartialFlowUpdater = PartialUpdater
