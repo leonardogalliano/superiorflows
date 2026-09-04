@@ -8,7 +8,7 @@ import datetime
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 import diffrax as dfx
 import distreqx.distributions as dsx
@@ -92,6 +92,11 @@ DEFAULT_CONFIG = {
         "denoiser_weight": 1.0,
         "denoiser_only": False,
         "tsm_weight": 0.0,
+    },
+    "sde": {
+        "noise_schedule": "1.0",
+        "noise_ratio": None,
+        "steps": 100,
     },
     "callbacks": {
         "ess": {
@@ -347,6 +352,107 @@ class MLPVelocity(eqx.Module):
         return self._eval_mlp(t, x)
 
 
+class ReconstructedVelocityFromDenoiser(eqx.Module):
+    """Reconstruct velocity b(t, x) from base denoiser eta_0(t, x).
+
+    For an interpolant I_t = (1 - s(t)) x_0 + s(t) x_1, the velocity field
+    is b(t, x) = dot_s(t) * (x - eta_0(t, x)) / s(t).
+    """
+
+    denoiser: eqx.Module
+    s_fn: Optional[Callable] = eqx.field(default=None, static=True)
+
+    def __call__(self, t: float, x: jnp.ndarray, args=None) -> jnp.ndarray:
+        eta0 = self.denoiser(t, x, args)
+        t_arr = jnp.asarray(t, dtype=jnp.float32)
+        if self.s_fn is not None:
+            s_t, dot_s_t = jax.jvp(self.s_fn, (t_arr,), (jnp.ones_like(t_arr),))
+        else:
+            s_t, dot_s_t = t_arr, jnp.ones_like(t_arr)
+
+        s_safe = jnp.where(s_t > 1e-5, s_t, 1e-5)
+        return (dot_s_t / s_safe) * (x - eta0)
+
+
+class ReconstructedScoreFromDenoiser(eqx.Module):
+    """Reconstruct score s(t, x) from base denoiser eta_0(t, x).
+
+    For an interpolant I_t = (1 - s(t)) x_0 + s(t) x_1, the score field
+    is s(t, x) = -eta_0(t, x) / (1 - s(t)).
+    """
+
+    denoiser: eqx.Module
+    s_fn: Optional[Callable] = eqx.field(default=None, static=True)
+
+    def __call__(self, t: float, x: jnp.ndarray, args=None) -> jnp.ndarray:
+        eta0 = self.denoiser(t, x, args)
+        t_arr = jnp.asarray(t, dtype=jnp.float32)
+        if self.s_fn is not None:
+            s_t = self.s_fn(t_arr)
+        else:
+            s_t = t_arr
+        alpha_t = 1.0 - s_t
+        alpha_safe = jnp.where(alpha_t > 1e-5, alpha_t, 1e-5)
+        return -eta0 / alpha_safe
+
+
+class ScoreFromGamma(eqx.Module):
+    """Reconstruct score s(t, x) from noise denoiser eta_z(t, x) when gamma(t) is used.
+
+    For an interpolant I_t = I(t, x_0, x_1) + gamma(t) z, the score field
+    is s(t, x) = -eta_z(t, x) / gamma(t).
+    """
+
+    denoiser: eqx.Module
+    gamma_fn: Callable = eqx.field(static=True)
+
+    def __call__(self, t: float, x: jnp.ndarray, args=None) -> jnp.ndarray:
+        etaz = self.denoiser(t, x, args)
+        t_arr = jnp.asarray(t, dtype=jnp.float32)
+        g_t = self.gamma_fn(t_arr)
+        g_safe = jnp.where(g_t > 1e-5, g_t, 1e-5)
+        return -etaz / g_safe
+
+
+class NoiseScheduleFromRatio(eqx.Module):
+    """Diffusion noise schedule epsilon(t) = lambda(t) * scale(t)."""
+
+    ratio_fn: Callable = eqx.field(static=True)
+    scale_fn: Optional[Callable] = eqx.field(default=None, static=True)
+
+    def __call__(self, t: float) -> jnp.ndarray:
+        t_arr = jnp.asarray(t, dtype=jnp.float32)
+        lam = self.ratio_fn(t_arr)
+        scale = self.scale_fn(t_arr) if self.scale_fn is not None else (1.0 - t_arr)
+        return jnp.maximum(lam * scale, 0.0)
+
+
+class OsmoticDriftFromDenoiser(eqx.Module):
+    """Evaluate osmotic drift u(t, x) = -lambda(t) * eta_0(t, x) with zero divisions."""
+
+    denoiser: eqx.Module
+    ratio_fn: Callable = eqx.field(static=True)
+
+    def __call__(self, t: float, x: jnp.ndarray, args=None) -> jnp.ndarray:
+        t_arr = jnp.asarray(t, dtype=jnp.float32)
+        lam = self.ratio_fn(t_arr)
+        eta0 = self.denoiser(t, x, args)
+        return -lam * eta0
+
+
+class OsmoticDriftFromGamma(eqx.Module):
+    """Evaluate osmotic drift u(t, x) = -lambda(t) * eta_z(t, x) when gamma is used."""
+
+    denoiser: eqx.Module
+    ratio_fn: Callable = eqx.field(static=True)
+
+    def __call__(self, t: float, x: jnp.ndarray, args=None) -> jnp.ndarray:
+        t_arr = jnp.asarray(t, dtype=jnp.float32)
+        lam = self.ratio_fn(t_arr)
+        etaz = self.denoiser(t, x, args)
+        return -lam * etaz
+
+
 def build_model(config: dict, d: int, *, key):
     vcfg = config["velocity"]
     loss_type = config["training"]["loss_type"]
@@ -541,7 +647,17 @@ def train_single_model(config: dict):
     def make_bijector(m):
         if isinstance(m, AbstractBijector):
             return m
-        vf = m.velocity_field if isinstance(m, VelocityDenoiserPair) else m
+        if isinstance(m, VelocityDenoiserPair):
+            vf = m.velocity_field
+        elif (
+            config.get("stochastic_interpolant", {}).get("denoiser_only", False)
+            and loss_type == "stochastic_interpolant"
+        ):
+            s_expr = config.get("stochastic_interpolant", {}).get("interpolant_scheduler", "t")
+            s_fn = build_schedule_fn(s_expr)
+            vf = ReconstructedVelocityFromDenoiser(m, s_fn)
+        else:
+            vf = m
         return ODEBijector(vf, **bijector_kwargs)
 
     # Setup partial updates config and selection protocol

@@ -227,3 +227,56 @@ def test_sde_per_call_overrides():
     # Override num_steps per call
     y1 = transport.forward(x, key=key, num_steps=20)
     assert y1.shape == x.shape
+
+
+def test_osmotic_drift_equivalence():
+    """Verify that osmotic_drift produces identical results to score_field * noise_schedule."""
+    key = jax.random.key(303)
+    k1, _ = jax.random.split(key)
+
+    x0 = jnp.array([1.5, -0.8, 2.3])
+
+    def vf(t, x, a):
+        return -0.3 * x
+
+    def sf(t, x, a):
+        return -2.0 * x
+
+    def ns(t):
+        return 0.1 * (1.0 - t) * t + 0.01
+
+    def osmotic_u(t, x, a):
+        return ns(t) * sf(t, x, a)
+
+    # 1. Standard transport via score_field
+    transport_score = SDETransport(
+        velocity_field=vf,
+        score_field=sf,
+        noise_schedule=ns,
+        num_steps=50,
+    )
+
+    # 2. Transport via explicit osmotic_drift
+    transport_osmotic = SDETransport(
+        velocity_field=vf,
+        noise_schedule=ns,
+        osmotic_drift=osmotic_u,
+        num_steps=50,
+    )
+
+    y_score, action_score = transport_score.forward_and_log_weight(x0, key=k1)
+    y_osmotic, action_osmotic = transport_osmotic.forward_and_log_weight(x0, key=k1)
+
+    assert jnp.allclose(y_score, y_osmotic, atol=1e-6)
+    assert jnp.allclose(action_score, action_osmotic, atol=1e-6)
+
+
+def test_sde_missing_score_and_osmotic_drift():
+    """Verify that SDETransport raises ValueError if neither score_field nor osmotic_drift is provided."""
+    import pytest
+
+    with pytest.raises(ValueError, match="Either `score_field` or `osmotic_drift` must be provided"):
+        SDETransport(
+            velocity_field=lambda t, x, a: -x,
+            noise_schedule=lambda t: 0.1,
+        )

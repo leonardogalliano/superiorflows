@@ -22,7 +22,7 @@ Key components:
   composing these pieces.
 """
 
-from typing import Any, Callable, ClassVar, Dict
+from typing import Any, Callable, ClassVar, Dict, Optional
 
 import diffrax as dfx
 import equinox as eqx
@@ -176,12 +176,15 @@ class SDETransport(AbstractTransport):
 
     Integrates the forward SDE::
 
-        dX = [b̂(t,X) + ε(t)ŝ(t,X)] dt + √(2ε(t)) dW
+        dX = [b̂(t,X) + u(t,X)] dt + √(2ε(t)) dW
 
-    ``velocity_field`` and ``score_field`` are arbitrary callables with
-    signature ``(t, x, args)`` — they can be learned models or analytical
-    oracles for testing.  ``noise_schedule`` is an arbitrary callable
-    ``ε(t) → ℝ≥0``.
+    where ``u(t, X)`` is the osmotic drift.  The osmotic drift can either
+    be provided directly via ``osmotic_drift``, or computed from a score
+    field via ``u(t, X) = ε(t) ŝ(t, X)`` when ``score_field`` is supplied.
+
+    ``velocity_field``, ``score_field``, and ``osmotic_drift`` are arbitrary
+    callables with signature ``(t, x, args)``.  ``noise_schedule`` is an
+    arbitrary callable ``ε(t) → ℝ≥0``.
 
     Configuration mirrors :class:`ODEBijector`: module-level defaults for
     solver parameters, per-call kwargs overrides for ``saveat``/``t0``/
@@ -190,8 +193,11 @@ class SDETransport(AbstractTransport):
 
     Attributes:
         velocity_field: Callable ``(t, x_dynamic, args) → velocity_pytree``.
-        score_field: Callable ``(t, x_dynamic, args) → score_pytree``.
         noise_schedule: Callable ``t → ε ≥ 0``.
+        score_field: Optional callable ``(t, x_dynamic, args) → score_pytree``.
+        osmotic_drift: Optional callable
+            ``(t, x_dynamic, args) → osmotic_drift_pytree`` evaluating
+            ``u(t, x) = ε(t) s(t, x)`` directly without division.
         t0: Start time of the SDE (default: 0.0).
         t1: End time of the SDE (default: 1.0).
         num_steps: Number of Euler–Maruyama steps M (default: 100).
@@ -203,13 +209,18 @@ class SDETransport(AbstractTransport):
     """
 
     velocity_field: Callable
-    score_field: Callable
     noise_schedule: Callable
+    score_field: Optional[Callable] = None
+    osmotic_drift: Optional[Callable] = None
     t0: float = 0.0
     t1: float = 1.0
     num_steps: int = 100
     extra_args: Dict[str, Any] = eqx.field(default_factory=dict, static=True)
     action_extra_args: Dict[str, Any] = eqx.field(default_factory=dict, static=True)
+
+    def __post_init__(self):
+        if self.score_field is None and self.osmotic_drift is None:
+            raise ValueError("Either `score_field` or `osmotic_drift` must be provided to SDETransport.")
 
     # --- AbstractTransport extension points ---
 
@@ -236,12 +247,32 @@ class SDETransport(AbstractTransport):
     # --- Internal helpers ---
 
     def _make_drifts(self):
-        """Build forward and backward drift closures from velocity + score + noise.
+        """Build forward and backward drift closures.
+
+        If ``osmotic_drift`` is provided, it is used directly:
+            forward_drift  = b + u
+            backward_drift = b - u
+        Otherwise, the osmotic drift is computed from score and noise schedule:
+            forward_drift  = b + ε s
+            backward_drift = b - ε s
 
         Returns:
             Tuple ``(forward_drift, backward_drift)`` with signature
             ``(t, x, args) → pytree``.
         """
+        if self.osmotic_drift is not None:
+
+            def forward_drift(t, x, _args):
+                b = self.velocity_field(t, x, _args)
+                u = self.osmotic_drift(t, x, _args)
+                return jax.tree.map(lambda bi, ui: bi + ui, b, u)
+
+            def backward_drift(t, x, _args):
+                b = self.velocity_field(t, x, _args)
+                u = self.osmotic_drift(t, x, _args)
+                return jax.tree.map(lambda bi, ui: bi - ui, b, u)
+
+            return forward_drift, backward_drift
 
         def forward_drift(t, x, _args):
             b = self.velocity_field(t, x, _args)
