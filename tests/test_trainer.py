@@ -1896,9 +1896,9 @@ class TestBoundaryTSM:
         """Simple 2D Gaussian target for TSM tests."""
         return dsx.MultivariateNormalDiag(jnp.array([2.0, 2.0]), jnp.ones(2) * 0.5)
 
-    def test_tsm_requires_get_score(self):
-        """tsm_weight > 0 without get_score must raise ValueError."""
-        with pytest.raises(ValueError, match="Boundary TSM requires a score extractor"):
+    def test_tsm_requires_denoiser(self):
+        """tsm_weight > 0 without get_denoiser must raise ValueError."""
+        with pytest.raises(ValueError, match="Boundary TSM requires a denoiser"):
             StochasticInterpolantLoss(
                 _linear_interpolant,
                 tsm_weight=1.0,
@@ -1906,20 +1906,10 @@ class TestBoundaryTSM:
 
     def test_tsm_forward_pass(self, score_model, base_dist, target_dist):
         """TSM loss returns finite scalar with tsm_loss in aux."""
-
-        def get_score_fn(model):
-            def score_fn(t, x, args):
-                eta = model(t, x, args)
-                alpha_t = 1.0 - t
-                return jax.tree.map(lambda e: -e / alpha_t, eta)
-
-            return score_fn
-
         loss_fn = StochasticInterpolantLoss(
             _linear_interpolant,
             compute_velocity_loss=False,
             get_denoiser=lambda m: m,
-            get_score=get_score_fn,
             base_score_fn=lambda x: jax.grad(base_dist.log_prob)(x),
             target_score_fn=lambda x: jax.grad(target_dist.log_prob)(x),
             tsm_weight=1.0,
@@ -1937,21 +1927,11 @@ class TestBoundaryTSM:
         assert jnp.isfinite(aux["denoiser_loss"])
 
     def test_tsm_gradient_flows(self, score_model, base_dist, target_dist):
-        """Gradients must flow through the score network from TSM loss."""
-
-        def get_score_fn(model):
-            def score_fn(t, x, args):
-                eta = model(t, x, args)
-                alpha_t = 1.0 - t
-                return jax.tree.map(lambda e: -e / alpha_t, eta)
-
-            return score_fn
-
+        """Gradients must flow through the denoiser network from TSM loss."""
         loss_fn = StochasticInterpolantLoss(
             _linear_interpolant,
             compute_velocity_loss=False,
             get_denoiser=lambda m: m,
-            get_score=get_score_fn,
             base_score_fn=lambda x: jax.grad(base_dist.log_prob)(x),
             target_score_fn=lambda x: jax.grad(target_dist.log_prob)(x),
             tsm_weight=1.0,
@@ -1977,20 +1957,11 @@ class TestBoundaryTSM:
         den = MLPVelocity(input_dim=2, width=16, depth=2, key=jax.random.key(99))
         model_pair = VelocityDenoiserPair(velocity_field=vel, denoiser=den)
 
-        def get_score_fn(model):
-            def score_fn(t, x, args):
-                eta = model.denoiser(t, x, args)
-                alpha_t = 1.0 - t
-                return jax.tree.map(lambda e: -e / alpha_t, eta)
-
-            return score_fn
-
         loss_fn = StochasticInterpolantLoss(
             _linear_interpolant,
             gamma=_gamma_schedule,
             get_velocity=lambda m: m.velocity_field,
             get_denoiser=lambda m: m.denoiser,
-            get_score=get_score_fn,
             base_score_fn=lambda x: jax.grad(base_dist.log_prob)(x),
             target_score_fn=lambda x: jax.grad(target_dist.log_prob)(x),
             tsm_weight=0.5,
@@ -2008,20 +1979,10 @@ class TestBoundaryTSM:
 
     def test_tsm_training_integration(self, score_model, base_dist, target_dist):
         """Full training loop with denoiser-only + TSM completes."""
-
-        def get_score_fn(model):
-            def score_fn(t, x, args):
-                eta = model(t, x, args)
-                alpha_t = 1.0 - t
-                return jax.tree.map(lambda e: -e / alpha_t, eta)
-
-            return score_fn
-
         loss_fn = StochasticInterpolantLoss(
             _linear_interpolant,
             compute_velocity_loss=False,
             get_denoiser=lambda m: m,
-            get_score=get_score_fn,
             base_score_fn=lambda x: jax.grad(base_dist.log_prob)(x),
             target_score_fn=lambda x: jax.grad(target_dist.log_prob)(x),
             tsm_weight=1.0,
@@ -2043,20 +2004,10 @@ class TestBoundaryTSM:
 
     def test_tsm_only_base_score(self, score_model, base_dist, target_dist):
         """TSM with only base_score_fn (no target_score_fn) works."""
-
-        def get_score_fn(model):
-            def score_fn(t, x, args):
-                eta = model(t, x, args)
-                alpha_t = 1.0 - t
-                return jax.tree.map(lambda e: -e / alpha_t, eta)
-
-            return score_fn
-
         loss_fn = StochasticInterpolantLoss(
             _linear_interpolant,
             compute_velocity_loss=False,
             get_denoiser=lambda m: m,
-            get_score=get_score_fn,
             base_score_fn=lambda x: jax.grad(base_dist.log_prob)(x),
             tsm_weight=1.0,
         )

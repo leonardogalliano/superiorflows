@@ -732,25 +732,15 @@ def train_single_model(config: dict):
         denoiser_only = config["stochastic_interpolant"].get("denoiser_only", False)
         tsm_weight = config["stochastic_interpolant"].get("tsm_weight", 0.0)
 
+        score_kwargs = {}
+        if tsm_weight > 0.0:
+            score_kwargs = dict(
+                base_score_fn=lambda x: jax.grad(base_dist.log_prob)(x),
+                target_score_fn=lambda x: jax.grad(target_dist.log_prob)(x),
+                tsm_weight=tsm_weight,
+            )
+
         if denoiser_only:
-
-            def get_score_fn(model):
-                def score_fn(t, x, args):
-                    eta = model(t, x, args)
-                    alpha_t = 1.0 - t
-                    return jax.tree.map(lambda e: -e / alpha_t, eta)
-
-                return score_fn
-
-            score_kwargs = {}
-            if tsm_weight > 0.0:
-                score_kwargs = dict(
-                    get_score=get_score_fn,
-                    base_score_fn=lambda x: jax.grad(base_dist.log_prob)(x),
-                    target_score_fn=lambda x: jax.grad(target_dist.log_prob)(x),
-                    tsm_weight=tsm_weight,
-                )
-
             loss_fn = StochasticInterpolantLoss(
                 interpolant=interpolant,
                 gamma=gamma_fn,
@@ -769,6 +759,7 @@ def train_single_model(config: dict):
                 get_denoiser=lambda m: m.denoiser,
                 denoiser_weight=config["stochastic_interpolant"].get("denoiser_weight", 1.0),
                 selection_protocol=selection_protocol,
+                **score_kwargs,
                 **si_kwargs,
             )
         else:

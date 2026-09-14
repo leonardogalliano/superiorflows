@@ -17,10 +17,14 @@ from scripts.gaussian_mixture.analytical import (
     louis_mixture_score,
     louis_mixture_velocity,
 )
+from scripts.gaussian_mixture.compare_sampling_methods import app as compare_app
 from scripts.gaussian_mixture.sample_gaussian_mixture import app as sampling_app
 from scripts.gaussian_mixture.train_gaussian_mixture import app as training_app
 
 runner = CliRunner()
+
+BENCHMARK_CONFIG_DIR = Path("scripts/gaussian_mixture/config")
+BENCHMARK_CONFIG_FILES = sorted(list(BENCHMARK_CONFIG_DIR.glob("*.json")))
 
 
 def get_latest_run_dir(base_ckpt_dir: Path) -> Path:
@@ -518,3 +522,129 @@ def test_sampling_with_noise_ratio(tmp_path):
         ],
     )
     assert res_override.exit_code == 0, f"CLI override failed: {res_override.stdout}"
+
+
+# ── Benchmark Configuration and Comparison Suite Tests ───────────────────────
+
+
+@pytest.mark.parametrize("config_path", BENCHMARK_CONFIG_FILES, ids=[p.stem for p in BENCHMARK_CONFIG_FILES])
+def test_benchmark_configs_training(config_path, tmp_path):
+    """Verify that each benchmark configuration file can train and checkpoint without errors."""
+    ckpt_path = tmp_path / config_path.stem
+    result = runner.invoke(
+        training_app,
+        [
+            "--config",
+            str(config_path),
+            "--nsteps",
+            "2",
+            "--batch-size",
+            "4",
+            "--ckpt-path",
+            str(ckpt_path),
+        ],
+    )
+    if result.exit_code != 0:
+        if result.exception:
+            raise result.exception
+        assert result.exit_code == 0, f"Training failed for {config_path.name}: {result.stdout}"
+
+    run_dir = get_latest_run_dir(ckpt_path)
+    assert run_dir is not None, f"No run directory found in {ckpt_path}"
+    assert (run_dir / "config.json").exists(), f"Configuration file not found in {run_dir}"
+
+
+def test_compare_sampling_methods_oracle_only(tmp_path):
+    """Verify comparison suite execution for analytical oracles without trained models."""
+    out_json = tmp_path / "oracle_results.json"
+    result = runner.invoke(
+        compare_app,
+        [
+            "--steps-list",
+            "10,20",
+            "--num-samples",
+            "10",
+            "--batch-size",
+            "5",
+            "--output-json",
+            str(out_json),
+        ],
+    )
+    if result.exit_code != 0:
+        if result.exception:
+            raise result.exception
+        assert result.exit_code == 0, f"compare_sampling_methods failed: {result.stdout}"
+
+    assert out_json.exists(), f"Output JSON file {out_json} was not created"
+    with open(out_json) as f:
+        data = json.load(f)
+
+    assert "summary_table" in data
+    assert "sde_scaling" in data
+    assert "Oracle: ODE (Exact)" in data["summary_table"]
+    assert "Oracle: SDE (Exact)" in data["summary_table"]
+    assert "steps_10" in data["sde_scaling"]
+    assert "steps_20" in data["sde_scaling"]
+
+
+def test_compare_sampling_methods_with_trained_models(tmp_path):
+    """Verify comparison suite execution with trained ODE and SDE checkpoints."""
+    bench_dir = tmp_path / "benchmark"
+    bench_dir.mkdir(parents=True, exist_ok=True)
+
+    # Train Run 1 (ODE, velocity-only, gamma=0)
+    cfg1 = BENCHMARK_CONFIG_DIR / "01_ode_velocity_no_gamma.json"
+    ckpt1_base = bench_dir / "01_ode_velocity_no_gamma"
+    res1 = runner.invoke(
+        training_app,
+        ["--config", str(cfg1), "--nsteps", "2", "--batch-size", "4", "--ckpt-path", str(ckpt1_base)],
+    )
+    assert res1.exit_code == 0, f"Run 1 training failed: {res1.stdout}"
+    run1_dir = get_latest_run_dir(ckpt1_base)
+
+    # Train Run 4 (SDE, one-sided denoiser-only)
+    cfg4 = BENCHMARK_CONFIG_DIR / "04_sde_one_sided_denoiser_only.json"
+    ckpt4_base = bench_dir / "04_sde_one_sided_denoiser_only"
+    res4 = runner.invoke(
+        training_app,
+        ["--config", str(cfg4), "--nsteps", "2", "--batch-size", "4", "--ckpt-path", str(ckpt4_base)],
+    )
+    assert res4.exit_code == 0, f"Run 4 training failed: {res4.stdout}"
+    run4_dir = get_latest_run_dir(ckpt4_base)
+
+    out_json = tmp_path / "comparison_results.json"
+    result = runner.invoke(
+        compare_app,
+        [
+            "--ckpt-run1",
+            str(run1_dir),
+            "--ckpt-run4",
+            str(run4_dir),
+            "--steps-list",
+            "10,20",
+            "--num-samples",
+            "10",
+            "--batch-size",
+            "5",
+            "--output-json",
+            str(out_json),
+        ],
+    )
+    if result.exit_code != 0:
+        if result.exception:
+            raise result.exception
+        assert result.exit_code == 0, f"compare_sampling_methods failed: {result.stdout}"
+
+    assert out_json.exists(), f"Output JSON file {out_json} was not created"
+    with open(out_json) as f:
+        data = json.load(f)
+
+    assert "summary_table" in data
+    assert "field_accuracy" in data
+    assert "sde_scaling" in data
+    assert "Oracle: ODE (Exact)" in data["summary_table"]
+    assert "Run 1: ODE (Velocity-only, γ=0)" in data["summary_table"]
+    assert "Run 4: SDE (Score-based, eps=1)" in data["summary_table"]
+    assert "Run 1" in data["field_accuracy"]
+    assert "steps_10" in data["sde_scaling"]
+    assert "trained_run4_sde" in data["sde_scaling"]["steps_10"]

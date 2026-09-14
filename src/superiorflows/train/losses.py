@@ -233,17 +233,15 @@ class StochasticInterpolantLoss(eqx.Module):
         denoiser_weight: Scalar weight for the denoiser loss term.
         compute_velocity_loss: If ``False``, the velocity loss term is
             omitted entirely.  Requires ``get_denoiser``.
-        get_score: ``model → score_fn(t, x, args)``.  Required when
-            ``tsm_weight > 0``.  The user defines the mapping from the
-            learned fields to the score (e.g. ``s = -η_z / α`` for
-            one-sided interpolants, ``s = -η_z / γ`` for the general case).
         base_score_fn: ``(full_state) → score_pytree``.  Gradient of
             ``log ρ_0`` evaluated on the full state.  The loss partitions
             the result to the dynamic part internally.
         target_score_fn: ``(full_state) → score_pytree``.  Gradient of
             ``log ρ_1``.
-        tsm_weight: Weight of the boundary TSM loss.  ``0.0`` disables
-            TSM (default, no overhead).
+        tsm_weight: Weight of the boundary Target Score Matching (TSM) loss.
+            When ``> 0.0``, anchors the denoiser to the boundary target/base scores
+            at the endpoints in denoiser space without numerical divergence.
+            ``0.0`` disables TSM (default, no overhead). Requires ``get_denoiser``.
         selection_protocol: Optional callable for partial updates.
         **velocity_kwargs: Extra keyword arguments (e.g. ``args``).
     """
@@ -257,7 +255,6 @@ class StochasticInterpolantLoss(eqx.Module):
     compute_velocity_loss: bool = eqx.field(static=True)
     _get_velocity: Callable = eqx.field(static=True)
     _get_denoiser: Optional[Callable] = eqx.field(static=True)
-    _get_score: Optional[Callable] = eqx.field(static=True)
     base_score_fn: Optional[Callable] = eqx.field(static=True)
     target_score_fn: Optional[Callable] = eqx.field(static=True)
     tsm_weight: float = eqx.field(static=True)
@@ -273,7 +270,6 @@ class StochasticInterpolantLoss(eqx.Module):
         get_denoiser: Optional[Callable] = None,
         denoiser_weight: float = 1.0,
         compute_velocity_loss: bool = True,
-        get_score: Optional[Callable] = None,
         base_score_fn: Optional[Callable] = None,
         target_score_fn: Optional[Callable] = None,
         tsm_weight: float = 0.0,
@@ -295,7 +291,6 @@ class StochasticInterpolantLoss(eqx.Module):
         self.compute_velocity_loss = compute_velocity_loss
         self._get_velocity = get_velocity if get_velocity is not None else lambda m: m
         self._get_denoiser = get_denoiser
-        self._get_score = get_score
         self.base_score_fn = base_score_fn
         self.target_score_fn = target_score_fn
         self.tsm_weight = tsm_weight
@@ -332,8 +327,8 @@ class StochasticInterpolantLoss(eqx.Module):
                 "Pass gamma= to StochasticInterpolantLoss, or set compute_velocity_loss=False "
                 "for denoiser-only training with one-sided linear interpolants."
             )
-        if self.tsm_weight > 0.0 and self._get_score is None:
-            raise ValueError("Boundary TSM requires a score extractor. Pass get_score= to StochasticInterpolantLoss.")
+        if self.tsm_weight > 0.0 and self._get_denoiser is None:
+            raise ValueError("Boundary TSM requires a denoiser. Pass get_denoiser= to StochasticInterpolantLoss.")
 
     def _extract_interpolant_coefficients(self, ti, y0i, y1i):
         """Extract α(t) and β(t) from the interpolant via forward-mode AD.
@@ -360,12 +355,11 @@ class StochasticInterpolantLoss(eqx.Module):
         user_args = per_sample_args if per_sample_args is not None else self.velocity_kwargs.get("args")
         velocity_field = self._get_velocity(model) if self.compute_velocity_loss else None
         denoiser = self._get_denoiser(model) if self._get_denoiser is not None else None
-        score_field = self._get_score(model) if self._get_score is not None and self.tsm_weight > 0.0 else None
 
         sel_keys = jax.random.split(key_sel, batch_size) if self.selection_protocol is not None else None
         noise_keys = jax.random.split(key2, batch_size) if self.gamma is not None else None
 
-        _has_extended = denoiser is not None or score_field is not None
+        _has_extended = denoiser is not None
 
         def single_interpolant_loss(ti, x0i, x1i, sel_key_i, noise_key_i, *ua_i):
             mask_i = (
@@ -415,28 +409,34 @@ class StochasticInterpolantLoss(eqx.Module):
             else:
                 den_loss_i = jnp.array(0.0)
 
-            # Boundary target score matching (TSM)
-            if score_field is not None:
-                score_pred = score_field(ti, yt, args_i)
+            # Boundary target score matching (TSM) in denoiser space
+            if self.tsm_weight > 0.0 and denoiser is not None:
                 alpha_t, beta_t = self._extract_interpolant_coefficients(ti, y0i, y1i)
-
                 tsm_loss_i = jnp.array(0.0)
 
                 if self.base_score_fn is not None:
                     base_score_full = self.base_score_fn(x0i)
                     base_score, _, _ = state_context_partition(base_score_full, mask_i)
-                    tsm0_target = jax.tree.map(lambda s, a: s / a, base_score, alpha_t)
+                    if self.gamma is not None:
+                        gamma_t = self.gamma(ti)
+                        tsm0_target = jax.tree.map(lambda s, a: -(gamma_t / a) * s, base_score, alpha_t)
+                    else:
+                        tsm0_target = jax.tree.map(lambda s: -s, base_score)
                     tsm0_sq = sum(
-                        jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), score_pred, tsm0_target))
+                        jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), eta_pred, tsm0_target))
                     )
                     tsm_loss_i = tsm_loss_i + jnp.where(ti < 0.5, tsm0_sq, 0.0)
 
                 if self.target_score_fn is not None:
                     target_score_full = self.target_score_fn(x1i)
                     target_score, _, _ = state_context_partition(target_score_full, mask_i)
-                    tsm1_target = jax.tree.map(lambda s, b: s / b, target_score, beta_t)
+                    if self.gamma is not None:
+                        gamma_t = self.gamma(ti)
+                        tsm1_target = jax.tree.map(lambda s, b: -(gamma_t / b) * s, target_score, beta_t)
+                    else:
+                        tsm1_target = jax.tree.map(lambda s, a, b: -(a / b) * s, target_score, alpha_t, beta_t)
                     tsm1_sq = sum(
-                        jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), score_pred, tsm1_target))
+                        jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), eta_pred, tsm1_target))
                     )
                     tsm_loss_i = tsm_loss_i + jnp.where(ti >= 0.5, tsm1_sq, 0.0)
             else:

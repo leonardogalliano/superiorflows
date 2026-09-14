@@ -1,0 +1,61 @@
+{
+    "target": {
+        "d": 2,
+        "a": 2.875,
+        "sigma2_max": 0.2,
+        "sigma2_min": 0.01,
+        "weight": 0.6666666666666666
+    },
+    "training": {
+        "nsteps": 5000,
+        "batch_size": 128,
+        "seed": 0,
+        "loss_type": "stochastic_interpolant",
+        "log_freq": 250,
+        "ckpt_path": "tmp/ckpt_benchmark/04_sde_one_sided_denoiser_only",
+        "overwrite": true,
+        "num_checkpoints": 1
+    },
+    "optimizer": {
+        "type": "adam",
+        "lr_schedule": "1e-3",
+        "clip": null
+    },
+    "velocity": {
+        "type": "mlp",
+        "width": 64,
+        "depth": 3,
+        "time_embedding_dim": 0
+    },
+    "solver": {
+        "type": "tsit5",
+        "atol": 1e-5,
+        "rtol": 1e-5,
+        "solver_steps": 100
+    },
+    "stochastic_interpolant": {
+        "interpolant_scheduler": "t",
+        "noise_scheduler": "None",
+        "learn_denoiser": false,
+        "denoiser_weight": 1.0,
+        "denoiser_only": true,
+        "tsm_weight": 0.0
+    },
+    "sde": {
+        "noise_schedule": "1.0",
+        "noise_ratio": "1.0",
+        "steps": 100
+    },
+    "callbacks": {
+        "ess": {
+            "enabled": false,
+            "freq": 500,
+            "samples": 1000
+        },
+        "tensorboard": {
+            "enabled": false,
+            "freq": 100,
+            "log_dir": "tmp/tb_logs"
+        }
+    }
+}
