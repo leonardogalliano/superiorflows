@@ -26,6 +26,7 @@ packages = ["src/superiorflows", "particle_systems"]
 [project.scripts]
 training-particles = "particle_systems.training_particles:app"
 evaluate-log-prob = "particle_systems.evaluate_log_prob:app"
+sampling-patches = "particle_systems.sampling_patches:app"
 
 [project.optional-dependencies]
 cuda = [

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import numpy as np
@@ -6,6 +7,7 @@ from typer.testing import CliRunner
 
 from particle_systems.evaluate_log_prob import app as evaluate_app
 from particle_systems.sampling_particles import app as sampling_app
+from particle_systems.sampling_patches import app as sampling_patches_app
 from particle_systems.training_particles import app as training_app
 from particle_systems.training_patches import app as training_patches_app
 
@@ -471,3 +473,84 @@ def test_patch_training(config_path):
     run_dir = get_latest_run_dir(ckpt_root)
     assert run_dir is not None, f"Could not find run directory in {ckpt_root}"
     assert (run_dir / "config.json").exists(), f"Configuration file config.json not found in {run_dir}"
+
+
+@pytest.fixture
+def trained_patch_model_dir():
+    """Runs a minimal patch training and returns the checkpoint run directory."""
+    config_path = CONFIG_DIR / "patches_si_egnn.json"
+    res = runner.invoke(training_patches_app, ["--config", str(config_path), "--nsteps", "2", "--batch-size", "8"])
+    if res.exit_code != 0:
+        if res.exception:
+            raise res.exception
+        assert res.exit_code == 0, f"Patch training fixture failed: {res.stdout}"
+
+    ckpt_root = Path("tmp") / "ckpt_patches_test"
+    run_dir = get_latest_run_dir(ckpt_root)
+    assert run_dir is not None, f"Failed to find created run dir in {ckpt_root}"
+    return run_dir
+
+
+def test_sampling_patches_fast(trained_patch_model_dir, tmp_path):
+    output_path = tmp_path / "patch_sampled_fast"
+    result = runner.invoke(
+        sampling_patches_app,
+        [
+            str(trained_patch_model_dir),
+            "--batch-size",
+            "4",
+            "--num-trajectories",
+            "1",
+            "--ignore-density",
+            "--output-path",
+            str(output_path),
+            "--solver-steps",
+            "2",
+        ],
+    )
+    if result.exit_code != 0:
+        if result.exception:
+            raise result.exception
+        assert result.exit_code == 0, f"sampling_patches (fast) failed: {result.stdout}"
+
+    summary_file = next(output_path.glob("**/summary.json"), None)
+    assert summary_file is not None, f"summary.json not found in {output_path}"
+    with open(summary_file) as f:
+        summary = json.load(f)
+    assert "fast" in summary
+    assert summary["fast"]["total_samples"] == 4
+    assert len(list(output_path.glob("**/samples.xyz"))) > 0
+    assert len(list(output_path.glob("**/metrics.npz"))) > 0
+
+
+def test_sampling_patches_with_density(trained_patch_model_dir, tmp_path):
+    output_path = tmp_path / "patch_sampled_density"
+    result = runner.invoke(
+        sampling_patches_app,
+        [
+            str(trained_patch_model_dir),
+            "--density-batch-size",
+            "2",
+            "--density-trajectories",
+            "1",
+            "--ignore-fast",
+            "--output-path",
+            str(output_path),
+            "--solver-steps",
+            "2",
+        ],
+    )
+    if result.exit_code != 0:
+        if result.exception:
+            raise result.exception
+        assert result.exit_code == 0, f"sampling_patches (density) failed: {result.stdout}"
+
+    summary_file = next(output_path.glob("**/summary.json"), None)
+    assert summary_file is not None, f"summary.json not found in {output_path}"
+    with open(summary_file) as f:
+        summary = json.load(f)
+    assert "density" in summary
+    assert summary["density"]["total_samples"] == 2
+    assert "acceptance" in summary["density"]
+    assert len(list(output_path.glob("**/acceptance.dat"))) > 0
+    assert len(list(output_path.glob("**/metrics.npz"))) > 0

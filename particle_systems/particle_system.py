@@ -178,7 +178,7 @@ class TrajectoryDataSource(grain.sources.RandomAccessDataSource):
         ...     print(batch.positions.shape)  # (64, N, d)
     """
 
-    def __init__(self, path, filename="trajectory.xyz", dtype=np.float32):
+    def __init__(self, path, filename="trajectory.xyz", dtype=np.float32, max_frames=None):
         from atooms.trajectory import TrajectoryXYZ
 
         path = Path(path)
@@ -201,7 +201,10 @@ class TrajectoryDataSource(grain.sources.RandomAccessDataSource):
         species_map = None  # str -> int mapping, built from first frame
         self._metadata = None
 
+        reached_max = False
         for fpath in files:
+            if reached_max:
+                break
             with TrajectoryXYZ(str(fpath)) as trj:
                 if self._metadata is None:
                     self._metadata = dict(trj.metadata)
@@ -223,6 +226,10 @@ class TrajectoryDataSource(grain.sources.RandomAccessDataSource):
                     all_positions.append(pos)
                     all_species.append(spe_int)
                     all_box.append(box)
+
+                    if max_frames is not None and len(all_positions) >= max_frames:
+                        reached_max = True
+                        break
 
         # Stack into contiguous arrays
         self._positions = np.stack(all_positions)  # (n_frames, N, d)

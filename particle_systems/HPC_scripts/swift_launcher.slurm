@@ -13,7 +13,7 @@ mkdir -p log_output log_error
 
 if [ -z "$1" ]; then
     echo "Usage: sbatch swift_launcher.slurm <job_type|script_path> [args...]"
-    echo "Job types: train, sample, likelihood, patches"
+    echo "Job types: train, sample, likelihood, patches, sample_patches"
     exit 1
 fi
 
@@ -32,6 +32,9 @@ case "$JOB_TYPE" in
         ;;
     patches)
         SCRIPT_NAME="training_patches.py"
+        ;;
+    sample_patches|sampling_patches|sample-patches)
+        SCRIPT_NAME="sampling_patches.py"
         ;;
     *)
         SCRIPT_NAME="$JOB_TYPE"

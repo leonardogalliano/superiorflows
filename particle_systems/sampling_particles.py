@@ -25,6 +25,8 @@ app = typer.Typer(pretty_exceptions_show_locals=False)
 
 def load_trained_flow(
     ckpt_path: Path,
+    data_path: Path | None = None,
+    step: int | None = None,
     **flow_kwargs,
 ):
     """Load a Flow and metadata from a given checkpoint directory."""
@@ -36,11 +38,14 @@ def load_trained_flow(
         config = json.load(f)
 
     # Target metadata from TrajectoryDataSource
-    data_path = Path(config["data"]["data_path"])
-    if not data_path.exists():
-        raise FileNotFoundError(f"data_path {data_path} specified in config.json not found.")
+    resolved_data_path = Path(data_path) if data_path is not None else Path(config["data"]["data_path"])
+    if not resolved_data_path.exists():
+        raise FileNotFoundError(
+            f"Dataset path '{resolved_data_path}' does not exist. "
+            "Pass --data-path on the CLI to specify a valid trajectory path."
+        )
 
-    source = TrajectoryDataSource(data_path)
+    source = TrajectoryDataSource(resolved_data_path, max_frames=1)
     N, d = source.N, source.d
     L = float(source.box_size[0])
     ref_species = source[0].species
@@ -58,7 +63,8 @@ def load_trained_flow(
     static_model = eqx.filter(velocity_field, eqx.is_array, inverse=True)
 
     checkpointer = ocp.CheckpointManager(ckpt_path.resolve(), item_names=("model", "optimizer", "metadata"))
-    step = checkpointer.latest_step()
+    if step is None:
+        step = checkpointer.latest_step()
     if step is None:
         raise ValueError(f"No checkpoint found at {ckpt_path}")
 
@@ -86,6 +92,8 @@ def main(
     batch_size: int = typer.Option(64, help="Number of samples per batch (per trajectory)"),
     num_trajectories: int = typer.Option(10, help="Number of trajectories (batches) to generate"),
     output_path: Path = typer.Option("tmp/sampled_particles", help="Directory where samples will be stored"),
+    data_path: Path = typer.Option(None, help="Optional override path to dataset trajectory file"),
+    step: int = typer.Option(None, help="Optional checkpoint step number to restore (defaults to latest)"),
     seed: int = typer.Option(0, help="Random seed for sample generation"),
     device: str = typer.Option(None, help="JAX device: cpu | gpu"),
     solver: str = typer.Option(None, help="Solver type (euler, tsit5, dopri5)"),
@@ -141,7 +149,7 @@ def main(
     if hutchinson_samples is not None:
         flow_kwargs["hutchinson_samples"] = hutchinson_samples
 
-    flow, N, d, L, composition = load_trained_flow(ckpt_path, **flow_kwargs)
+    flow, N, d, L, composition = load_trained_flow(ckpt_path, data_path=data_path, step=step, **flow_kwargs)
     t1 = time.time()
     print(f"Loaded successfully in {t1 - t0:.1f}s. Model handles N={N}, d={d}, L={L:.4f}")
 
