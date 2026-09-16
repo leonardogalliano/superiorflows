@@ -11,20 +11,20 @@ from .partial import (
     uniform_index_selection,
 )
 from .sampler import NeuralSampler
-from .sde import EulerMaruyamaWithAction, SDETransport
+from .sde import SDESolution, SDETransport
 from .transport import AbstractTransport
 
 __version__ = "0.1.0"
 __all__ = [
     "AbstractBijector",
     "AbstractTransport",
-    "EulerMaruyamaWithAction",
     "Flow",
     "NeuralSampler",
     "ODEBijector",
     "PartialBase",
     "PartialFlowUpdater",
     "PartialUpdater",
+    "SDESolution",
     "SDETransport",
     "state_context_partition",
     "merge_state",

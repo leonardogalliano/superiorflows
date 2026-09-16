@@ -1,195 +1,64 @@
-"""SDE-based transport with Girsanov path action.
+"""SDE-based transport with in-step Girsanov path action.
 
-Implements stochastic transport via Euler–Maruyama discretisation of the
-forward SDE:
+Implements stochastic continuous transport via a zero-allocation native JAX
+Euler–Maruyama discretisation of the forward and time-reversed SDE:
 
-    dX = [b̂(t,X) + ε(t)ŝ(t,X)] dt + √(2ε(t)) dW
+    dX = [b̂(t,X) + u(t,X)] dt + √(2ε(t)) dW
 
-where b̂ is the velocity field, ŝ is the score field, and ε is the noise
-schedule.  The path action (Girsanov/Crooks reweighting factor) is
-accumulated in-step via a custom diffrax solver.
+where b̂ is the velocity field, u is the osmotic drift (either supplied directly
+or computed as ε(t)ŝ(t,X) from a score field ŝ), and ε is the diffusion noise
+schedule.
+
+The path action (Girsanov/Crooks path reweighting factor) is accumulated in-step
+during the numerical integration:
+
+    S_M = Σ_{k=0}^{M-1} (log p⁺(X_{k+1}|X_k) − log p⁻(X_k|X_{k+1}))
 
 Key components:
-
-- :class:`SDETerm`: custom ``AbstractTerm`` wrapping drift + Brownian
-  motion for both plain and augmented states.
-- :class:`EulerMaruyama`: custom ``AbstractItoSolver`` for plain SDE
-  integration.
-- :class:`EulerMaruyamaWithAction`: custom ``AbstractItoSolver`` that
-  simultaneously integrates the SDE and accumulates the path action
-  ``Σ(log p⁺ − log p⁻)`` step by step.
-- :class:`SDETransport`: concrete ``AbstractTransport`` subclass
-  composing these pieces.
+- :class:`SDESolution`: lightweight container matching Diffrax solution structures.
+- :class:`SDETransport`: concrete :class:`AbstractTransport` subclass providing
+  forward, backward, and importance sampling path action evaluations.
 """
 
-from typing import Any, Callable, ClassVar, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
-import diffrax as dfx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 
 from superiorflows.transport import AbstractTransport
 
-__all__ = ["SDETerm", "EulerMaruyama", "EulerMaruyamaWithAction", "SDETransport"]
+__all__ = ["SDESolution", "SDETransport"]
 
 
-class SDETerm(dfx.AbstractTerm):
-    """Combined SDE term operating on plain or augmented state.
+class SDESolution(eqx.Module):
+    """Lightweight solution container providing the ``.ys`` attribute.
 
-    Wraps drift + Brownian motion into a single ``AbstractTerm`` with
-    elementwise (diagonal) noise over arbitrary PyTrees.
+    Attributes:
+        ys: PyTree of integrated states (and path action when evaluated).
     """
 
-    forward_drift_fn: Callable
-    noise_coefficient_fn: Callable
-    brownian_motion: dfx.AbstractBrownianPath
-
-    def vf(self, t, y, args):
-        x = y["x"] if isinstance(y, dict) and "x" in y else y
-        return self.forward_drift_fn(t, x, args)
-
-    def contr(self, t0, t1, **kwargs):
-        dt = t1 - t0
-        dW = self.brownian_motion.evaluate(t0, t1)
-        return (dt, dW)
-
-    def prod(self, vf, control):
-        dt, _ = control
-        return jax.tree.map(lambda v: v * dt, vf)
-
-    def vf_prod(self, t, y, args, control):
-        dt, dW = control
-        x = y["x"] if isinstance(y, dict) and "x" in y else y
-        mu = self.forward_drift_fn(t, x, args)
-        sigma = self.noise_coefficient_fn(t, x, args)
-        return jax.tree.map(lambda m, s, dw: m * dt + s * dw, mu, sigma, dW)
-
-
-class EulerMaruyama(dfx.AbstractItoSolver):
-    """Euler–Maruyama solver operating on SDETerm."""
-
-    term_structure: ClassVar = SDETerm
-    interpolation_cls: ClassVar[type] = dfx.LocalLinearInterpolation
-
-    def order(self, terms):
-        return 1
-
-    def strong_order(self, terms):
-        return 0.5
-
-    def init(self, terms, t0, t1, y0, args):
-        return None
-
-    def step(self, terms, t0, t1, y0, args, solver_state, made_jump):
-        del solver_state, made_jump
-        control = terms.contr(t0, t1)
-        dy = terms.vf_prod(t0, y0, args, control)
-        y1 = jax.tree.map(lambda y, dy_: y + dy_, y0, dy)
-        return y1, None, dict(y0=y0, y1=y1), None, dfx.RESULTS.successful
-
-    def func(self, terms, t0, y0, args):
-        return terms.vf(t0, y0, args)
-
-
-class EulerMaruyamaWithAction(dfx.AbstractItoSolver):
-    """Euler–Maruyama solver with in-step Girsanov path action accumulation.
-
-    Operates on augmented state ``{"x": pytree, "action": scalar}``.
-    Each step computes:
-
-    1. Standard EM update: ``x₁ = x₀ + μ⁺(t₀,x₀)·dt + σ(t₀)·dW``
-    2. Path action increment: ``log p⁺(x₁|x₀) − log p⁻(x₀|x₁)``
-
-    The forward and backward transition kernels are isotropic Gaussians:
-
-    - ``p⁺(x₁|x₀) = N(x₀ + μ⁺·dt, 2ε(t₀)·dt·I)``
-    - ``p⁻(x₀|x₁) = N(x₁ − μ⁻·dt, 2ε(t₁)·dt·I)``
-
-    The path action is accumulated into ``y["action"]`` as a running sum.
-    Residual norms are computed leaf-by-leaf over the PyTree (zero-copy).
-    """
-
-    term_structure: ClassVar = SDETerm
-    interpolation_cls: ClassVar[type] = dfx.LocalLinearInterpolation
-
-    forward_drift_fn: Callable
-    backward_drift_fn: Callable
-    noise_schedule: Callable
-
-    def order(self, terms):
-        return 1
-
-    def strong_order(self, terms):
-        return 0.5
-
-    def init(self, terms, t0, t1, y0, args):
-        return None
-
-    def step(self, terms, t0, t1, y0, args, solver_state, made_jump):
-        del solver_state, made_jump
-        x0 = y0["x"]
-        action0 = y0["action"]
-
-        dt, dW = terms.contr(t0, t1)
-        abs_dt = jnp.abs(dt)
-
-        # Diffrax negates internal times for backward integration;
-        # recover physical time for drift and noise schedule evaluation.
-        t0_phys = jnp.abs(t0)
-        t1_phys = jnp.abs(t1)
-
-        eps_t0 = self.noise_schedule(t0_phys)
-        sigma_t0 = jnp.sqrt(2.0 * eps_t0)
-
-        mu_fwd_x0 = self.forward_drift_fn(t0_phys, x0, args)
-        x1 = jax.tree.map(lambda x, m, dw: x + m * dt + sigma_t0 * dw, x0, mu_fwd_x0, dW)
-
-        eps_t1 = self.noise_schedule(t1_phys)
-        sigma2_fwd = 2.0 * eps_t0 * abs_dt
-        sigma2_bwd = 2.0 * eps_t1 * abs_dt
-        d = sum(leaf.size for leaf in jax.tree.leaves(x0))
-
-        res_fwd_sq = sum(
-            jnp.sum(jnp.square(x1_l - x0_l - m_l * dt))
-            for x1_l, x0_l, m_l in zip(jax.tree.leaves(x1), jax.tree.leaves(x0), jax.tree.leaves(mu_fwd_x0))
-        )
-        log_p_fwd = -0.5 * res_fwd_sq / sigma2_fwd - 0.5 * d * jnp.log(2.0 * jnp.pi * sigma2_fwd)
-
-        mu_bwd_x1 = self.backward_drift_fn(t1_phys, x1, args)
-        res_bwd_sq = sum(
-            jnp.sum(jnp.square(x0_l - (x1_l - m_b_l * dt)))
-            for x0_l, x1_l, m_b_l in zip(jax.tree.leaves(x0), jax.tree.leaves(x1), jax.tree.leaves(mu_bwd_x1))
-        )
-        log_p_bwd = -0.5 * res_bwd_sq / sigma2_bwd - 0.5 * d * jnp.log(2.0 * jnp.pi * sigma2_bwd)
-
-        action1 = action0 + (log_p_fwd - log_p_bwd)
-        y1 = {"x": x1, "action": action1}
-        return y1, None, dict(y0=y0, y1=y1), None, dfx.RESULTS.successful
-
-    def func(self, terms, t0, y0, args):
-        return terms.vf(t0, y0, args)
+    ys: Any
 
 
 class SDETransport(AbstractTransport):
-    """Stochastic transport via Euler–Maruyama SDE integration.
+    """Stochastic transport via zero-allocation native JAX Euler–Maruyama integration.
 
-    Integrates the forward SDE::
+    Integrates the forward SDE:
 
         dX = [b̂(t,X) + u(t,X)] dt + √(2ε(t)) dW
 
-    where ``u(t, X)`` is the osmotic drift.  The osmotic drift can either
+    where ``u(t, X)`` is the osmotic drift. The osmotic drift can either
     be provided directly via ``osmotic_drift``, or computed from a score
     field via ``u(t, X) = ε(t) ŝ(t, X)`` when ``score_field`` is supplied.
 
     ``velocity_field``, ``score_field``, and ``osmotic_drift`` are arbitrary
-    callables with signature ``(t, x, args)``.  ``noise_schedule`` is an
+    callables with signature ``(t, x_dynamic, args)``. ``noise_schedule`` is an
     arbitrary callable ``ε(t) → ℝ≥0``.
 
-    Configuration mirrors :class:`ODEBijector`: module-level defaults for
-    solver parameters, per-call kwargs overrides for ``saveat``/``t0``/
-    ``t1``/``num_steps``/``key``, and ``extra_args`` dicts forwarded to
-    ``diffrax.diffeqsolve``.
+    The integration engine compiles to a single, non-allocating ``jax.lax.scan``
+    loop with pre-sampled Brownian increments, ensuring optimal memory
+    coalescing and arithmetic throughput across CPU and GPU hardware.
 
     Attributes:
         velocity_field: Callable ``(t, x_dynamic, args) → velocity_pytree``.
@@ -201,11 +70,9 @@ class SDETransport(AbstractTransport):
         t0: Start time of the SDE (default: 0.0).
         t1: End time of the SDE (default: 1.0).
         num_steps: Number of Euler–Maruyama steps M (default: 100).
-            Determines ``dt = (t1 − t0) / M``.  Overridable per call.
-        extra_args: Additional kwargs passed to ``diffrax.diffeqsolve``
-            for plain forward integration (no path action).
-        action_extra_args: Additional kwargs passed to ``diffrax.diffeqsolve``
-            for forward + path action integration.
+            Determines ``dt = (t1 − t0) / M``. Overridable per call.
+        extra_args: Unused compatibility dict for solver kwargs.
+        action_extra_args: Unused compatibility dict for solver kwargs.
     """
 
     velocity_field: Callable
@@ -225,34 +92,48 @@ class SDETransport(AbstractTransport):
     # --- AbstractTransport extension points ---
 
     def _forward(self, x, *, args=None, key, **kwargs):
-        kw = dict(kwargs)
-        saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
-        sol = self._integrate(x, args=args, key=key, saveat=saveat, **kw)
+        sol = self._integrate(x, args=args, key=key, **kwargs)
         return jax.tree.map(lambda y: y[-1], sol.ys)
 
     def _forward_and_log_weight(self, x, *, args=None, key, **kwargs):
-        kw = dict(kwargs)
-        saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
-        sol = self._integrate_with_action(x, args=args, key=key, saveat=saveat, **kw)
+        sol = self._integrate_with_action(x, args=args, key=key, **kwargs)
         x1 = jax.tree.map(lambda arr: arr[-1], sol.ys["x"])
         action = sol.ys["action"][-1]
         return x1, action
-
-    # --- SDE-native alias ---
 
     def forward_and_path_action(self, x, **kwargs):
         """SDE-native alias for :meth:`forward_and_log_weight`."""
         return self.forward_and_log_weight(x, **kwargs)
 
-    # --- Internal helpers ---
+    def _backward(self, y, *, args=None, key, **kwargs):
+        kw = dict(kwargs)
+        t0 = kw.pop("t0", self.t1)
+        t1 = kw.pop("t1", self.t0)
+        sol = self._integrate(y, args=args, key=key, t0=t0, t1=t1, backward=True, **kw)
+        return jax.tree.map(lambda arr: arr[-1], sol.ys)
+
+    def _backward_and_log_weight(self, y, *, args=None, key, **kwargs):
+        kw = dict(kwargs)
+        t0 = kw.pop("t0", self.t1)
+        t1 = kw.pop("t1", self.t0)
+        sol = self._integrate_with_action(y, args=args, key=key, t0=t0, t1=t1, backward=True, **kw)
+        x0 = jax.tree.map(lambda arr: arr[-1], sol.ys["x"])
+        action = sol.ys["action"][-1]
+        return x0, action
+
+    def backward_and_path_action(self, y, **kwargs):
+        """SDE-native alias for :meth:`backward_and_log_weight`."""
+        return self.backward_and_log_weight(y, **kwargs)
+
+    # --- Internal drift construction ---
 
     def _make_drifts(self):
         """Build forward and backward drift closures.
 
-        If ``osmotic_drift`` is provided, it is used directly:
+        If ``osmotic_drift`` is provided, it is evaluated directly:
             forward_drift  = b + u
             backward_drift = b - u
-        Otherwise, the osmotic drift is computed from score and noise schedule:
+        Otherwise, osmotic drift is evaluated via the score and diffusion schedule:
             forward_drift  = b + ε s
             backward_drift = b - ε s
 
@@ -288,214 +169,139 @@ class SDETransport(AbstractTransport):
 
         return forward_drift, backward_drift
 
-    def _make_brownian_tree(self, x0, key, t0, t1, dt0):
-        """Create a VirtualBrownianTree matching the PyTree structure of ``x0``."""
-        shape = jax.tree.map(lambda leaf: jax.ShapeDtypeStruct(leaf.shape, leaf.dtype), x0)
-        t_min, t_max = min(t0, t1), max(t0, t1)
-        return dfx.VirtualBrownianTree(t0=t_min, t1=t_max, tol=abs(dt0) / 2, shape=shape, key=key)
-
-    def _noise_coefficient(self, t, x, _args):
-        """Isotropic diffusion coefficient ``σ(t) = √(2ε(t))``."""
-        sigma = jnp.sqrt(2.0 * self.noise_schedule(t))
-        return jax.tree.map(lambda xi: sigma * jnp.ones_like(xi), x)
-
-    # --- SDE integration backend ---
+    # --- SDE integration core routines ---
 
     def _integrate(self, x0, *, args=None, key, **kwargs):
-        """Plain EM integration on pre-partitioned dynamic state.
+        """Plain Euler–Maruyama integration on pre-partitioned dynamic state.
 
         Args:
-            x0: Dynamic state.
+            x0: Dynamic state PyTree.
             args: Context from partition, forwarded to velocity/score.
-            key: PRNG key for Brownian motion.
-            **kwargs: Override parameters (``t0``, ``t1``, ``num_steps``,
-                ``saveat``).
+            key: PRNG key for Brownian motion increments.
+            **kwargs: Override parameters (``t0``, ``t1``, ``num_steps``, ``backward``).
 
         Returns:
-            Diffrax ``Solution`` object.
+            :class:`SDESolution` with ``.ys`` containing the trajectory with leading time axis.
         """
-        t0 = kwargs.pop("t0", self.t0)
-        t1 = kwargs.pop("t1", self.t1)
-        num_steps = kwargs.pop("num_steps", self.num_steps)
-        dt0 = (t1 - t0) / num_steps
+        kw = dict(kwargs)
+        kw.pop("saveat", None)
+        t0 = kw.pop("t0", self.t0)
+        t1 = kw.pop("t1", self.t1)
+        num_steps = kw.pop("num_steps", self.num_steps)
+        backward = kw.pop("backward", False)
 
-        fwd_drift, _ = self._make_drifts()
-        bm = self._make_brownian_tree(x0, key, t0, t1, dt0)
+        fwd_drift, bwd_drift = self._make_drifts()
+        gen_drift = bwd_drift if backward else fwd_drift
 
-        term = SDETerm(
-            forward_drift_fn=fwd_drift,
-            noise_coefficient_fn=self._noise_coefficient,
-            brownian_motion=bm,
-        )
+        dt = (t1 - t0) / num_steps
+        abs_dt = jnp.abs(dt)
+        sqrt_dt = jnp.sqrt(abs_dt)
 
-        solver = EulerMaruyama()
+        leaves, treedef = jax.tree.flatten(x0)
+        subkeys = jax.random.split(key, len(leaves)) if leaves else []
+        dW_leaves = [
+            jax.random.normal(k, shape=(num_steps,) + leaf.shape, dtype=leaf.dtype) for k, leaf in zip(subkeys, leaves)
+        ]
 
-        solver_args = dict(
-            solver=solver,
-            t0=t0,
-            t1=t1,
-            dt0=dt0,
-            stepsize_controller=dfx.ConstantStepSize(),
-            args=args,
-            **self.extra_args,
-        )
-        solver_args.update(kwargs)
+        def step_fn(x_curr, step_idx):
+            t_curr = t0 + step_idx * dt
+            t0_phys = jnp.abs(t_curr)
+            eps_t0 = self.noise_schedule(t0_phys)
+            sigma_t0 = jnp.sqrt(2.0 * eps_t0)
 
-        return dfx.diffeqsolve(term, y0=x0, **solver_args)
+            dw_step = jax.tree.unflatten(treedef, [leaf_arr[step_idx] for leaf_arr in dW_leaves])
+            mu = gen_drift(t0_phys, x_curr, args)
+            x_next = jax.tree.map(
+                lambda x, m, dw: x + m * dt + sigma_t0 * sqrt_dt * dw,
+                x_curr,
+                mu,
+                dw_step,
+            )
+            return x_next, None
+
+        x_final, _ = jax.lax.scan(step_fn, x0, jnp.arange(num_steps))
+        ys = jax.tree.map(lambda leaf: jnp.expand_dims(leaf, 0), x_final)
+        return SDESolution(ys=ys)
 
     def _integrate_with_action(self, x0, *, args=None, key, **kwargs):
-        """EM integration with path action on pre-partitioned dynamic state.
+        """Euler–Maruyama integration with in-step Girsanov path action accumulation.
 
         Args:
-            x0: Dynamic state.
+            x0: Dynamic state PyTree.
             args: Context from partition, forwarded to velocity/score.
-            key: PRNG key for Brownian motion.
-            **kwargs: Override parameters (``t0``, ``t1``, ``num_steps``,
-                ``saveat``).
+            key: PRNG key for Brownian motion increments.
+            **kwargs: Override parameters (``t0``, ``t1``, ``num_steps``, ``backward``).
 
         Returns:
-            Diffrax ``Solution`` with ``.ys = {"x": ..., "action": ...}``.
-        """
-        t0 = kwargs.pop("t0", self.t0)
-        t1 = kwargs.pop("t1", self.t1)
-        num_steps = kwargs.pop("num_steps", self.num_steps)
-        dt0 = (t1 - t0) / num_steps
-
-        fwd_drift, bwd_drift = self._make_drifts()
-        bm = self._make_brownian_tree(x0, key, t0, t1, dt0)
-
-        term = SDETerm(
-            forward_drift_fn=fwd_drift,
-            noise_coefficient_fn=self._noise_coefficient,
-            brownian_motion=bm,
-        )
-
-        solver = EulerMaruyamaWithAction(
-            forward_drift_fn=fwd_drift,
-            backward_drift_fn=bwd_drift,
-            noise_schedule=self.noise_schedule,
-        )
-
-        u0 = {"x": x0, "action": jnp.zeros(())}
-
-        solver_args = dict(
-            solver=solver,
-            t0=t0,
-            t1=t1,
-            dt0=dt0,
-            stepsize_controller=dfx.ConstantStepSize(),
-            args=args,
-            **self.action_extra_args,
-        )
-        solver_args.update(kwargs)
-
-        return dfx.diffeqsolve(term, y0=u0, **solver_args)
-
-    # --- Backward transport ---
-
-    def _backward(self, y, *, args=None, key, **kwargs):
-        """Backward EM integration on pre-partitioned dynamic state.
-
-        Integrates the time-reversed SDE from ``t1`` back to ``t0``
-        using the backward drift μ⁻ = b̂ − εŝ as the generating drift.
-
-        Args:
-            y: Dynamic state at ``t1``.
-            args: Context from partition.
-            key: PRNG key for Brownian motion.
-            **kwargs: Override parameters.
-
-        Returns:
-            State at ``t0``.
+            :class:`SDESolution` with ``.ys = {"x": ..., "action": ...}``.
         """
         kw = dict(kwargs)
-        saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
-        t0 = kw.pop("t0", self.t1)
-        t1 = kw.pop("t1", self.t0)
+        kw.pop("saveat", None)
+        t0 = kw.pop("t0", self.t0)
+        t1 = kw.pop("t1", self.t1)
         num_steps = kw.pop("num_steps", self.num_steps)
-        dt0 = (t1 - t0) / num_steps
-
-        _, bwd_drift = self._make_drifts()
-        bm = self._make_brownian_tree(y, key, t0, t1, dt0)
-
-        term = SDETerm(
-            forward_drift_fn=bwd_drift,
-            noise_coefficient_fn=self._noise_coefficient,
-            brownian_motion=bm,
-        )
-        solver = EulerMaruyama()
-
-        solver_args = dict(
-            solver=solver,
-            t0=t0,
-            t1=t1,
-            dt0=dt0,
-            stepsize_controller=dfx.ConstantStepSize(),
-            args=args,
-            **self.extra_args,
-        )
-        solver_args.update(kw)
-
-        sol = dfx.diffeqsolve(term, y0=y, saveat=saveat, **solver_args)
-        return jax.tree.map(lambda arr: arr[-1], sol.ys)
-
-    def _backward_and_log_weight(self, y, *, args=None, key, **kwargs):
-        """Backward EM integration with Girsanov path action.
-
-        Integrates backward from ``t1`` to ``t0`` with the backward
-        drift μ⁻ as the generating drift and the forward drift μ⁺ as
-        the ghost kernel.  The accumulated action equals
-        S^bwd = Σ(log p⁻ − log p⁺) = −S^fwd.
-
-        Args:
-            y: Dynamic state at ``t1``.
-            args: Context from partition.
-            key: PRNG key for Brownian motion.
-            **kwargs: Override parameters.
-
-        Returns:
-            Tuple ``(x, action_bwd)`` where ``x`` is the state at ``t0``
-            and ``action_bwd`` is the backward path action.
-        """
-        kw = dict(kwargs)
-        saveat = kw.pop("saveat", dfx.SaveAt(t1=True))
-        t0 = kw.pop("t0", self.t1)
-        t1 = kw.pop("t1", self.t0)
-        num_steps = kw.pop("num_steps", self.num_steps)
-        dt0 = (t1 - t0) / num_steps
+        backward = kw.pop("backward", False)
 
         fwd_drift, bwd_drift = self._make_drifts()
-        bm = self._make_brownian_tree(y, key, t0, t1, dt0)
+        gen_drift = bwd_drift if backward else fwd_drift
+        ghost_drift = fwd_drift if backward else bwd_drift
 
-        term = SDETerm(
-            forward_drift_fn=bwd_drift,
-            noise_coefficient_fn=self._noise_coefficient,
-            brownian_motion=bm,
-        )
-        solver = EulerMaruyamaWithAction(
-            forward_drift_fn=bwd_drift,
-            backward_drift_fn=fwd_drift,
-            noise_schedule=self.noise_schedule,
-        )
+        dt = (t1 - t0) / num_steps
+        abs_dt = jnp.abs(dt)
+        sqrt_dt = jnp.sqrt(abs_dt)
 
-        u0 = {"x": y, "action": jnp.zeros(())}
+        leaves, treedef = jax.tree.flatten(x0)
+        d_total = sum(leaf.size for leaf in leaves)
+        subkeys = jax.random.split(key, len(leaves)) if leaves else []
+        dW_leaves = [
+            jax.random.normal(k, shape=(num_steps,) + leaf.shape, dtype=leaf.dtype) for k, leaf in zip(subkeys, leaves)
+        ]
 
-        solver_args = dict(
-            solver=solver,
-            t0=t0,
-            t1=t1,
-            dt0=dt0,
-            stepsize_controller=dfx.ConstantStepSize(),
-            args=args,
-            **self.action_extra_args,
-        )
-        solver_args.update(kw)
+        def step_fn(carry, step_idx):
+            x_curr, action_curr = carry
+            t_curr = t0 + step_idx * dt
+            t_next = t_curr + dt
 
-        sol = dfx.diffeqsolve(term, y0=u0, saveat=saveat, **solver_args)
-        x0 = jax.tree.map(lambda arr: arr[-1], sol.ys["x"])
-        action = sol.ys["action"][-1]
-        return x0, action
+            t0_phys = jnp.abs(t_curr)
+            t1_phys = jnp.abs(t_next)
 
-    def backward_and_path_action(self, y, **kwargs):
-        """SDE-native alias for :meth:`backward_and_log_weight`."""
-        return self.backward_and_log_weight(y, **kwargs)
+            eps_t0 = self.noise_schedule(t0_phys)
+            eps_t1 = self.noise_schedule(t1_phys)
+
+            sigma_t0 = jnp.sqrt(2.0 * eps_t0)
+            sigma2_fwd = jnp.maximum(2.0 * eps_t0 * abs_dt, 1e-20)
+            sigma2_bwd = jnp.maximum(2.0 * eps_t1 * abs_dt, 1e-20)
+
+            dw_step = jax.tree.unflatten(treedef, [leaf_arr[step_idx] for leaf_arr in dW_leaves])
+            mu_gen = gen_drift(t0_phys, x_curr, args)
+            x_next = jax.tree.map(
+                lambda x, m, dw: x + m * dt + sigma_t0 * sqrt_dt * dw,
+                x_curr,
+                mu_gen,
+                dw_step,
+            )
+
+            mu_ghost = ghost_drift(t1_phys, x_next, args)
+
+            res_fwd_sq = sum(
+                jnp.sum(jnp.square(x1_l - x0_l - m_l * dt))
+                for x1_l, x0_l, m_l in zip(jax.tree.leaves(x_next), jax.tree.leaves(x_curr), jax.tree.leaves(mu_gen))
+            )
+            log_p_fwd = -0.5 * res_fwd_sq / sigma2_fwd - 0.5 * d_total * jnp.log(2.0 * jnp.pi * sigma2_fwd)
+
+            res_bwd_sq = sum(
+                jnp.sum(jnp.square(x0_l - (x1_l - m_b_l * dt)))
+                for x0_l, x1_l, m_b_l in zip(
+                    jax.tree.leaves(x_curr), jax.tree.leaves(x_next), jax.tree.leaves(mu_ghost)
+                )
+            )
+            log_p_bwd = -0.5 * res_bwd_sq / sigma2_bwd - 0.5 * d_total * jnp.log(2.0 * jnp.pi * sigma2_bwd)
+
+            delta_action = log_p_fwd - log_p_bwd
+            action_next = action_curr + delta_action
+            return (x_next, action_next), None
+
+        (x_final, total_action), _ = jax.lax.scan(step_fn, (x0, jnp.array(0.0)), jnp.arange(num_steps))
+        ys_x = jax.tree.map(lambda leaf: jnp.expand_dims(leaf, 0), x_final)
+        ys_action = jnp.expand_dims(total_action, 0)
+        return SDESolution(ys={"x": ys_x, "action": ys_action})
