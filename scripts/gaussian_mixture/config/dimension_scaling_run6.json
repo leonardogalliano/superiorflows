@@ -1,0 +1,56 @@
+{
+    "target": {
+        "d": 4,
+        "a": 5.25,
+        "sigma2_max": 0.2,
+        "sigma2_min": 0.01,
+        "weight": 0.6666666666666666
+    },
+    "training": {
+        "nsteps": 10000,
+        "batch_size": 256,
+        "seed": 0,
+        "loss_type": "stochastic_interpolant",
+        "log_freq": 500,
+        "ckpt_path": "tmp/ckpt_powers_of_two",
+        "overwrite": true,
+        "num_checkpoints": 1
+    },
+    "optimizer": {
+        "type": "schedule_free_adamw",
+        "lr_schedule": "1e-3",
+        "clip": 1.0,
+        "warmup_steps": 500,
+        "weight_decay": 0.0001
+    },
+    "velocity": {
+        "type": "mlp",
+        "width": 256,
+        "depth": 3,
+        "time_embedding_dim": 16
+    },
+    "solver": {
+        "type": "euler",
+        "solver_steps": 100
+    },
+    "stochastic_interpolant": {
+        "interpolant_scheduler": "t",
+        "noise_scheduler": "0.5 * (1-t) * t",
+        "learn_denoiser": true,
+        "denoiser_weight": 1.0,
+        "denoiser_only": false,
+        "tsm_weight": 1.0
+    },
+    "sde": {
+        "noise_schedule": "1.0",
+        "steps": 100
+    },
+    "callbacks": {
+        "ess": {
+            "enabled": false
+        },
+        "tensorboard": {
+            "enabled": false
+        }
+    }
+}
