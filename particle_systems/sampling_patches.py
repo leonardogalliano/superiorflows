@@ -576,7 +576,7 @@ def main(
 
             print(
                 f"  [Fast {i:03d}/{num_trajectories:03d}] {t_batch:.2f}s | "
-                f"u_loc_old: {np.mean(u_old):.2f} | u_loc_new: {np.mean(u_new):.2f} | "
+                f"u_old: {np.mean(u_old):.2f} | u_new (med): {np.median(u_new):.2f} | "
                 f"safe: {100.0 * np.mean(safe):.1f}%"
             )
 
@@ -708,7 +708,7 @@ def main(
             print(
                 f"  [Density {i:03d}/{density_trajectories:03d}] {t_batch:.2f}s | "
                 f"acc: {100.0 * np.mean(ap):.2f}% | "
-                f"dU/T: {np.mean(du):.2f} | "
+                f"dU/T (med): {np.median(du):.2f} | "
                 f"log_q: {np.mean(q):.2f} | "
                 f"safe: {100.0 * np.mean(safe):.1f}%"
             )
