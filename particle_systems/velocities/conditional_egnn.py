@@ -155,10 +155,12 @@ class PatchEGNNVelocity(eqx.Module):
         species_feat = jax.vmap(self.species_embedding)(all_species)
         h0 = jnp.concatenate([t_feat, species_feat], axis=-1)
 
-        n_valid = n_patch + n_context
-        node_mask = jnp.arange(M) < n_valid
+        idx = jnp.arange(M)
+        valid_patch = idx < n_patch
+        valid_context = (idx >= self.N_patch) & (idx < self.N_patch + n_context)
+        node_mask = valid_patch | valid_context
         edge_mask = node_mask[:, None] & node_mask[None, :]
-        patch_mask = jnp.arange(M) < n_patch
+        patch_mask = valid_patch
 
         _, x_final = self._masked_forward(h0, all_pos, L, edge_mask, node_mask, patch_mask)
 

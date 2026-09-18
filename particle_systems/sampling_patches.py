@@ -160,8 +160,8 @@ def load_trained_patch_updater(
             boltzmann_model = json.load(f)
 
         box_arr = jnp.full((d,), L)
-        masked_local_energy_fn = build_masked_local_energy_fn(boltzmann_model, box_arr, n_species)
-        masked_energy_fn = build_masked_energy_fn(boltzmann_model, box_arr, n_species)
+        masked_local_energy_fn = build_masked_local_energy_fn(boltzmann_model, box_arr, n_species, N_patch=N_patch)
+        masked_energy_fn = build_masked_energy_fn(boltzmann_model, box_arr, n_species, N_patch=N_patch)
 
         max_rcut = max(
             float(np.max(c["parameters"]["rcut"]))
@@ -246,9 +246,8 @@ def evaluate_patch_batch_with_density(
     active_old = jax.vmap(patch_updater._build_subsystem)(batch, sels)
     active_new = jax.vmap(patch_updater._build_subsystem)(systems_new, sels)
 
-    n_valids = sels.n_patch + sels.n_context
-    u_loc_old = jax.vmap(masked_local_energy_fn)(active_old.positions, active_old.species, sels.n_patch, n_valids)
-    u_loc_new = jax.vmap(masked_local_energy_fn)(active_new.positions, active_new.species, sels.n_patch, n_valids)
+    u_loc_old = jax.vmap(masked_local_energy_fn)(active_old.positions, active_old.species, sels.n_patch, sels.n_context)
+    u_loc_new = jax.vmap(masked_local_energy_fn)(active_new.positions, active_new.species, sels.n_patch, sels.n_context)
     delta_U = u_loc_new - u_loc_old
     delta_U_T = delta_U / temperature
 
@@ -317,9 +316,8 @@ def evaluate_patch_batch_fast(
     active_old = jax.vmap(patch_updater._build_subsystem)(batch, sels)
     active_new = jax.vmap(patch_updater._build_subsystem)(systems_new, sels)
 
-    n_valids = sels.n_patch + sels.n_context
-    u_loc_old = jax.vmap(masked_local_energy_fn)(active_old.positions, active_old.species, sels.n_patch, n_valids)
-    u_loc_new = jax.vmap(masked_local_energy_fn)(active_new.positions, active_new.species, sels.n_patch, n_valids)
+    u_loc_old = jax.vmap(masked_local_energy_fn)(active_old.positions, active_old.species, sels.n_patch, sels.n_context)
+    u_loc_new = jax.vmap(masked_local_energy_fn)(active_new.positions, active_new.species, sels.n_patch, sels.n_context)
     delta_U = u_loc_new - u_loc_old
     delta_U_T = delta_U / temperature
 

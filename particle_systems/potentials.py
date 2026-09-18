@@ -16,6 +16,7 @@ Typical usage::
 
 import warnings
 from functools import wraps
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -307,34 +308,40 @@ def build_energy_fn(model, box, n_species):
     return energy_fn
 
 
-def build_masked_energy_fn(model, box, n_species):
-    """Build a masked energy function for subsystems with padded particles.
+def build_masked_energy_fn(model, box, n_species, N_patch: Optional[int] = None):
+    """Build a masked energy function for systems or subsystems with padded particles.
 
-    Like :func:`build_energy_fn`, but returns a function with signature
-    ``energy_fn(positions, species, n_valid) → scalar`` that excludes
-    pairs involving padded particles (index ≥ n_valid) from the sum.
-
-    Uses manual O(M²) pairwise computation with vectorised species-indexed
-    parameter lookup, rather than ``smap.pair``.
+    Supports both single contiguous configurations (where valid particles are
+    in ``0 <= index < n_valid``) and two-block subsystems with patch and context
+    (when ``n_context`` is provided).
 
     Args:
         model: A berni model dict.
         box: Box side lengths, array of shape ``(d,)``.
         n_species: Number of distinct species types.
+        N_patch: Optional static patch allocation size for two-block subsystems.
 
     Returns:
-        A function ``energy_fn(positions, species, n_valid) → scalar``.
+        A function ``energy_fn(positions, species, n_valid, n_context=None, n_patch_static=None) -> scalar``.
     """
     displacement_fn, _ = space.periodic(box)
     metric_fn = space.metric(displacement_fn)
     d_fn = space.map_product(metric_fn)
     terms = _build_pair_terms(model, n_species)
 
-    def energy_fn(positions, species, n_valid):
+    def energy_fn(positions, species, n_valid, n_context=None, n_patch_static=None):
         M = positions.shape[0]
         dr = d_fn(positions, positions)
+        np_stat = n_patch_static if n_patch_static is not None else N_patch
 
-        valid = (jnp.arange(M) < n_valid).astype(positions.dtype)
+        if n_context is not None and np_stat is not None:
+            idx = jnp.arange(M)
+            valid_patch = idx < n_valid
+            valid_context = (idx >= np_stat) & (idx < np_stat + n_context)
+            valid = (valid_patch | valid_context).astype(positions.dtype)
+        else:
+            valid = (jnp.arange(M) < n_valid).astype(positions.dtype)
+
         pair_mask = valid[:, None] * valid[None, :]
         diag_mask = 1.0 - jnp.eye(M)
         mask = pair_mask * diag_mask
@@ -349,36 +356,49 @@ def build_masked_energy_fn(model, box, n_species):
     return energy_fn
 
 
-def build_masked_local_energy_fn(model, box, n_species):
+def build_masked_local_energy_fn(model, box, n_species, N_patch: Optional[int] = None):
     """Build a masked local energy function for subsystems with patch and context.
 
     Calculates U_loc(xp, xc) = U_p(xp) + U_pc(xp, xc), excluding context-context
-    interactions U_c(xc) and padded particles (index >= n_valid).
+    interactions U_c(xc) and padded particles.
+
+    The active subsystem has shape (M, d) with M = N_patch + N_context, where
+    the first N_patch slots belong to the patch block (first n_patch valid,
+    remaining padded) and subsequent slots belong to the context block (first
+    n_context valid, remaining padded).
 
     Args:
         model: A berni model dict.
         box: Box side lengths, array of shape ``(d,)``.
         n_species: Number of distinct species types.
+        N_patch: Optional static patch allocation size. If not provided at
+            build time, must be provided as ``n_patch_static`` at call time.
 
     Returns:
-        A function ``energy_fn(positions, species, n_patch, n_valid) -> scalar``.
+        A function ``energy_fn(positions, species, n_patch, n_context, n_patch_static=None) -> scalar``.
     """
     displacement_fn, _ = space.periodic(box)
     metric_fn = space.metric(displacement_fn)
     d_fn = space.map_product(metric_fn)
     terms = _build_pair_terms(model, n_species)
 
-    def energy_fn(positions, species, n_patch, n_valid):
+    def energy_fn(positions, species, n_patch, n_context, n_patch_static=None):
+        np_stat = n_patch_static if n_patch_static is not None else N_patch
+        if np_stat is None:
+            raise ValueError("N_patch must be provided either at build time or call time.")
+
         M = positions.shape[0]
         dr = d_fn(positions, positions)
 
-        valid = (jnp.arange(M) < n_valid).astype(positions.dtype)
+        idx = jnp.arange(M)
+        valid_patch = idx < n_patch
+        valid_context = (idx >= np_stat) & (idx < np_stat + n_context)
+        valid = (valid_patch | valid_context).astype(positions.dtype)
+
         pair_mask = valid[:, None] * valid[None, :]
         diag_mask = 1.0 - jnp.eye(M)
 
-        in_patch = jnp.arange(M) < n_patch
-        patch_mask = (in_patch[:, None] | in_patch[None, :]).astype(positions.dtype)
-
+        patch_mask = (valid_patch[:, None] | valid_patch[None, :]).astype(positions.dtype)
         mask = pair_mask * diag_mask * patch_mask
 
         total = jnp.float32(0.0)

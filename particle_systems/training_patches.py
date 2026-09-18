@@ -506,7 +506,7 @@ def train_single_model(config: dict):
         num_batches = max(1, acc_samples // acc_batch_size)
         val_full_data = [next(val_full_iter) for _ in range(num_batches)]
 
-        masked_energy_fn = build_masked_energy_fn(boltzmann_model, source.box_size, n_species)
+        masked_energy_fn = build_masked_energy_fn(boltzmann_model, source.box_size, n_species, N_patch=N_patch)
 
         callbacks.append(
             PatchAcceptanceCallback(
@@ -536,7 +536,9 @@ def train_single_model(config: dict):
         num_batches_pe = max(1, pe_samples // pe_batch_size)
         val_full_data_pe = [next(val_full_iter_pe) for _ in range(num_batches_pe)]
 
-        masked_local_energy_fn = build_masked_local_energy_fn(boltzmann_model, source.box_size, n_species)
+        masked_local_energy_fn = build_masked_local_energy_fn(
+            boltzmann_model, source.box_size, n_species, N_patch=N_patch
+        )
 
         callbacks.append(
             PatchLocalEnergyCallback(

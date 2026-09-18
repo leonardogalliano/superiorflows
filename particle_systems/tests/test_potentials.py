@@ -457,29 +457,37 @@ def test_boltzmann_batched(boltzmann_setup):
 
 
 def test_build_masked_local_energy_fn():
-    """Verify that U_full(active) = U_loc(patch, context) + U(context)."""
+    """Verify that U_full(active) = U_loc(patch, context) + U(context) with two-block padding."""
     L = 10.0
     box = jnp.array([L, L])
-    full_energy_fn = build_masked_energy_fn(HIWATARI_MODEL, box, n_species=2)
-    local_energy_fn = build_masked_local_energy_fn(HIWATARI_MODEL, box, n_species=2)
 
-    n_patch = 4
-    n_context = 6
-    n_valid = n_patch + n_context
-    M_total = 15  # 15 particles total, 5 padded
+    N_patch = 6
+    N_context = 10
+    full_energy_fn = build_masked_energy_fn(HIWATARI_MODEL, box, n_species=2, N_patch=N_patch)
+    local_energy_fn = build_masked_local_energy_fn(HIWATARI_MODEL, box, n_species=2, N_patch=N_patch)
+
+    n_patch = 4  # 2 padded slots in patch (indices 4, 5)
+    n_context = 7  # 3 padded slots in context (indices 13, 14, 15)
+    M_total = N_patch + N_context  # 16 particles total
 
     key = jax.random.key(123)
     positions = jax.random.uniform(key, (M_total, 2)) * L
-    species = jnp.array([0] * 7 + [1] * 8)
+    species = jnp.array([0] * 8 + [1] * 8)
 
     # Compute full active energy, local energy, and context-only energy
-    u_full = full_energy_fn(positions, species, n_valid)
-    u_loc = local_energy_fn(positions, species, n_patch, n_valid)
-    u_context = full_energy_fn(positions[n_patch:], species[n_patch:], n_context)
+    u_full = full_energy_fn(positions, species, n_patch, n_context=n_context)
+    u_loc = local_energy_fn(positions, species, n_patch, n_context)
+    u_context = full_energy_fn(positions[N_patch:], species[N_patch:], n_context)
 
     assert jnp.isfinite(u_loc)
     # Check identity U_full = U_loc + U_context
     assert jnp.allclose(u_full, u_loc + u_context, atol=1e-5)
+
+    # Now verify that setting padded particles to overlap (r=0) does NOT affect the energy
+    corrupted_positions = positions.at[4].set(positions[0])  # padded patch overlaps valid patch
+    corrupted_positions = corrupted_positions.at[14].set(positions[N_patch])  # padded context overlaps valid context
+    u_loc_corrupted = local_energy_fn(corrupted_positions, species, n_patch, n_context)
+    assert jnp.allclose(u_loc, u_loc_corrupted, atol=1e-5)
 
 
 def test_build_masked_local_energy_fn_gerhard():
@@ -493,11 +501,11 @@ def test_build_masked_local_energy_fn_gerhard():
     source = TrajectoryDataSource(str(data_path))
     system = source[0]
 
-    masked_e_fn = build_masked_energy_fn(JBB_MODEL, system.box, n_species=3)
-    masked_local_e_fn = build_masked_local_energy_fn(JBB_MODEL, system.box, n_species=3)
-
     N_patch = 10
     N_context = 40
+    masked_e_fn = build_masked_energy_fn(JBB_MODEL, system.box, n_species=3, N_patch=N_patch)
+    masked_local_e_fn = build_masked_local_energy_fn(JBB_MODEL, system.box, n_species=3, N_patch=N_patch)
+
     select_fn = random_point_select(N_patch, N_context, r_patch=1.8, r_context=4.3)
     sel = select_fn(jax.random.key(42), system)
 
@@ -506,11 +514,10 @@ def test_build_masked_local_energy_fn_gerhard():
     active_spec = system.species[active_idx]
     n_p = int(sel.n_patch)
     n_c = int(sel.n_context)
-    n_valid = n_p + n_c
 
-    u_active = masked_e_fn(active_pos, active_spec, n_valid)
-    u_loc = masked_local_e_fn(active_pos, active_spec, n_p, n_valid)
-    u_context = masked_e_fn(active_pos[n_p:], active_spec[n_p:], n_c)
+    u_active = masked_e_fn(active_pos, active_spec, n_p, n_context=n_c)
+    u_loc = masked_local_e_fn(active_pos, active_spec, n_p, n_c)
+    u_context = masked_e_fn(active_pos[N_patch:], active_spec[N_patch:], n_c)
 
     assert jnp.isfinite(u_loc)
     assert jnp.allclose(u_active, u_loc + u_context, atol=1e-5)

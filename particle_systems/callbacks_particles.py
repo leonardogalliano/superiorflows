@@ -447,9 +447,8 @@ def compute_acceptance_metrics(
     active_old = jax.vmap(patch_updater._build_subsystem)(batch, sels)
     active_new = jax.vmap(patch_updater._build_subsystem)(systems_new, sels)
 
-    n_valids = sels.n_patch + sels.n_context
-    U_old = jax.vmap(masked_energy_fn)(active_old.positions, active_old.species, n_valids)
-    U_new = jax.vmap(masked_energy_fn)(active_new.positions, active_new.species, n_valids)
+    U_old = jax.vmap(masked_energy_fn)(active_old.positions, active_old.species, sels.n_patch, sels.n_context)
+    U_new = jax.vmap(masked_energy_fn)(active_new.positions, active_new.species, sels.n_patch, sels.n_context)
     delta_U = U_new - U_old
     delta_U_T = delta_U / temperature
 
@@ -804,9 +803,10 @@ class PatchLocalEnergyCallback(Callback):
 
             sels = jax.vmap(patch_updater.selection_fn)(subkeys, batch)
             active = jax.vmap(patch_updater._build_subsystem)(batch, sels)
-            n_valids = sels.n_patch + sels.n_context
 
-            u_loc = jax.vmap(self.masked_local_energy_fn)(active.positions, active.species, sels.n_patch, n_valids)
+            u_loc = jax.vmap(self.masked_local_energy_fn)(
+                active.positions, active.species, sels.n_patch, sels.n_context
+            )
             target_u_locs.append(np.asarray(u_loc))
 
         if target_u_locs:
@@ -834,10 +834,9 @@ class PatchLocalEnergyCallback(Callback):
                 systems_new, sels = jax.vmap(patch_updater.update)(batch, subkeys)
 
                 active_new = jax.vmap(patch_updater._build_subsystem)(systems_new, sels)
-                n_valids = sels.n_patch + sels.n_context
 
                 u_loc_new = jax.vmap(self.masked_local_energy_fn)(
-                    active_new.positions, active_new.species, sels.n_patch, n_valids
+                    active_new.positions, active_new.species, sels.n_patch, sels.n_context
                 )
                 all_model_u_locs.append(np.asarray(u_loc_new))
 

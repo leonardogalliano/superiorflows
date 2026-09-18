@@ -196,16 +196,21 @@ class TestPatchEGNNVelocity:
         sel = select(key, config)
 
         active_idx = jnp.concatenate([sel.patch_idx, sel.context_idx])
-        M = N_PATCH + N_CONTEXT
 
         pos1 = config.positions[active_idx]
         species = config.species[active_idx]
         box = config.box
 
-        (k2,) = jax.random.split(key, 1)
-        pos2 = pos1.at[int(sel.n_patch + sel.n_context) :].set(
-            jax.random.uniform(k2, (M - int(sel.n_patch + sel.n_context), D), maxval=L)
-        )
+        k2, k3 = jax.random.split(key, 2)
+        n_p = int(sel.n_patch)
+        n_c = int(sel.n_context)
+
+        # Corrupt padded patch particles (if any) and padded context particles (if any)
+        pos2 = pos1
+        if n_p < N_PATCH:
+            pos2 = pos2.at[n_p:N_PATCH].set(jax.random.uniform(k2, (N_PATCH - n_p, D), maxval=L))
+        if n_c < N_CONTEXT:
+            pos2 = pos2.at[N_PATCH + n_c :].set(jax.random.uniform(k3, (N_CONTEXT - n_c, D), maxval=L))
 
         x_active1 = ParticleSystem(positions=pos1, species=species, box=box)
         x_active2 = ParticleSystem(positions=pos2, species=species, box=box)
@@ -223,11 +228,13 @@ class TestPatchEGNNVelocity:
         args2 = _pack_args(ctx2, spec2.index_meta, (sel.n_patch, sel.n_context))
         v2 = velocity_field(0.5, x_dyn2, args2)
 
-        n_p = int(sel.n_patch)
         if n_p > 0:
             assert jnp.allclose(v1.positions[:n_p], v2.positions[:n_p], atol=1e-5), (
                 "Valid patch velocities must be identical regardless of padded positions"
             )
+        if n_p < N_PATCH:
+            assert jnp.allclose(v1.positions[n_p:], 0.0, atol=1e-6), "Padded patch slots must receive zero velocity"
+            assert jnp.allclose(v2.positions[n_p:], 0.0, atol=1e-6), "Padded patch slots must receive zero velocity"
 
     def test_time_embedding(self, config, key):
         """Test that time embedding does not break output shapes in PatchEGNNVelocity."""
@@ -620,7 +627,7 @@ class TestPatchCallbacks:
     def test_patch_acceptance_callback(self, patch_updater, config):
         from particle_systems.callbacks_particles import PatchAcceptanceCallback
 
-        def dummy_energy(pos, spec, n_valid):
+        def dummy_energy(pos, spec, n_patch, n_context=None):
             return jnp.sum(pos**2)
 
         batched_config = ParticleSystem(
@@ -660,7 +667,7 @@ class TestPatchCallbacks:
     def test_patch_local_energy_callback(self, patch_updater, config):
         from particle_systems.callbacks_particles import PatchLocalEnergyCallback
 
-        def dummy_local_energy(pos, spec, n_patch, n_valid):
+        def dummy_local_energy(pos, spec, n_patch, n_context):
             mask = jnp.arange(pos.shape[0]) < n_patch
             masked_pos = jnp.where(mask[:, None], pos, 0.0)
             return jnp.sum(masked_pos**2)
