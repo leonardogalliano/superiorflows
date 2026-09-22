@@ -92,6 +92,8 @@ DEFAULT_CONFIG = {
         "overwrite": True,
         "num_checkpoints": 1,
         "load_from_checkpoint": None,
+        "reset_optimizer": False,
+        "alpha": 0.5,
     },
     "optimizer": {
         "type": "adam",
@@ -107,6 +109,7 @@ DEFAULT_CONFIG = {
         "atol": 1e-5,
         "rtol": 1e-5,
         "solver_steps": None,
+        "hutchinson_samples": None,
     },
     "stochastic_interpolant": {
         "interpolant_scheduler": "t",
@@ -203,6 +206,9 @@ def build_solver_patch(config: dict) -> dict:
             augmented_stepsize_controller=dfx.PIDController(rtol=scfg["rtol"], atol=scfg["atol"]),
         )
 
+    if (h_samples := scfg.get("hutchinson_samples")) is not None:
+        bijector_kwargs["hutchinson_samples"] = h_samples
+
     return bijector_kwargs
 
 
@@ -238,9 +244,10 @@ def train_single_model(config: dict):
     sigma_base = pcfg.get("sigma_base", 1.0)
     M_total = pcfg.get("M_total")
 
-    s_expr = config["stochastic_interpolant"]["interpolant_scheduler"]
-    gamma_expr = config["stochastic_interpolant"]["noise_scheduler"]
-    use_ot = config["stochastic_interpolant"]["ot"]["enabled"]
+    si_cfg = config.get("stochastic_interpolant", {})
+    s_expr = si_cfg.get("interpolant_scheduler", "t")
+    gamma_expr = si_cfg.get("noise_scheduler", "None")
+    use_ot = si_cfg.get("ot", {}).get("enabled", False)
 
     key = jax.random.key(seed)
 
@@ -368,11 +375,12 @@ def train_single_model(config: dict):
         if target_dist is None:
             raise ValueError("data.model_file is required for hybrid training.")
         base_dist = GaussianPatchBase(center=jnp.full((d,), L / 2.0), sigma=sigma_base, N_patch=N_patch, d=d, L=L)
+        alpha = float(tcfg.get("alpha", 0.5))
         loss_fn = KullbackLeiblerLoss(
             base_distribution=base_dist,
             target_distribution=target_dist,
             make_bijector=make_bijector,
-            alpha=0.5,
+            alpha=alpha,
             selection_protocol=selection_protocol,
         )
         dataset = (
@@ -590,6 +598,10 @@ def train_single_model(config: dict):
         if not success:
             raise RuntimeError(f"Failed to load checkpoint from {ckpt_load_path}")
         trainer._restored_data_state = None
+        if tcfg.get("reset_optimizer", False):
+            print("  Resetting optimizer state and step counter for fine-tuning...")
+            trainer.step = 0
+            trainer.opt_state = optimizer.init(eqx.filter(trainer.model, eqx.is_inexact_array))
 
     # Banner
     model_label = model_file.name if model_file else "none"
@@ -636,6 +648,9 @@ def main(
     nsteps: Annotated[int | None, typer.Option("--nsteps", help="Number of training steps")] = None,
     model_file: Annotated[str | None, typer.Option("--model-file", help="JSON potential model file")] = None,
     loss_type: Annotated[str | None, typer.Option("--loss-type", help="Loss function type")] = None,
+    alpha: Annotated[
+        float | None, typer.Option("--alpha", help="Weight of MLE term in hybrid loss (1-alpha is energy term)")
+    ] = None,
     lr: Annotated[
         float | None, typer.Option("--lr", help="Constant learning rate (sets optimizer.lr_schedule)")
     ] = None,
@@ -649,6 +664,9 @@ def main(
     acceptance: Annotated[
         bool | None, typer.Option("--acceptance/--no-acceptance", help="Enable acceptance monitoring")
     ] = None,
+    patch_energy: Annotated[
+        bool | None, typer.Option("--patch-energy/--no-patch-energy", help="Enable patch energy callback")
+    ] = None,
     tensorboard: Annotated[
         bool | None, typer.Option("--tensorboard/--no-tensorboard", help="Enable TensorBoard")
     ] = None,
@@ -661,6 +679,16 @@ def main(
         int | None, typer.Option("--time-embedding-dim", help="Dimension of sinusoidal time embedding")
     ] = None,
     coords_range: Annotated[float | None, typer.Option("--coords-range", help="EGNN coordinate jump range")] = None,
+    hutchinson_samples: Annotated[
+        int | None, typer.Option("--hutchinson-samples", help="Number of Hutchinson trace estimation vectors")
+    ] = None,
+    reset_optimizer: Annotated[
+        bool | None,
+        typer.Option(
+            "--reset-optimizer/--no-reset-optimizer",
+            help="Reset optimizer state and step counter when loading from checkpoint",
+        ),
+    ] = None,
 ):
     """Train a CNF on patches of particle systems."""
     if device is not None:
@@ -688,6 +716,8 @@ def main(
         cfg["training"]["seed"] = seed
     if loss_type is not None:
         cfg["training"]["loss_type"] = loss_type
+    if alpha is not None:
+        cfg["training"]["alpha"] = alpha
     if n_patch is not None:
         cfg["patch"]["N_patch"] = n_patch
     if n_context is not None:
@@ -698,12 +728,18 @@ def main(
         cfg["patch"]["r_context"] = r_context
     if acceptance is not None:
         cfg["callbacks"]["acceptance"]["enabled"] = acceptance
+    if patch_energy is not None:
+        cfg["callbacks"]["patch_energy"]["enabled"] = patch_energy
     if tensorboard is not None:
         cfg["callbacks"]["tensorboard"]["enabled"] = tensorboard
     if profile is not None:
         cfg["callbacks"]["profile"]["enabled"] = profile
     if load_from_checkpoint is not None:
         cfg["training"]["load_from_checkpoint"] = load_from_checkpoint
+    if reset_optimizer is not None:
+        cfg["training"]["reset_optimizer"] = reset_optimizer
+    if hutchinson_samples is not None:
+        cfg["solver"]["hutchinson_samples"] = hutchinson_samples
     if time_embedding_dim is not None:
         cfg["velocity"]["kwargs"]["time_embedding_dim"] = time_embedding_dim
     if coords_range is not None:
