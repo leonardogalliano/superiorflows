@@ -521,3 +521,42 @@ def test_build_masked_local_energy_fn_gerhard():
 
     assert jnp.isfinite(u_loc)
     assert jnp.allclose(u_active, u_loc + u_context, atol=1e-5)
+
+
+def test_boltzmann_distribution_masked_log_prob():
+    """Verify that BoltzmannDistribution.log_prob handles args=(n_patch, n_context) cleanly."""
+    from particle_systems.particle_system import BoltzmannDistribution, ParticleSystem
+
+    L = 10.0
+    box = jnp.array([L, L])
+    N_patch = 6
+    N_context = 10
+    M_total = N_patch + N_context
+    n_patch = 4
+    n_context = 7
+
+    dist = BoltzmannDistribution(
+        N=M_total,
+        d=2,
+        L=L,
+        temperature=1.0,
+        model=HIWATARI_MODEL,
+        composition=jnp.array([0.5, 0.5]),
+        N_patch=N_patch,
+    )
+
+    key = jax.random.key(99)
+    positions = jax.random.uniform(key, (M_total, 2)) * L
+    species = jnp.array([0] * 8 + [1] * 8)
+    ps = ParticleSystem(positions=positions, species=species, box=box)
+
+    logp = dist.log_prob(ps, args=(n_patch, n_context))
+    assert jnp.isfinite(logp)
+
+    # Padded corruption should not affect log_prob
+    corrupted_pos = positions.at[4].set(positions[0])  # padded patch overlaps valid patch
+    corrupted_pos = corrupted_pos.at[14].set(positions[N_patch])  # padded context overlaps valid context
+    ps_corrupted = ParticleSystem(positions=corrupted_pos, species=species, box=box)
+
+    logp_corrupted = dist.log_prob(ps_corrupted, args=(n_patch, n_context))
+    assert jnp.allclose(logp, logp_corrupted, atol=1e-5)

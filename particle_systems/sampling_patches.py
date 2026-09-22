@@ -218,7 +218,7 @@ def evaluate_patch_batch_with_density(
         r_cut: Potential interaction cutoff radius.
 
     Returns:
-        (systems_new, sels, metrics_dict)
+        (systems_new, active_new, active_old, sels, metrics_dict)
     """
     # 1. Propose new systems and compute forward flow log-density log q(x'_p | x_c)
     systems_new, log_qs, sels = jax.vmap(patch_updater.update_and_log_prob)(batch, subkeys)
@@ -264,7 +264,11 @@ def evaluate_patch_batch_with_density(
         r_cut,
     )
 
-    # 6. Exact acceptance probability in log domain
+    # 6. Geometric veto check (finite selection probability, i.e. r_low_new < r_high)
+    is_radial_valid = jnp.isfinite(log_pi_ratios)
+    is_clean = is_safe & is_radial_valid
+
+    # 7. Exact acceptance probability in log domain
     log_alpha = -delta_U_T + log_pi_ratios + log_q_ratios
     log_alpha = jnp.where(is_safe, log_alpha, -jnp.inf)
     accept_probs = jnp.exp(jnp.minimum(log_alpha, 0.0))
@@ -272,6 +276,8 @@ def evaluate_patch_batch_with_density(
     metrics = {
         "accept_probs": accept_probs,
         "is_safe": is_safe,
+        "is_radial_valid": is_radial_valid,
+        "is_clean": is_clean,
         "log_alpha": log_alpha,
         "log_pi_ratios": log_pi_ratios,
         "log_q_ratios": log_q_ratios,
@@ -281,7 +287,7 @@ def evaluate_patch_batch_with_density(
         "log_q_forward": log_qs,
         "log_q_backward": log_q_bwds,
     }
-    return systems_new, sels, metrics
+    return systems_new, active_new, active_old, sels, metrics
 
 
 @eqx.filter_jit
@@ -307,7 +313,7 @@ def evaluate_patch_batch_fast(
         r_cut: Potential interaction cutoff radius.
 
     Returns:
-        (systems_new, sels, metrics_dict)
+        (systems_new, active_new, active_old, sels, metrics_dict)
     """
     # 1. Propose new systems via fast forward ODE
     systems_new, sels = jax.vmap(patch_updater.update)(batch, subkeys)
@@ -340,22 +346,65 @@ def evaluate_patch_batch_fast(
         "delta_U_T": delta_U_T,
         "is_safe": is_safe,
     }
-    return systems_new, sels, metrics
+    return systems_new, active_new, active_old, sels, metrics
 
 
 # ── Statistics helpers ───────────────────────────────────────────────────────
 
 
 def _calc_stats(arr: np.ndarray) -> dict[str, float]:
+    arr = np.asarray(arr)
     finite = arr[np.isfinite(arr)]
     if len(finite) == 0:
-        return {"mean": float("nan"), "median": float("nan"), "std": float("nan"), "count": 0}
+        return {
+            "median": float("nan"),
+            "q25": float("nan"),
+            "q75": float("nan"),
+            "iqr": float("nan"),
+            "q10": float("nan"),
+            "q90": float("nan"),
+            "mean": float("nan"),
+            "std": float("nan"),
+            "finite_fraction": 0.0,
+            "count": 0,
+        }
+    q25 = float(np.percentile(finite, 25))
+    q75 = float(np.percentile(finite, 75))
     return {
-        "mean": float(np.mean(finite)),
         "median": float(np.median(finite)),
+        "q25": q25,
+        "q75": q75,
+        "iqr": q75 - q25,
+        "q10": float(np.percentile(finite, 10)),
+        "q90": float(np.percentile(finite, 90)),
+        "mean": float(np.mean(finite)),
         "std": float(np.std(finite)),
+        "finite_fraction": float(len(finite) / len(arr)) if len(arr) > 0 else 0.0,
         "count": int(len(finite)),
     }
+
+
+def _calc_energy_stats(du_t: np.ndarray) -> dict[str, Any]:
+    du_t = np.asarray(du_t)
+    stats = _calc_stats(du_t)
+    finite = du_t[np.isfinite(du_t)]
+    if len(finite) == 0:
+        stats.update(
+            {
+                "fraction_downhill": 0.0,
+                "fraction_near_equilibrium": 0.0,
+                "fraction_severe_clash": 0.0,
+            }
+        )
+    else:
+        stats.update(
+            {
+                "fraction_downhill": float(np.mean(finite <= 0.0)),
+                "fraction_near_equilibrium": float(np.mean(finite <= 10.0)),
+                "fraction_severe_clash": float(np.mean(finite > 100.0)),
+            }
+        )
+    return stats
 
 
 def _save_trajectory_xyz(filepath: Path, systems: ParticleSystem, metadata: dict):
@@ -396,6 +445,11 @@ def main(
     hutchinson_samples: int = typer.Option(None, help="Number of Hutchinson samples for divergence estimation"),
     ignore_density: bool = typer.Option(False, "--ignore-density", help="If True, skips density & acceptance mode"),
     ignore_fast: bool = typer.Option(False, "--ignore-fast", help="If True, skips fast no-density mode"),
+    subsystems_only: bool = typer.Option(
+        True,
+        "--subsystems-only/--full-system",
+        help="Save active subsystems (M = N_patch + N_context) rather than full box to save disk space and I/O",
+    ),
     max_dataset_length: int = typer.Option(None, help="Max frames to load from the dataset trajectory"),
 ):
     """Generate patch update proposals and evaluate acceptance ratios from a trained CNF model."""
@@ -425,6 +479,7 @@ def main(
         print(f"  Solver steps           : {solver_steps}")
     if hutchinson_samples:
         print(f"  Hutchinson samples     : {hutchinson_samples}")
+    print(f"  Storage                : {'subsystems only (active M particles)' if subsystems_only else 'full box'}")
     print(f"  JAX process            : {jax.process_index()}/{jax.process_count()}")
     print(f"  JAX devices            : {jax.devices()}")
     print(f"{'=' * 65}\n")
@@ -495,6 +550,7 @@ def main(
             "max_rcut": max_rcut,
             "solver": s_name,
             "stepsize_controller": ctrl_tag,
+            "subsystems_only": subsystems_only,
         },
         "timings": {"load_time": t_load},
     }
@@ -529,7 +585,7 @@ def main(
             subkeys = jax.random.split(subkey, batch_size)
 
             t_start = time.time()
-            systems_new, sels, metrics = evaluate_patch_batch_fast(
+            systems_new, active_new, active_old, sels, metrics = evaluate_patch_batch_fast(
                 patch_updater, batch, subkeys, masked_local_energy_fn, temperature, max_rcut
             )
             # Ensure completion across async device boundaries
@@ -551,12 +607,52 @@ def main(
             batch_dir = run_output_dir / "fast" / str(i)
             batch_dir.mkdir(parents=True, exist_ok=True)
 
-            _save_trajectory_xyz(
-                batch_dir / "samples.xyz", systems_new, {"checkpoint": ckpt_path.name, "type": "proposal"}
-            )
-            _save_trajectory_xyz(
-                batch_dir / "original_samples.xyz", batch, {"checkpoint": ckpt_path.name, "type": "original"}
-            )
+            if subsystems_only:
+                _save_trajectory_xyz(
+                    batch_dir / "samples.xyz",
+                    active_new,
+                    {
+                        "checkpoint": ckpt_path.name,
+                        "type": "proposal",
+                        "subsystem": True,
+                        "N_patch": N_patch,
+                        "N_context": N_context,
+                    },
+                )
+                _save_trajectory_xyz(
+                    batch_dir / "original_samples.xyz",
+                    active_old,
+                    {
+                        "checkpoint": ckpt_path.name,
+                        "type": "original",
+                        "subsystem": True,
+                        "N_patch": N_patch,
+                        "N_context": N_context,
+                    },
+                )
+            else:
+                _save_trajectory_xyz(
+                    batch_dir / "samples.xyz",
+                    systems_new,
+                    {
+                        "checkpoint": ckpt_path.name,
+                        "type": "proposal",
+                        "subsystem": False,
+                        "N_patch": N_patch,
+                        "N_context": N_context,
+                    },
+                )
+                _save_trajectory_xyz(
+                    batch_dir / "original_samples.xyz",
+                    batch,
+                    {
+                        "checkpoint": ckpt_path.name,
+                        "type": "original",
+                        "subsystem": False,
+                        "N_patch": N_patch,
+                        "N_context": N_context,
+                    },
+                )
 
             np.savez_compressed(
                 batch_dir / "metrics.npz",
@@ -574,7 +670,8 @@ def main(
 
             print(
                 f"  [Fast {i:03d}/{num_trajectories:03d}] {t_batch:.2f}s | "
-                f"u_old: {np.mean(u_old):.2f} | u_new (med): {np.median(u_new):.2f} | "
+                f"u_old (med): {np.median(u_old):.2f} | u_new (med): {np.median(u_new):.2f} | "
+                f"dU/T (med): {np.median(du_t):.2f} | "
                 f"safe: {100.0 * np.mean(safe):.1f}%"
             )
 
@@ -589,7 +686,7 @@ def main(
             "safe_fraction": float(np.mean(fast_safe_rates)),
             "u_loc_target": _calc_stats(all_u_old),
             "u_loc_model": _calc_stats(all_u_new),
-            "delta_U_T": _calc_stats(all_du_t),
+            "delta_U_T": _calc_energy_stats(all_du_t),
         }
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -619,6 +716,8 @@ def main(
 
         all_accept_probs = []
         all_is_safe = []
+        all_is_radial_valid = []
+        all_is_clean = []
         all_log_alpha = []
         all_log_pi_ratios = []
         all_log_q_ratios = []
@@ -633,7 +732,7 @@ def main(
             subkeys = jax.random.split(subkey, density_batch_size)
 
             t_start = time.time()
-            systems_new, sels, metrics = evaluate_patch_batch_with_density(
+            systems_new, active_new, active_old, sels, metrics = evaluate_patch_batch_with_density(
                 patch_updater,
                 batch,
                 subkeys,
@@ -650,6 +749,8 @@ def main(
 
             ap = np.asarray(metrics["accept_probs"])
             safe = np.asarray(metrics["is_safe"])
+            rad_val = np.asarray(metrics["is_radial_valid"])
+            clean = np.asarray(metrics["is_clean"])
             la = np.asarray(metrics["log_alpha"])
             pi = np.asarray(metrics["log_pi_ratios"])
             q = np.asarray(metrics["log_q_ratios"])
@@ -661,6 +762,8 @@ def main(
 
             all_accept_probs.append(ap)
             all_is_safe.append(safe)
+            all_is_radial_valid.append(rad_val)
+            all_is_clean.append(clean)
             all_log_alpha.append(la)
             all_log_pi_ratios.append(pi)
             all_log_q_ratios.append(q)
@@ -672,12 +775,52 @@ def main(
             batch_dir = run_output_dir / "density" / str(i)
             batch_dir.mkdir(parents=True, exist_ok=True)
 
-            _save_trajectory_xyz(
-                batch_dir / "samples.xyz", systems_new, {"checkpoint": ckpt_path.name, "type": "proposal"}
-            )
-            _save_trajectory_xyz(
-                batch_dir / "original_samples.xyz", batch, {"checkpoint": ckpt_path.name, "type": "original"}
-            )
+            if subsystems_only:
+                _save_trajectory_xyz(
+                    batch_dir / "samples.xyz",
+                    active_new,
+                    {
+                        "checkpoint": ckpt_path.name,
+                        "type": "proposal",
+                        "subsystem": True,
+                        "N_patch": N_patch,
+                        "N_context": N_context,
+                    },
+                )
+                _save_trajectory_xyz(
+                    batch_dir / "original_samples.xyz",
+                    active_old,
+                    {
+                        "checkpoint": ckpt_path.name,
+                        "type": "original",
+                        "subsystem": True,
+                        "N_patch": N_patch,
+                        "N_context": N_context,
+                    },
+                )
+            else:
+                _save_trajectory_xyz(
+                    batch_dir / "samples.xyz",
+                    systems_new,
+                    {
+                        "checkpoint": ckpt_path.name,
+                        "type": "proposal",
+                        "subsystem": False,
+                        "N_patch": N_patch,
+                        "N_context": N_context,
+                    },
+                )
+                _save_trajectory_xyz(
+                    batch_dir / "original_samples.xyz",
+                    batch,
+                    {
+                        "checkpoint": ckpt_path.name,
+                        "type": "original",
+                        "subsystem": False,
+                        "N_patch": N_patch,
+                        "N_context": N_context,
+                    },
+                )
 
             # Text format for quick inspection
             np.savetxt(batch_dir / "acceptance.dat", ap, fmt="%.6e", header="accept_prob")
@@ -687,6 +830,8 @@ def main(
                 batch_dir / "metrics.npz",
                 accept_probs=ap,
                 is_safe=safe,
+                is_radial_valid=rad_val,
+                is_clean=clean,
                 log_alpha=la,
                 log_pi_ratios=pi,
                 log_q_ratios=q,
@@ -703,16 +848,19 @@ def main(
                 n_context=np.asarray(sels.n_context),
             )
 
+            clean_rate_b = 100.0 * np.mean(clean)
+            clean_acc_b = 100.0 * np.mean(ap[clean]) if np.any(clean) else 0.0
             print(
                 f"  [Density {i:03d}/{density_trajectories:03d}] {t_batch:.2f}s | "
-                f"acc: {100.0 * np.mean(ap):.2f}% | "
+                f"acc: {100.0 * np.mean(ap):.2f}% (clean: {clean_acc_b:.1f}%) | "
                 f"dU/T (med): {np.median(du):.2f} | "
-                f"log_q: {np.mean(q):.2f} | "
-                f"safe: {100.0 * np.mean(safe):.1f}%"
+                f"clean: {clean_rate_b:.1f}%"
             )
 
         cat_ap = np.concatenate(all_accept_probs)
         cat_safe = np.concatenate(all_is_safe)
+        cat_rad_val = np.concatenate(all_is_radial_valid)
+        cat_clean = np.concatenate(all_is_clean)
         cat_la = np.concatenate(all_log_alpha)
         cat_pi = np.concatenate(all_log_pi_ratios)
         cat_q = np.concatenate(all_log_q_ratios)
@@ -720,16 +868,51 @@ def main(
         cat_uo = np.concatenate(all_u_loc_old)
         cat_un = np.concatenate(all_u_loc_new)
 
+        unsafe_rate = float(np.mean(~cat_safe))
+        radial_inversion_rate = float(np.mean(~cat_rad_val))
+        clean_fraction = float(np.mean(cat_clean))
+
+        clean_ap = cat_ap[cat_clean] if np.any(cat_clean) else np.array([])
+        clean_acceptance_stats = _calc_stats(clean_ap)
+        clean_acceptance_gt_1pct = float(np.mean(clean_ap > 0.01)) if len(clean_ap) > 0 else 0.0
+        clean_acceptance_eq_1 = float(np.mean(clean_ap >= 0.9999)) if len(clean_ap) > 0 else 0.0
+
+        clean_du = cat_du[cat_clean] if np.any(cat_clean) else np.array([])
+        clean_pi = cat_pi[cat_clean] if np.any(cat_clean) else np.array([])
+        clean_q = cat_q[cat_clean] if np.any(cat_clean) else np.array([])
+
+        decomp = {
+            "median_minus_delta_U_T": float(-np.median(clean_du)) if len(clean_du) > 0 else float("nan"),
+            "median_delta_log_q": float(np.median(clean_q)) if len(clean_q) > 0 else float("nan"),
+            "median_delta_log_pi": float(np.median(clean_pi)) if len(clean_pi) > 0 else float("nan"),
+        }
+
+        uphill_mask = cat_clean & (cat_du > 0.0)
+        rescue_fraction = float(np.mean(cat_ap[uphill_mask] > 0.01)) if np.any(uphill_mask) else 0.0
+
         summary_data["density"] = {
             "total_samples": len(cat_ap),
             "total_time": total_density_time,
             "time_per_sample": total_density_time / max(len(cat_ap), 1),
-            "safe_fraction": float(np.mean(cat_safe)),
+            "vetoes": {
+                "safe_fraction": float(np.mean(cat_safe)),
+                "unsafe_rate": unsafe_rate,
+                "radial_valid_fraction": float(np.mean(cat_rad_val)),
+                "radial_inversion_rate": radial_inversion_rate,
+                "clean_fraction": clean_fraction,
+            },
             "acceptance": _calc_stats(cat_ap),
+            "acceptance_gt_1pct": float(np.mean(cat_ap > 0.01)),
+            "acceptance_eq_1": float(np.mean(cat_ap >= 0.9999)),
+            "clean_acceptance": clean_acceptance_stats,
+            "clean_acceptance_gt_1pct": clean_acceptance_gt_1pct,
+            "clean_acceptance_eq_1": clean_acceptance_eq_1,
+            "decomposition": decomp,
+            "rescue_fraction": rescue_fraction,
             "log_alpha": _calc_stats(cat_la),
             "log_pi_ratio": _calc_stats(cat_pi),
             "log_q_ratio": _calc_stats(cat_q),
-            "delta_U_T": _calc_stats(cat_du),
+            "delta_U_T": _calc_energy_stats(cat_du),
             "u_loc_target": _calc_stats(cat_uo),
             "u_loc_model": _calc_stats(cat_un),
         }
@@ -743,17 +926,41 @@ def main(
     print(f"\n{'=' * 65}")
     print("All runs completed successfully!")
     if "fast" in summary_data:
+        f_res = summary_data["fast"]
         print(
-            f"  Fast mode    : {summary_data['fast']['total_samples']} samples in "
-            f"{summary_data['fast']['total_time']:.1f}s ({summary_data['fast']['time_per_sample']:.4f}s/sample)"
+            f"  Fast mode    : {f_res['total_samples']} samples in "
+            f"{f_res['total_time']:.1f}s ({f_res['time_per_sample']:.4f}s/sample)"
+        )
+        print(
+            f"                 dU/T med: {f_res['delta_U_T']['median']:.2f} "
+            f"[IQR {f_res['delta_U_T']['iqr']:.2f}] | "
+            f"downhill: {100.0 * f_res['delta_U_T']['fraction_downhill']:.1f}% | "
+            f"safe: {100.0 * f_res['safe_fraction']:.1f}%"
         )
     if "density" in summary_data:
+        d_res = summary_data["density"]
         print(
-            f"  Density mode : {summary_data['density']['total_samples']} samples in "
-            f"{summary_data['density']['total_time']:.1f}s ({summary_data['density']['time_per_sample']:.4f}s/sample)"
+            f"  Density mode : {d_res['total_samples']} samples in "
+            f"{d_res['total_time']:.1f}s ({d_res['time_per_sample']:.4f}s/sample)"
         )
-        print(f"  Mean accept  : {100.0 * summary_data['density']['acceptance']['mean']:.2f}%")
-        print(f"  Safe rate    : {100.0 * summary_data['density']['safe_fraction']:.1f}%")
+        print(
+            f"  Acceptance   : overall {100.0 * d_res['acceptance']['mean']:.2f}% | "
+            f"clean {100.0 * d_res['clean_acceptance']['mean']:.2f}% | "
+            f">1%: {100.0 * d_res['clean_acceptance_gt_1pct']:.1f}%"
+        )
+        print(
+            f"  Vetoes       : clean {100.0 * d_res['vetoes']['clean_fraction']:.1f}% | "
+            f"radial inv {100.0 * d_res['vetoes']['radial_inversion_rate']:.1f}% | "
+            f"unsafe {100.0 * d_res['vetoes']['unsafe_rate']:.1f}%"
+        )
+        print(
+            f"  Balance (med): -dU/T: {d_res['decomposition']['median_minus_delta_U_T']:.2f} | "
+            f"dlog_q: {d_res['decomposition']['median_delta_log_q']:.2f} | "
+            f"dlog_pi: {d_res['decomposition']['median_delta_log_pi']:.2f}"
+        )
+        print(f"  Rescue frac  : {100.0 * d_res['rescue_fraction']:.1f}% of uphill moves accept >1%")
+    storage_desc = f"subsystems only (M={N_patch + N_context})" if subsystems_only else f"full systems (N={N})"
+    print(f"  Storage      : {storage_desc}")
     print(f"  Saved to     : {run_output_dir.resolve()}")
     print(f"{'=' * 65}\n")
 

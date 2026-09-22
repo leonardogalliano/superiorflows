@@ -519,8 +519,22 @@ def test_sampling_patches_fast(trained_patch_model_dir, tmp_path):
         summary = json.load(f)
     assert "fast" in summary
     assert summary["fast"]["total_samples"] == 4
-    assert len(list(output_path.glob("**/samples.xyz"))) > 0
-    assert len(list(output_path.glob("**/metrics.npz"))) > 0
+    assert "median" in summary["fast"]["delta_U_T"]
+    assert summary["metadata"]["subsystems_only"] is True
+
+    samples_files = list(output_path.glob("**/samples.xyz"))
+    assert len(samples_files) > 0
+
+    from atooms.trajectory import TrajectoryXYZ
+
+    with TrajectoryXYZ(str(samples_files[0])) as trj:
+        assert len(trj[0].particle) == summary["metadata"]["N_patch"] + summary["metadata"]["N_context"]
+
+    metrics_files = list(output_path.glob("**/metrics.npz"))
+    assert len(metrics_files) > 0
+    npz = np.load(metrics_files[0])
+    assert "u_loc_old" in npz
+    assert "is_safe" in npz
 
 
 def test_sampling_patches_with_density(trained_patch_model_dir, tmp_path):
@@ -552,5 +566,24 @@ def test_sampling_patches_with_density(trained_patch_model_dir, tmp_path):
     assert "density" in summary
     assert summary["density"]["total_samples"] == 2
     assert "acceptance" in summary["density"]
+    assert "vetoes" in summary["density"]
+    assert "clean_fraction" in summary["density"]["vetoes"]
+    assert "clean_acceptance" in summary["density"]
+    assert "decomposition" in summary["density"]
+    assert "rescue_fraction" in summary["density"]
+    assert summary["metadata"]["subsystems_only"] is True
+
+    samples_files = list(output_path.glob("**/samples.xyz"))
+    assert len(samples_files) > 0
+    from atooms.trajectory import TrajectoryXYZ
+
+    with TrajectoryXYZ(str(samples_files[0])) as trj:
+        assert len(trj[0].particle) == summary["metadata"]["N_patch"] + summary["metadata"]["N_context"]
+
     assert len(list(output_path.glob("**/acceptance.dat"))) > 0
-    assert len(list(output_path.glob("**/metrics.npz"))) > 0
+    metrics_files = list(output_path.glob("**/metrics.npz"))
+    assert len(metrics_files) > 0
+    npz = np.load(metrics_files[0])
+    assert "is_radial_valid" in npz
+    assert "is_clean" in npz
+    assert npz["is_clean"].shape == (2,)

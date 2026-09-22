@@ -293,6 +293,7 @@ def train_single_model(config: dict):
             temperature=temperature,
             model=boltzmann_model,
             composition=composition,
+            N_patch=N_patch,
         )
 
         max_rcut = max(

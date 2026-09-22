@@ -1,6 +1,7 @@
 import logging
 from itertools import permutations, product
 from pathlib import Path
+from typing import Optional
 
 import equinox as eqx
 import grain
@@ -106,10 +107,11 @@ class BoltzmannDistribution(eqx.Module):
     L: float = eqx.field(static=True)
     temperature: float = eqx.field(static=True)
     model: dict = eqx.field(static=True)
+    N_patch: Optional[int] = eqx.field(default=None, static=True)
     _energy_fn: object = eqx.field(static=True)
     _masked_energy_fn: object = eqx.field(static=True)
 
-    def __init__(self, N, d, L, temperature, model, composition):
+    def __init__(self, N, d, L, temperature, model, composition, N_patch: Optional[int] = None):
         from particle_systems.potentials import build_energy_fn, build_masked_energy_fn
 
         self.N = N
@@ -117,10 +119,11 @@ class BoltzmannDistribution(eqx.Module):
         self.L = float(L)
         self.temperature = float(temperature)
         self.model = model
+        self.N_patch = N_patch
         n_species = len(composition)
         box = jnp.ones(d) * self.L
         self._energy_fn = build_energy_fn(model, box, n_species)
-        self._masked_energy_fn = build_masked_energy_fn(model, box, n_species)
+        self._masked_energy_fn = build_masked_energy_fn(model, box, n_species, N_patch=N_patch)
 
     @property
     def event_shape(self):
@@ -138,17 +141,22 @@ class BoltzmannDistribution(eqx.Module):
 
         Args:
             value: A ``ParticleSystem``.
-            **kwargs: Optional. Pass ``n_valid=`` to use the masked energy
-                function that excludes padded particles.
+            **kwargs: Optional context or masking metadata. Pass ``args=(n_patch, n_context)``
+                for two-block subsystems, or ``args=n_valid`` / ``n_valid=...`` for contiguous systems.
 
         Returns:
             Scalar unnormalised log-probability.
         """
         positions = jnp.asarray(value.positions)
         species = jnp.asarray(value.species)
-        n_valid = kwargs.get("n_valid")
-        if n_valid is not None:
-            return -self._masked_energy_fn(positions, species, n_valid) / self.temperature
+        args = kwargs.get("args", kwargs.get("n_valid"))
+
+        if isinstance(args, (tuple, list)) and len(args) == 2:
+            n_patch, n_context = args
+            return -self._masked_energy_fn(positions, species, n_patch, n_context=n_context) / self.temperature
+        elif args is not None:
+            return -self._masked_energy_fn(positions, species, args) / self.temperature
+
         return -self._energy_fn(positions, species) / self.temperature
 
 

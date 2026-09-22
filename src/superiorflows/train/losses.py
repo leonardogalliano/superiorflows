@@ -109,33 +109,23 @@ class EnergyBasedLoss(eqx.Module):
 
         def single_energy(xi, key_i, *ua_i):
             fk = {k: v for k, v in self.flow_kwargs.items() if k != "args"}
+            args_val = ua_i if ua_i else self.flow_kwargs.get("args")
+            args_kw = {"args": args_val} if args_val is not None else {}
+
             if self.selection_protocol is None:
                 flow = Flow(bijector, self.base_distribution)
-                if ua_i:
-                    n_patch, n_context = ua_i
-                    args_kw = {"args": (n_patch, n_context)}
-                    if key_i is not None:
-                        x1_i, logq_i = flow.push_forward_and_log_prob(xi, key=key_i, **args_kw, **fk)
-                    else:
-                        x1_i, logq_i = flow.push_forward_and_log_prob(xi, **args_kw, **fk)
-                    logp_i = self.target_distribution.log_prob(x1_i, n_valid=n_patch + n_context)
+                if key_i is not None:
+                    x1_i, logq_i = flow.push_forward_and_log_prob(xi, key=key_i, **args_kw, **fk)
                 else:
-                    args_val = self.flow_kwargs.get("args")
-                    args_kw = {"args": args_val} if args_val is not None else {}
-                    if key_i is not None:
-                        x1_i, logq_i = flow.push_forward_and_log_prob(xi, key=key_i, **args_kw, **fk)
-                    else:
-                        x1_i, logq_i = flow.push_forward_and_log_prob(xi, **args_kw, **fk)
-                    logp_i = self.target_distribution.log_prob(x1_i)
+                    x1_i, logq_i = flow.push_forward_and_log_prob(xi, **args_kw, **fk)
+                logp_i = self.target_distribution.log_prob(x1_i, **args_kw)
                 return logq_i - logp_i
             else:
                 k_sel, k_lp = jax.random.split(key_i)
                 mask = self.selection_protocol(k_sel, xi)
                 updater = PartialUpdater(bijector, self.base_distribution)
-                args_val = ua_i if ua_i else self.flow_kwargs.get("args")
-                args_kw = {"args": args_val} if args_val is not None else {}
                 x1_i, logq_i = updater.update_and_log_prob(xi, mask, key=k_lp, **args_kw, **fk)
-                logp_i = self.target_distribution.log_prob(x1_i)
+                logp_i = self.target_distribution.log_prob(x1_i, **args_kw)
                 return logq_i - logp_i
 
         if key is not None:
