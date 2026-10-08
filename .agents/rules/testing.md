@@ -4,27 +4,36 @@ trigger: always_on
 
 ## Testing
 
-Sometimes you find the issue "no module named superiorflow". According to Gemini, this is due to iCloud syncing. To solve this, run chflags -R nohidden .venv.
-
 ### Test locations
-- `tests/` — core library tests (`test_flow.py`, `test_trainer.py`, `test_partial.py`, `test_particles.py`, etc.)
-- `particle_systems/tests/test_*.py` — domain-specific tests for the particle package
-- `scripts/gaussian_mixture/test_gaussian_mixture.py` — integration tests for unbounded Gaussian mixtures, discrete RealNVP, ODE flows, and partial DOF training/sampling
+- `tests/` — core library tests (`test_flow.py`, `test_trainer.py`, `test_partial.py`, `test_sde.py`, etc.)
+- `particle_systems/tests/` — domain-specific tests for the particle package
+- `scripts/gaussian_mixture/test_gaussian_mixture.py` — integration tests for Gaussian mixtures, RealNVP, ODE flows, and partial DOF training/sampling. **Not collected by default** (`testpaths = ["tests", "particle_systems"]`), so neither plain `uv run pytest` nor CI runs it; invoke it explicitly.
 
 ### Running tests
 ```bash
-uv run pytest --cov=src --cov=particle_systems --cov-report=xml
+uv run pytest --cov=src --cov=particle_systems --cov-report=xml   # full suite, as in CI
+uv run pytest tests/test_flow.py -x                               # single file, stop at first failure
+uv run pytest tests/test_flow.py -k "hutchinson"                  # filter by name
+uv run pytest --benchmark-skip                                    # skip slow pytest-benchmark tests
+uv run pytest scripts/gaussian_mixture/test_gaussian_mixture.py   # integration tests (not in testpaths)
+```
+`addopts` includes `--benchmark-autosave`, which writes to `.benchmarks/` (gitignored).
+
+### Troubleshooting: `ModuleNotFoundError: No module named 'superiorflows'`
+The repo lives in an iCloud-synced folder. iCloud sets the macOS `hidden` file flag on files in `.venv`, and recent Python versions skip hidden `.pth` files, so the editable install silently disappears. Fix with:
+```bash
+chflags -R nohidden .venv
 ```
 
 ### Test patterns
 - **Fixtures via `pytest.fixture`** with parametrisation over config files (`@pytest.fixture(params=CONFIG_FILES)`).
-- **CLI script tests** use `typer.testing.CliRunner` to invoke `training_app` and `sampling_app` programmatically.
+- **CLI script tests** use `typer.testing.CliRunner` to invoke the Typer apps programmatically.
 - **Checkpoint restart tests**: run short training → find latest run dir → restart with `--load-from-checkpoint`.
-- **Performance tests** use `pytest-benchmark` with `benchmark(fn)` pattern and `.block_until_ready()` for JAX async.
+- **Performance tests** use `pytest-benchmark` with `benchmark(fn)` and `.block_until_ready()`.
 - Temporary directories for checkpoints use `tmp_path` (pytest built-in) or the gitignored `tmp/` directory.
 
 ### What CI runs
-GitHub Actions matrix: `{ubuntu-latest, macos-latest}` × `{python 3.12, 3.13}`. Installs via `uv sync` (TensorBoard is included in dev dependencies), runs pytest with coverage, uploads to Codecov.
+GitHub Actions matrix: `{ubuntu-latest, macos-latest}` × `{python 3.12, 3.13}`. Installs via `uv sync`, runs the full-suite command above, uploads coverage to Codecov.
 
 ---
 
@@ -42,5 +51,3 @@ export UV_CACHE_DIR=$WORK/.uv_cache
 ```
 
 Supports V100, A100, H100 via architecture-specific module loading. Jobs dispatch via `srun uv run`.
-
----

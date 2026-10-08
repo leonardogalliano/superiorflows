@@ -1,23 +1,20 @@
 ---
-description: # Ruff Workflow
+description: Lint and format the codebase with Ruff
 ---
 
+## Lint and format workflow
 
-The agent must automatically perform the following steps to lint and format the codebase:
+Run this after editing any Python files and before reporting a task as done:
 
-1. Run Ruff lint check:
+1. Run the checks:
    ```bash
    uv run ruff check
-   ```
-
-2. Run Ruff format check:
-   ```bash
    uv run ruff format --check
    ```
 
-3. If any issues are found:
-   - For lint errors: Run `uv run ruff check --fix` to auto-fix safe problems. For any remaining errors, locate and fix them in the source files.
-   - For formatting differences: Run `uv run ruff format` to automatically reformat the codebase.
+2. If any issues are found:
+   - Lint errors: run `uv run ruff check --fix` for safe auto-fixes, then fix any remaining errors by hand.
+   - Formatting differences: run `uv run ruff format`.
    - Re-run the checks to confirm everything is clean.
 
-4. Provide a clear summary of the status (e.g. "All checks passed!" or details of the fixes applied).
+3. Report the status (e.g. "All checks passed!" or the fixes applied).
