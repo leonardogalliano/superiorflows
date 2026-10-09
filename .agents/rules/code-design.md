@@ -11,10 +11,30 @@ This section records invariants and conventions that are not obvious from readin
 `AbstractTransport` → `AbstractBijector` → `ODEBijector` (and discrete bijectors); `AbstractTransport` → `SDETransport`. `NeuralSampler` composes any transport with a base distribution; `Flow` subclasses it for bijective transports.
 
 - Public methods (`forward`, `forward_and_log_weight`, `inverse`, …) partition the state once via `_partition_and_apply`; subclasses implement the underscored versions (`_forward`, `_forward_and_log_weight`, `_forward_and_log_det`, `_inverse_and_log_det`) operating **only on dynamic DOFs**, with static context passed through `args`.
-- **Unified log-weight convention**: transports return $(y, c)$. For bijectors $c = -\text{log\_det}$; for SDEs $c = \mathcal{S}_M$, the Girsanov path action accumulated in-step by `EulerMaruyamaWithAction`. Then $\text{log\_weight}(y) = \log q_0(x_0) + c$ and the importance weight is $\log w = \log \rho_\star(y) - \text{log\_weight}(y)$.
+- **Unified log-weight convention**: transports return $(y, c)$. For bijectors $c = -\text{log\_det}$; for SDEs $c = \mathcal{S}_M$, the Girsanov path action accumulated in-step by `SDETransport._integrate_with_action`. Then $\text{log\_weight}(y) = \log q_0(x_0) + c$ and the importance weight is $\log w = \log \rho_\star(y) - \text{log\_weight}(y)$.
 - `*_log_prob` methods on `Flow` / `PartialUpdater` are backward-compatible aliases of `*_log_weight`; exact `log_prob` / `pull_back_and_log_prob` exist only for bijective transports.
 - **`ODEBijector` divergence**: exact (default, diagonal JVP via `jax.linearize`), Hutchinson (`hutchinson_samples=k`, Rademacher, needs `key`), or analytical (`divergence_fn(velocity_field, t, x, args) -> (v, div_v)`).
 - **`ODEBijector` dual solvers**: plain ODE (`forward`, `integrate`) uses `solver`/`stepsize_controller`; augmented ODE (`forward_and_log_det`, `integrate_augmented_ode`) uses `augmented_solver`/`augmented_stepsize_controller`. Always set both (anti-pattern 3).
+- **ODE log-weights are biased by discretisation**, even with the exact divergence: the solver integrates $\int \nabla\!\cdot v\,dt$ numerically, which is not the exact log-Jacobian of the discrete map that produced the sample (for Euler, $h\,\mathrm{tr}\nabla v$ vs $\log\det(I + h\nabla v)$). The bias shrinks with step size and solver order but never vanishes. Report the solver and step count with every ODE result, and compare against higher-order solvers (e.g. `Tsit5`) at equal cost, not only Euler.
+
+### SDE transport (`sde.py`)
+
+`SDETransport` integrates $dX = [b(t,X) + u(t,X)]\,dt + \sqrt{2\varepsilon(t)}\,dW$ with Euler–Maruyama inside a single `jax.lax.scan`.
+- Fields are callables `(t, x_dynamic, args)`: `velocity_field` $b$, and either `score_field` $s$ (osmotic drift $u = \varepsilon s$) or `osmotic_drift` $u$ directly (avoids dividing by vanishing quantities). `noise_schedule` is $t \mapsto \varepsilon(t) \ge 0$.
+- Forward drift $b + u$, backward drift $b - u$. Each step accumulates $\log p^+(x_{k+1} \mid x_k) - \log p^-(x_k \mid x_{k+1})$ with Gaussian kernels of variance $2\varepsilon\,\Delta t$ (at $t_k$ forward, $t_{k+1}$ backward), floored at `1e-20`.
+- The estimator $\hat Z = \frac{1}{n}\sum_i \rho_\star(y_i)\, e^{-\mathcal{S}_M^{(i)}} / q_0(x_0^{(i)})$ is unbiased for **any** step count and **any** finite drift: drift errors (bad score, bad velocity) cost ESS, never bias $\hat Z$. Hence the SDE vs ODE comparison is bias (ODE) vs variance (SDE).
+- `t0`, `t1`, `num_steps` are overridable per call; `backward=True` / `_backward*` integrate from `t1` to `t0` with the roles of the drifts swapped.
+- `_integrate` returns only the final state (with a leading length-1 axis, `.ys[-1]` convention); trajectories for plots are built by chaining single-step calls in a scan.
+- Brownian increments are drawn **inside** the scan from per-step keys `jax.random.split(key, num_steps)`, so memory does not grow with `num_steps` (never pre-sample all increments: that costs `num_steps × state` per sample, tens of GB for particle systems).
+- With the path action, the fields $(b, u)$ at $(t_{k+1}, X_{k+1})$ are evaluated once and used twice: by the backward kernel of step $k$ and the forward kernel of step $k+1$ (same point, same time, so this is exact). Total $M + 1$ field evaluations instead of $2M$. The time grid is a single expression $t_k = t_0 + k\,\Delta t$ so both uses see bitwise the same time.
+- `tests/test_sde_engine.py` pins the engine to a step-by-step reference implementation in float64 (forward/backward, score/osmotic, PyTrees, gradients); run it after any change to `sde.py`.
+
+### Stochastic interpolants and score parametrisation
+
+Interpolant $x_t = \alpha(t)\,x_0 + \beta(t)\,x_1 + \gamma(t)\,z$, $z \sim \mathcal{N}(0, I)$, trained with `StochasticInterpolantLoss` (`gamma=`, `get_denoiser=`, `tsm_weight=`). In the general case we learn $b$ and the noise denoiser $\eta_z \approx \mathbb{E}[z \mid x_t]$, and the score is $s = -\eta_z/\gamma$.
+- Since $\gamma(0) = \gamma(1) = 0$, $s = -\eta_z/\gamma$ amplifies denoiser errors by $1/\gamma$ near the boundaries (score MSE up to $\sim 10^8$ at $t = 10^{-4}$ in $d = 64$ even with TSM). With $\varepsilon \sim 1$ such errors displace walkers by $\Delta t\,\varepsilon\,\Delta s$ per step and destroy the ESS, so boundary treatment of the score is required in practice. Known boundary scores: $s(0,\cdot) = \nabla\log q_0$, $s(1,\cdot) = \nabla\log\rho_\star$ (available in sampling).
+- A hard switch at $|t| < $ threshold (`BoundaryExactScoreField`) does not protect the first interior grid point $t = 1/M$; check the score error on the actual SDE time grid.
+- Always validate learnt fields against the oracle in `analytical.py` across $t \in [0, 1]$, including the boundary layers.
 
 ### State-context partitioning (`partial.py`)
 

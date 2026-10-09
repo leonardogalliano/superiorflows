@@ -27,3 +27,9 @@ trigger: always_on
 11. **Never skip `.block_until_ready()`** in benchmark or timing code. JAX dispatch is async.
 
 12. **Never rely on raw sample means for heavy-tailed physical observables in logs** (e.g. potential energies in steep potentials where rare overlaps skew the mean to astronomical numbers); always log robust order statistics (medians, interquartile ranges, percentiles, finite fractions).
+
+13. **Never use the Hutchinson estimator for density or log-weight evaluation.** It biases the log-weights. Hutchinson is acceptable only at training time (e.g. maximum likelihood). Evaluation, $\hat Z$ and ESS always use the exact divergence.
+
+14. **Never cherry-pick benchmark results.** Report oracle *and* trained models, ODE *and* SDE, for every dimension and step count that was run, with solver, step count, seeds and config. Failures are reported as failures (e.g. `NaN`, "collapsed"), never as clamped sentinel values (`1e-12`, `-1e6`) that look like measurements. State limitations explicitly; never overstate (e.g. "unbiased" for an oracle-only result, speedups measured on collapsed models).
+
+15. **Never treat a t-statistic on $\hat Z$ as a valid test when the ESS is low.** Importance weights are heavy-tailed; the sample mean then typically underestimates $Z$ and the SEM is unreliable. Report ESS alongside, use several seeds, and prefer $\log\hat Z$ with bootstrap intervals.

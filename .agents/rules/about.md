@@ -20,7 +20,7 @@ The repository contains **two installable Python packages** (both declared in `p
   - `transport.py` (`AbstractTransport`): base class for all transports (deterministic or stochastic); owns dynamic masking and state-context partitioning (`_partition_and_apply`, `_pack_args`).
   - `bijector.py` (`AbstractBijector`): invertible maps (ODE-based or discrete, e.g. RealNVP) with forward/inverse log-det.
   - `ode.py` (`ODEBijector`): CNF dynamics via Diffrax with exact, Hutchinson, or analytical divergence.
-  - `sde.py` (`SDETransport`, `EulerMaruyamaWithAction`, `SDETerm`): Euler–Maruyama transport with in-step Girsanov path action.
+  - `sde.py` (`SDETransport`, `SDESolution`): Euler–Maruyama transport with in-step Girsanov path action, implemented natively as a `jax.lax.scan` (no Diffrax).
   - `sampler.py` (`NeuralSampler`): composes any `AbstractTransport` with a base distribution.
   - `flow.py` (`Flow`): `NeuralSampler` subclass with exact density evaluation for bijective transports.
   - `partial.py`: state partitioning (`state_context_partition`, `merge_state`, `reconstruct_state`), `PartialBase`, `PartialUpdater` (alias `PartialFlowUpdater`), selection protocols.
@@ -32,7 +32,19 @@ The repository contains **two installable Python packages** (both declared in `p
   - Scripts with `pyproject.toml` entry points: `training-particles`, `evaluate-log-prob`, `sampling-patches` (run with `uv run <name>`).
   - Scripts without entry points: `training_patches.py`, `sampling_particles.py` — run with `uv run python -m particle_systems.training_patches` (resp. `sampling_particles`).
 
-Other top-level directories: `tests/` (core library tests), `scripts/` (standalone demos; `scripts/gaussian_mixture/` holds the reference toy-problem pipeline), `experiments/` (outputs), `notebooks/` (gitignored), `tmp/` (scratch, gitignored).
+Other top-level directories: `tests/` (core library tests), `scripts/` (standalone demos; `scripts/gaussian_mixture/` holds the reference toy-problem pipeline, see below), `experiments/` (outputs), `notebooks/` (gitignored), `tmp/` (scratch, gitignored).
+
+### Gaussian-mixture testbed (`scripts/gaussian_mixture/`)
+
+The development testbed for ODE vs SDE sampling, before moving to particles. The target is the anisotropic bimodal mixture of Grenioux, Noble & Gabrié (2025), *Improving the evaluation of samplers on multi-modal targets* ([arXiv:2504.08916](https://arxiv.org/abs/2504.08916)) — separation `a` (default 5.25), weights 2/3 and 1/3, variances `sigma2_max = 0.2`, `sigma2_min = 0.01`, base $\mathcal{N}(0, I_d)$, no PBC. Everything is known in closed form:
+- `analytical.py`: oracle marginals, score, denoisers ($\eta_0, \eta_1, \eta_z$), velocity, and `make_oracle_bijector` / `make_oracle_sde_transport`. Oracle builders default to `gamma_fn=None` (γ ≡ 0); pass `gamma_fn` explicitly to match a trained model's interpolant.
+- `train_gaussian_mixture.py`: training (velocity, velocity + denoiser, denoiser only, TSM) and the field wrappers that turn trained networks into SDE fields (`ScoreFromGamma`, `ReconstructedScoreFromDenoiser`, `OsmoticDriftFrom*`).
+- `compare_sampling_methods.py`, `benchmark_dimension_scaling.py`: evaluation of $\hat Z$, SEM, ESS and wall time for oracle and trained ODE/SDE samplers.
+- Scripts import each other as `scripts.gaussian_mixture.*`; run them with `uv run python -m scripts.gaussian_mixture.<name>`.
+
+The research target is the **general case** used for particles (non-Gaussian base, e.g. uniform on the torus): full stochastic interpolant with γ(t) ≠ 0, learning both the velocity $b$ and the noise denoiser $\eta_z$. Identities that only hold for a Gaussian base or γ ≡ 0 (one-sided interpolant, score recovered from the velocity) are useful sanity checks but must not be relied on for conclusions meant to transfer to particles.
+
+Group reference: our paper *Boltzmann generators for amorphous particle systems* shows that ODE discretisation biases the CNF log-weights even when the divergence is computed exactly with autodiff.
 
 **Known packaging caveat**: `particle_systems` ships in the wheel but its runtime dependencies (`jax-md`, `atooms`, `scipy`, `tensorboardX`) are only in the `dev` dependency group. Inside this repo `uv sync` installs them; a plain `pip install` of the wheel would not.
 

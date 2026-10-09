@@ -5,7 +5,7 @@ trigger: always_on
 ## Testing
 
 ### Test locations
-- `tests/` — core library tests (`test_flow.py`, `test_trainer.py`, `test_partial.py`, `test_sde.py`, etc.)
+- `tests/` — core library tests (`test_flow.py`, `test_trainer.py`, `test_partial.py`, `test_sde.py`, `test_sde_backward.py`, `test_analytical.py`, etc.)
 - `particle_systems/tests/` — domain-specific tests for the particle package
 - `scripts/gaussian_mixture/test_gaussian_mixture.py` — integration tests for Gaussian mixtures, RealNVP, ODE flows, and partial DOF training/sampling. **Not collected by default** (`testpaths = ["tests", "particle_systems"]`), so neither plain `uv run pytest` nor CI runs it; invoke it explicitly.
 
@@ -19,11 +19,14 @@ uv run pytest scripts/gaussian_mixture/test_gaussian_mixture.py   # integration 
 ```
 `addopts` includes `--benchmark-autosave`, which writes to `.benchmarks/` (gitignored).
 
+**Runtime**: the full suite takes about an hour locally, almost all of it in `particle_systems/tests/`. For quick iteration on core-library changes run `uv run pytest tests/ --benchmark-skip` plus the Gaussian-mixture integration tests; run the full suite only before committing changes that can affect `particle_systems`.
+
 ### Troubleshooting: `ModuleNotFoundError: No module named 'superiorflows'`
 The repo lives in an iCloud-synced folder. iCloud sets the macOS `hidden` file flag on files in `.venv`, and recent Python versions skip hidden `.pth` files, so the editable install silently disappears. Fix with:
 ```bash
 chflags -R nohidden .venv
 ```
+The flag reappears within minutes (iCloud re-sync), so re-run the fix whenever imports fail, including before test runs.
 
 ### Test patterns
 - **Fixtures via `pytest.fixture`** with parametrisation over config files (`@pytest.fixture(params=CONFIG_FILES)`).
