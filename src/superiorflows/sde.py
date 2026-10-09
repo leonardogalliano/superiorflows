@@ -1,6 +1,6 @@
 """SDE-based transport with in-step Girsanov path action.
 
-Implements stochastic continuous transport via a zero-allocation native JAX
+Implements stochastic continuous transport via a native JAX (``jax.lax.scan``)
 Euler–Maruyama discretisation of the forward and time-reversed SDE:
 
     dX = [b̂(t,X) + u(t,X)] dt + √(2ε(t)) dW
@@ -42,7 +42,7 @@ class SDESolution(eqx.Module):
 
 
 class SDETransport(AbstractTransport):
-    """Stochastic transport via zero-allocation native JAX Euler–Maruyama integration.
+    """Stochastic transport via native JAX Euler–Maruyama integration.
 
     Integrates the forward SDE:
 
@@ -56,9 +56,13 @@ class SDETransport(AbstractTransport):
     callables with signature ``(t, x_dynamic, args)``. ``noise_schedule`` is an
     arbitrary callable ``ε(t) → ℝ≥0``.
 
-    The integration engine compiles to a single, non-allocating ``jax.lax.scan``
-    loop with pre-sampled Brownian increments, ensuring optimal memory
-    coalescing and arithmetic throughput across CPU and GPU hardware.
+    The integration engine compiles to a single ``jax.lax.scan``. Brownian
+    increments are drawn inside the loop from per-step keys
+    (``jax.random.split(key, num_steps)``), so memory does not grow with the
+    number of steps beyond the keys themselves. With the path action, the
+    fields ``(b, u)`` at ``(t_{k+1}, X_{k+1})`` serve both the backward kernel of
+    step ``k`` and the forward kernel of step ``k + 1``, so they are evaluated
+    ``num_steps + 1`` times in total rather than ``2 * num_steps``.
 
     Attributes:
         velocity_field: Callable ``(t, x_dynamic, args) → velocity_pytree``.
@@ -125,49 +129,33 @@ class SDETransport(AbstractTransport):
         """SDE-native alias for :meth:`backward_and_log_weight`."""
         return self.backward_and_log_weight(y, **kwargs)
 
-    # --- Internal drift construction ---
+    # --- Internal field evaluation ---
 
-    def _make_drifts(self):
-        """Build forward and backward drift closures.
-
-        If ``osmotic_drift`` is provided, it is evaluated directly:
-            forward_drift  = b + u
-            backward_drift = b - u
-        Otherwise, osmotic drift is evaluated via the score and diffusion schedule:
-            forward_drift  = b + ε s
-            backward_drift = b - ε s
+    def _fields(self, t, x, args):
+        """Evaluate the velocity and the osmotic drift at a single point.
 
         Returns:
-            Tuple ``(forward_drift, backward_drift)`` with signature
-            ``(t, x, args) → pytree``.
+            Tuple ``(b, u)`` of PyTrees matching ``x``: ``b = b̂(t, x)`` and
+            ``u = u(t, x)`` (given directly, or ``ε(t) ŝ(t, x)``). The forward
+            drift is ``b + u`` and the backward drift ``b − u``.
         """
+        b = self.velocity_field(t, x, args)
         if self.osmotic_drift is not None:
+            return b, self.osmotic_drift(t, x, args)
+        eps = self.noise_schedule(t)
+        s = self.score_field(t, x, args)
+        return b, jax.tree.map(lambda si: eps * si, s)
 
-            def forward_drift(t, x, _args):
-                b = self.velocity_field(t, x, _args)
-                u = self.osmotic_drift(t, x, _args)
-                return jax.tree.map(lambda bi, ui: bi + ui, b, u)
-
-            def backward_drift(t, x, _args):
-                b = self.velocity_field(t, x, _args)
-                u = self.osmotic_drift(t, x, _args)
-                return jax.tree.map(lambda bi, ui: bi - ui, b, u)
-
-            return forward_drift, backward_drift
-
-        def forward_drift(t, x, _args):
-            b = self.velocity_field(t, x, _args)
-            s = self.score_field(t, x, _args)
-            eps = self.noise_schedule(t)
-            return jax.tree.map(lambda bi, si: bi + eps * si, b, s)
-
-        def backward_drift(t, x, _args):
-            b = self.velocity_field(t, x, _args)
-            s = self.score_field(t, x, _args)
-            eps = self.noise_schedule(t)
-            return jax.tree.map(lambda bi, si: bi - eps * si, b, s)
-
-        return forward_drift, backward_drift
+    @staticmethod
+    def _standard_normal_like(key, x):
+        """Draw independent standard normals with the structure, shapes and dtypes of ``x``."""
+        leaves, treedef = jax.tree.flatten(x)
+        if not leaves:
+            return x
+        keys = jax.random.split(key, len(leaves))
+        return jax.tree.unflatten(
+            treedef, [jax.random.normal(k, shape=leaf.shape, dtype=leaf.dtype) for k, leaf in zip(keys, leaves)]
+        )
 
     # --- SDE integration core routines ---
 
@@ -181,7 +169,7 @@ class SDETransport(AbstractTransport):
             **kwargs: Override parameters (``t0``, ``t1``, ``num_steps``, ``backward``).
 
         Returns:
-            :class:`SDESolution` with ``.ys`` containing the trajectory with leading time axis.
+            :class:`SDESolution` whose ``.ys`` holds the final state with a leading axis of length 1.
         """
         kw = dict(kwargs)
         kw.pop("saveat", None)
@@ -190,41 +178,45 @@ class SDETransport(AbstractTransport):
         num_steps = kw.pop("num_steps", self.num_steps)
         backward = kw.pop("backward", False)
 
-        fwd_drift, bwd_drift = self._make_drifts()
-        gen_drift = bwd_drift if backward else fwd_drift
-
+        # Integrating backward in time follows the backward drift b − u.
+        sign = -1.0 if backward else 1.0
         dt = (t1 - t0) / num_steps
-        abs_dt = jnp.abs(dt)
-        sqrt_dt = jnp.sqrt(abs_dt)
+        sqrt_dt = jnp.sqrt(jnp.abs(dt))
 
-        leaves, treedef = jax.tree.flatten(x0)
-        subkeys = jax.random.split(key, len(leaves)) if leaves else []
-        dW_leaves = [
-            jax.random.normal(k, shape=(num_steps,) + leaf.shape, dtype=leaf.dtype) for k, leaf in zip(subkeys, leaves)
-        ]
+        def time_at(step_idx):
+            return jnp.abs(t0 + step_idx * dt)
 
-        def step_fn(x_curr, step_idx):
-            t_curr = t0 + step_idx * dt
-            t0_phys = jnp.abs(t_curr)
-            eps_t0 = self.noise_schedule(t0_phys)
-            sigma_t0 = jnp.sqrt(2.0 * eps_t0)
+        def step_fn(x_curr, inputs):
+            step_key, step_idx = inputs
+            t_curr = time_at(step_idx)
+            sigma_curr = jnp.sqrt(2.0 * self.noise_schedule(t_curr))
 
-            dw_step = jax.tree.unflatten(treedef, [leaf_arr[step_idx] for leaf_arr in dW_leaves])
-            mu = gen_drift(t0_phys, x_curr, args)
+            b, u = self._fields(t_curr, x_curr, args)
+            dw = self._standard_normal_like(step_key, x_curr)
             x_next = jax.tree.map(
-                lambda x, m, dw: x + m * dt + sigma_t0 * sqrt_dt * dw,
+                lambda x, bi, ui, w: x + (bi + sign * ui) * dt + sigma_curr * sqrt_dt * w,
                 x_curr,
-                mu,
-                dw_step,
+                b,
+                u,
+                dw,
             )
             return x_next, None
 
-        x_final, _ = jax.lax.scan(step_fn, x0, jnp.arange(num_steps))
+        step_keys = jax.random.split(key, num_steps)
+        x_final, _ = jax.lax.scan(step_fn, x0, (step_keys, jnp.arange(num_steps)))
         ys = jax.tree.map(lambda leaf: jnp.expand_dims(leaf, 0), x_final)
         return SDESolution(ys=ys)
 
     def _integrate_with_action(self, x0, *, args=None, key, **kwargs):
         """Euler–Maruyama integration with in-step Girsanov path action accumulation.
+
+        Step ``k`` draws ``X_{k+1}`` from the forward kernel
+        ``p⁺(·|X_k) = N(X_k + μ_gen(t_k, X_k) Δt, 2ε(t_k)|Δt|)`` and adds
+        ``log p⁺(X_{k+1}|X_k) − log p⁻(X_k|X_{k+1})`` to the action, where
+        ``p⁻(·|X_{k+1}) = N(X_{k+1} − μ_ghost(t_{k+1}, X_{k+1}) Δt, 2ε(t_{k+1})|Δt|)``.
+        Forward in time ``μ_gen = b + u`` and ``μ_ghost = b − u``; backward in time
+        the roles are swapped. The fields at ``(t_{k+1}, X_{k+1})`` are carried
+        to step ``k + 1``, whose forward kernel needs them at the same point.
 
         Args:
             x0: Dynamic state PyTree.
@@ -233,7 +225,7 @@ class SDETransport(AbstractTransport):
             **kwargs: Override parameters (``t0``, ``t1``, ``num_steps``, ``backward``).
 
         Returns:
-            :class:`SDESolution` with ``.ys = {"x": ..., "action": ...}``.
+            :class:`SDESolution` with ``.ys = {"x": ..., "action": ...}``, each with a leading axis of length 1.
         """
         kw = dict(kwargs)
         kw.pop("saveat", None)
@@ -242,46 +234,40 @@ class SDETransport(AbstractTransport):
         num_steps = kw.pop("num_steps", self.num_steps)
         backward = kw.pop("backward", False)
 
-        fwd_drift, bwd_drift = self._make_drifts()
-        gen_drift = bwd_drift if backward else fwd_drift
-        ghost_drift = fwd_drift if backward else bwd_drift
-
+        sign = -1.0 if backward else 1.0
         dt = (t1 - t0) / num_steps
         abs_dt = jnp.abs(dt)
         sqrt_dt = jnp.sqrt(abs_dt)
+        d_total = sum(leaf.size for leaf in jax.tree.leaves(x0))
 
-        leaves, treedef = jax.tree.flatten(x0)
-        d_total = sum(leaf.size for leaf in leaves)
-        subkeys = jax.random.split(key, len(leaves)) if leaves else []
-        dW_leaves = [
-            jax.random.normal(k, shape=(num_steps,) + leaf.shape, dtype=leaf.dtype) for k, leaf in zip(subkeys, leaves)
-        ]
+        def time_at(step_idx):
+            # A single expression for the grid, so the time at which the carried
+            # fields were evaluated is bitwise the time of the next forward kernel.
+            return jnp.abs(t0 + step_idx * dt)
 
-        def step_fn(carry, step_idx):
-            x_curr, action_curr = carry
-            t_curr = t0 + step_idx * dt
-            t_next = t_curr + dt
+        def step_fn(carry, inputs):
+            x_curr, b_curr, u_curr, action_curr = carry
+            step_key, step_idx = inputs
+            t_curr = time_at(step_idx)
+            t_next = time_at(step_idx + 1)
 
-            t0_phys = jnp.abs(t_curr)
-            t1_phys = jnp.abs(t_next)
+            eps_curr = self.noise_schedule(t_curr)
+            eps_next = self.noise_schedule(t_next)
+            sigma_curr = jnp.sqrt(2.0 * eps_curr)
+            sigma2_fwd = jnp.maximum(2.0 * eps_curr * abs_dt, 1e-20)
+            sigma2_bwd = jnp.maximum(2.0 * eps_next * abs_dt, 1e-20)
 
-            eps_t0 = self.noise_schedule(t0_phys)
-            eps_t1 = self.noise_schedule(t1_phys)
-
-            sigma_t0 = jnp.sqrt(2.0 * eps_t0)
-            sigma2_fwd = jnp.maximum(2.0 * eps_t0 * abs_dt, 1e-20)
-            sigma2_bwd = jnp.maximum(2.0 * eps_t1 * abs_dt, 1e-20)
-
-            dw_step = jax.tree.unflatten(treedef, [leaf_arr[step_idx] for leaf_arr in dW_leaves])
-            mu_gen = gen_drift(t0_phys, x_curr, args)
+            mu_gen = jax.tree.map(lambda bi, ui: bi + sign * ui, b_curr, u_curr)
+            dw = self._standard_normal_like(step_key, x_curr)
             x_next = jax.tree.map(
-                lambda x, m, dw: x + m * dt + sigma_t0 * sqrt_dt * dw,
+                lambda x, m, w: x + m * dt + sigma_curr * sqrt_dt * w,
                 x_curr,
                 mu_gen,
-                dw_step,
+                dw,
             )
 
-            mu_ghost = ghost_drift(t1_phys, x_next, args)
+            b_next, u_next = self._fields(t_next, x_next, args)
+            mu_ghost = jax.tree.map(lambda bi, ui: bi - sign * ui, b_next, u_next)
 
             res_fwd_sq = sum(
                 jnp.sum(jnp.square(x1_l - x0_l - m_l * dt))
@@ -297,11 +283,14 @@ class SDETransport(AbstractTransport):
             )
             log_p_bwd = -0.5 * res_bwd_sq / sigma2_bwd - 0.5 * d_total * jnp.log(2.0 * jnp.pi * sigma2_bwd)
 
-            delta_action = log_p_fwd - log_p_bwd
-            action_next = action_curr + delta_action
-            return (x_next, action_next), None
+            action_next = action_curr + log_p_fwd - log_p_bwd
+            return (x_next, b_next, u_next, action_next), None
 
-        (x_final, total_action), _ = jax.lax.scan(step_fn, (x0, jnp.array(0.0)), jnp.arange(num_steps))
+        b_init, u_init = self._fields(time_at(jnp.asarray(0)), x0, args)
+        step_keys = jax.random.split(key, num_steps)
+        (x_final, _, _, total_action), _ = jax.lax.scan(
+            step_fn, (x0, b_init, u_init, jnp.array(0.0)), (step_keys, jnp.arange(num_steps))
+        )
         ys_x = jax.tree.map(lambda leaf: jnp.expand_dims(leaf, 0), x_final)
         ys_action = jnp.expand_dims(total_action, 0)
         return SDESolution(ys={"x": ys_x, "action": ys_action})
