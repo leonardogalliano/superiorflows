@@ -37,6 +37,7 @@ from scripts.gaussian_mixture.train_gaussian_mixture import (
     build_louis_mixture,
     build_model,
     build_schedule_fn,
+    restore_evaluation_model,
 )
 from superiorflows.ode import ODEBijector
 from superiorflows.sampler import NeuralSampler
@@ -99,14 +100,9 @@ def compute_wasserstein_2(samples_p: np.ndarray, samples_q: np.ndarray) -> float
 def restore_trained_model(ckpt_dir: Path, config: dict, d: int):
     """Restore trained equinox model from orbax checkpoint."""
     model_template = build_model(config, d, key=jax.random.key(0))
-    model_params = eqx.filter(model_template, eqx.is_array)
-    static_model = eqx.filter(model_template, eqx.is_array, inverse=True)
-
     checkpointer = ocp.CheckpointManager(ckpt_dir.resolve(), item_names=("model", "optimizer", "metadata"))
     latest_step = checkpointer.latest_step()
-    restore_args = ocp.args.Composite(model=ocp.args.StandardRestore(model_params))
-    restored = checkpointer.restore(latest_step, args=restore_args)
-    return eqx.combine(restored.model, static_model)
+    return restore_evaluation_model(checkpointer, latest_step, model_template, config)
 
 
 def check_checkpoint_target(ckpt_dir: Path, config: dict, expected_target: Dict[str, float]) -> None:

@@ -35,6 +35,7 @@ from scripts.gaussian_mixture.train_gaussian_mixture import (
     build_model,
     build_schedule_fn,
     build_solver,
+    restore_evaluation_model,
 )
 from superiorflows import NeuralSampler, ODEBijector, SDETransport
 from superiorflows.bijector import AbstractBijector
@@ -126,17 +127,12 @@ def load_trained_sampler(
     # Restore neural network from checkpoint
     key = jax.random.key(0)
     model_template = build_model(config, d, key=key)
-    model_params = eqx.filter(model_template, eqx.is_array)
-    static_model = eqx.filter(model_template, eqx.is_array, inverse=True)
-
     checkpointer = ocp.CheckpointManager(ckpt_path.resolve(), item_names=("model", "optimizer", "metadata"))
     step = checkpointer.latest_step()
     if step is None:
         raise ValueError(f"No checkpoint found at {ckpt_path}")
 
-    restore_args = ocp.args.Composite(model=ocp.args.StandardRestore(model_params))
-    restored = checkpointer.restore(step, args=restore_args)
-    trained_model = eqx.combine(restored.model, static_model)
+    trained_model = restore_evaluation_model(checkpointer, step, model_template, config)
 
     # 1. Discrete Bijector (RealNVP)
     if isinstance(trained_model, AbstractBijector) or isinstance(trained_model, RealNVPBijector):

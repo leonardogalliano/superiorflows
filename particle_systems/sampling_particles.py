@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 
 import diffrax as dfx
-import equinox as eqx
 import jax
 import numpy as np
 import orbax.checkpoint as ocp
@@ -17,7 +16,7 @@ from particle_systems.particle_system import (
     UniformParticles,
     batch_to_trajectory,
 )
-from particle_systems.training_particles import build_solver, build_velocity
+from particle_systems.training_particles import build_solver, build_velocity, restore_evaluation_model
 from superiorflows import Flow, ODEBijector
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
@@ -59,18 +58,13 @@ def load_trained_flow(
     key = jax.random.key(0)
     velocity_field = build_velocity(config, N, d, n_species, key=key)
 
-    model_params = eqx.filter(velocity_field, eqx.is_array)
-    static_model = eqx.filter(velocity_field, eqx.is_array, inverse=True)
-
     checkpointer = ocp.CheckpointManager(ckpt_path.resolve(), item_names=("model", "optimizer", "metadata"))
     if step is None:
         step = checkpointer.latest_step()
     if step is None:
         raise ValueError(f"No checkpoint found at {ckpt_path}")
 
-    restore_args = ocp.args.Composite(model=ocp.args.StandardRestore(model_params))
-    restored = checkpointer.restore(step, args=restore_args)
-    trained_velocity_field = eqx.combine(restored.model, static_model)
+    trained_velocity_field = restore_evaluation_model(checkpointer, step, velocity_field, config)
 
     # Bind into Flow
     base_flow_kwargs = build_solver(config)

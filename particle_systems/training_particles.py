@@ -20,6 +20,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import orbax.checkpoint as ocp
 import typer
 from typing_extensions import Annotated
 
@@ -306,6 +307,34 @@ def build_optimizer(config: dict) -> tuple:
         optimizer = base_opt
 
     return optimizer, schedule
+
+
+def restore_evaluation_model(checkpointer, step: int, model_template, config: dict):
+    """Restore a checkpointed model at the parameters meant for evaluation and sampling.
+
+    Schedule-free optimisers train at y = b1 * x + (1 - b1) * z, which is what the ``model``
+    checkpoint item holds, but should be evaluated at the averaged iterate x. x is rebuilt
+    from y and the z stored in the ``optimizer`` item. Other optimisers are restored as saved.
+    """
+    params = eqx.filter(model_template, eqx.is_array)
+    static = eqx.filter(model_template, eqx.is_array, inverse=True)
+    if config["optimizer"]["type"] not in ("schedule_free_adamw", "schedule_free"):
+        restored = checkpointer.restore(step, args=ocp.args.Composite(model=ocp.args.StandardRestore(params)))
+        return eqx.combine(restored.model, static)
+
+    optimizer, _ = build_optimizer(config)
+    restored = checkpointer.restore(
+        step,
+        args=ocp.args.Composite(
+            model=ocp.args.StandardRestore(params),
+            optimizer=ocp.args.StandardRestore(optimizer.init(params)),
+        ),
+    )
+    is_sf = lambda s: isinstance(s, optax.contrib.ScheduleFreeState)  # noqa: E731
+    sf_states = [s for s in jax.tree.leaves(restored.optimizer, is_leaf=is_sf) if is_sf(s)]
+    if len(sf_states) != 1:
+        raise ValueError(f"Expected one ScheduleFreeState in the optimizer checkpoint, found {len(sf_states)}")
+    return eqx.combine(optax.contrib.schedule_free_eval_params(sf_states[0], restored.model), static)
 
 
 # ── Core training logic ──────────────────────────────────────────────────────

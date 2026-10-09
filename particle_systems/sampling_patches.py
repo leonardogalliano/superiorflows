@@ -28,6 +28,7 @@ from particle_systems.selection import (
     soft_log_pi_ratio,
     torus_distances_from_point,
 )
+from particle_systems.training_particles import restore_evaluation_model
 from particle_systems.training_patches import build_solver_patch, build_velocity_patch
 from superiorflows import ODEBijector
 
@@ -89,18 +90,13 @@ def load_trained_patch_updater(
     key = jax.random.key(0)
     velocity_field = build_velocity_patch(config, N_patch, N_context, d, n_species, key=key)
 
-    model_params = eqx.filter(velocity_field, eqx.is_array)
-    static_model = eqx.filter(velocity_field, eqx.is_array, inverse=True)
-
     checkpointer = ocp.CheckpointManager(ckpt_path.resolve(), item_names=("model", "optimizer", "metadata"))
     if step is None:
         step = checkpointer.latest_step()
     if step is None:
         raise ValueError(f"No checkpoint found at {ckpt_path}")
 
-    restore_args = ocp.args.Composite(model=ocp.args.StandardRestore(model_params))
-    restored = checkpointer.restore(step, args=restore_args)
-    trained_velocity_field = eqx.combine(restored.model, static_model)
+    trained_velocity_field = restore_evaluation_model(checkpointer, step, velocity_field, config)
 
     # 4. Solver configuration
     bijector_kwargs = build_solver_patch(config)
