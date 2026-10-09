@@ -557,9 +557,12 @@ def test_benchmark_configs_training(config_path, tmp_path):
 def test_compare_sampling_methods_oracle_only(tmp_path):
     """Verify comparison suite execution for analytical oracles without trained models."""
     out_json = tmp_path / "oracle_results.json"
+    empty_benchmark_dir = tmp_path / "no_checkpoints"
     result = runner.invoke(
         compare_app,
         [
+            "--benchmark-dir",
+            str(empty_benchmark_dir),
             "--steps-list",
             "10,20",
             "--num-samples",
@@ -620,6 +623,8 @@ def test_compare_sampling_methods_with_trained_models(tmp_path):
             str(run1_dir),
             "--ckpt-run4",
             str(run4_dir),
+            "--benchmark-dir",
+            str(bench_dir),
             "--steps-list",
             "10,20",
             "--num-samples",

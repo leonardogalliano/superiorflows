@@ -109,6 +109,25 @@ def restore_trained_model(ckpt_dir: Path, config: dict, d: int):
     return eqx.combine(restored.model, static_model)
 
 
+def check_checkpoint_target(ckpt_dir: Path, config: dict, expected_target: Dict[str, float]) -> None:
+    """Raise if a checkpoint was trained on a different target than the one this suite evaluates.
+
+    Without this check, a checkpoint from another dimension fails deep inside Orbax with an
+    opaque shape mismatch, or, for parameters that do not change shapes (``a``, variances),
+    would be silently evaluated against the wrong target.
+    """
+    target = config.get("target")
+    if target is None:
+        raise ValueError(f"Checkpoint {ckpt_dir} has no 'target' section in config.json; cannot verify its target.")
+    mismatches = {k: (target.get(k), v) for k, v in expected_target.items() if not np.isclose(target.get(k, np.nan), v)}
+    if mismatches:
+        details = ", ".join(f"{k}: checkpoint={got}, suite={want}" for k, (got, want) in mismatches.items())
+        raise ValueError(
+            f"Checkpoint {ckpt_dir} was trained on a different target ({details}). "
+            "Pass checkpoints trained on the suite's target, or point --benchmark-dir elsewhere."
+        )
+
+
 def extract_model_fields(trained_model: Any, config: dict):
     """Extract velocity, score, and raw denoiser from model."""
     si_cfg = config.get("stochastic_interpolant", {})
@@ -304,6 +323,7 @@ def run_comparison_suite(
     """Execute systematic sampling method comparison across models and integration steps."""
     d = 2
     a = 2.875
+    expected_target = {"d": d, "a": a, "sigma2_max": 0.2, "sigma2_min": 0.01, "weight": 2.0 / 3.0}
     base_dist = dsx.MultivariateNormalDiag(jnp.zeros(d), jnp.ones(d))
     target_dist = build_louis_mixture(d, a)
 
@@ -400,6 +420,7 @@ def run_comparison_suite(
         if c_path is not None:
             print(f"Evaluating field accuracy for {name} from {c_path}...")
             cfg = json.load(open(c_path / "config.json"))
+            check_checkpoint_target(c_path, cfg, expected_target)
             model = restore_trained_model(c_path, cfg, d)
             vf, sf, d_raw, d_type, s_fn, g_fn = extract_model_fields(model, cfg)
             key, kf = jax.random.split(key)
