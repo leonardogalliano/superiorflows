@@ -404,31 +404,36 @@ class StochasticInterpolantLoss(eqx.Module):
                 alpha_t, beta_t = self._extract_interpolant_coefficients(ti, y0i, y1i)
                 tsm_loss_i = jnp.array(0.0)
 
+                use_tsm0 = ti < 0.5
+                use_tsm1 = ti >= 0.5
+                alpha_den = jax.tree.map(lambda a: jnp.where(use_tsm0, a, 1.0), alpha_t)
+                beta_den = jax.tree.map(lambda b: jnp.where(use_tsm1, b, 1.0), beta_t)
+
                 if self.base_score_fn is not None:
                     base_score_full = self.base_score_fn(x0i)
                     base_score, _, _ = state_context_partition(base_score_full, mask_i)
                     if self.gamma is not None:
                         gamma_t = self.gamma(ti)
-                        tsm0_target = jax.tree.map(lambda s, a: -(gamma_t / a) * s, base_score, alpha_t)
+                        tsm0_target = jax.tree.map(lambda s, a: -(gamma_t / a) * s, base_score, alpha_den)
                     else:
                         tsm0_target = jax.tree.map(lambda s: -s, base_score)
                     tsm0_sq = sum(
                         jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), eta_pred, tsm0_target))
                     )
-                    tsm_loss_i = tsm_loss_i + jnp.where(ti < 0.5, tsm0_sq, 0.0)
+                    tsm_loss_i = tsm_loss_i + jnp.where(use_tsm0, tsm0_sq, 0.0)
 
                 if self.target_score_fn is not None:
                     target_score_full = self.target_score_fn(x1i)
                     target_score, _, _ = state_context_partition(target_score_full, mask_i)
                     if self.gamma is not None:
                         gamma_t = self.gamma(ti)
-                        tsm1_target = jax.tree.map(lambda s, b: -(gamma_t / b) * s, target_score, beta_t)
+                        tsm1_target = jax.tree.map(lambda s, b: -(gamma_t / b) * s, target_score, beta_den)
                     else:
-                        tsm1_target = jax.tree.map(lambda s, a, b: -(a / b) * s, target_score, alpha_t, beta_t)
+                        tsm1_target = jax.tree.map(lambda s, a, b: -(a / b) * s, target_score, alpha_t, beta_den)
                     tsm1_sq = sum(
                         jax.tree.leaves(jax.tree.map(lambda p, tgt: jnp.sum((p - tgt) ** 2), eta_pred, tsm1_target))
                     )
-                    tsm_loss_i = tsm_loss_i + jnp.where(ti >= 0.5, tsm1_sq, 0.0)
+                    tsm_loss_i = tsm_loss_i + jnp.where(use_tsm1, tsm1_sq, 0.0)
             else:
                 tsm_loss_i = jnp.array(0.0)
 
