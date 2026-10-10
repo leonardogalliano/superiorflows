@@ -66,6 +66,7 @@ DEFAULT_CONFIG = {
         "ckpt_path": "tmp/ckpt_gaussian_mixture",
         "overwrite": True,
         "num_checkpoints": 1,
+        "max_to_keep": 3,
         "load_from_checkpoint": None,
         "partial_dofs": None,
     },
@@ -659,6 +660,7 @@ def train_single_model(config: dict):
     ckpt_path = Path(tcfg["ckpt_path"])
     overwrite = tcfg["overwrite"]
     num_checkpoints = tcfg["num_checkpoints"]
+    max_to_keep = tcfg["max_to_keep"]
 
     d = tgcfg["d"]
     a = tgcfg["a"]
@@ -887,7 +889,7 @@ def train_single_model(config: dict):
         ValidationCallback(val_data=val_data, loss_module=loss_fn, val_freq=log_freq),
         LoggerCallback(log_freq=log_freq),
         ProgressBarCallback(refresh_rate=max(1, nsteps // 100)),
-        CheckpointCallback(ckpt_path=chkpt_run_path, save_freq=save_freq, overwrite=overwrite),
+        CheckpointCallback(ckpt_path=chkpt_run_path, save_freq=save_freq, max_to_keep=max_to_keep, overwrite=overwrite),
     ]
 
     if ccfg["profile"]["enabled"]:
