@@ -32,6 +32,9 @@ class AbstractBijector(AbstractTransport):
     The unified :meth:`_forward_and_log_weight` bridges to
     :meth:`_forward_and_log_det` via ``c = −log_det``, matching the
     convention ``log_weight = log q₀ + c = log q₀ − log|det J|``.
+    Symmetrically, :meth:`_backward_and_log_weight` returns
+    ``c = −log|det J_{f⁻¹}(y)|``, the contribution of the map applied
+    backward.
 
     Sign convention: ``forward_and_log_det`` returns
     ``(y, log|det J_f(x)|)`` and ``inverse_and_log_det`` returns
@@ -62,12 +65,17 @@ class AbstractBijector(AbstractTransport):
         return self._inverse(y, args=args, **kwargs)
 
     def _backward_and_log_weight(self, y, *, args=None, **kwargs):
-        """Backward transport with log-weight via inverse_and_log_det.
+        """Bridge backward transport to :meth:`_inverse_and_log_det`.
 
-        Returns ``(x, inv_logdet)`` where ``inv_logdet = log|det J_{f⁻¹}|``.
+        Returns ``(x, c)`` with ``c = −log|det J_{f⁻¹}(y)| = log|det J_f(x)|``:
+        the map applied backward is ``f⁻¹``, so ``c`` follows the same rule
+        as the forward bridge.  It is the deterministic limit of the SDE
+        backward path action ``S⁻``, so ``log q₀(x) − c = log q_f(y)`` is the
+        model density at ``y`` and ``log π(y) + c`` is the log-density at
+        ``x`` of ``π`` pulled back through ``f⁻¹``.
         """
         x, inv_logdet = self._inverse_and_log_det(y, args=args, **kwargs)
-        return x, inv_logdet
+        return x, -inv_logdet
 
     # --- Bijector-specific public interface ---
 

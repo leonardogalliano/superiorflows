@@ -77,6 +77,12 @@ class AbstractTransport(eqx.Module):
     For bijectors: ``c = −log|det J|`` (exact change of variables).
     For SDEs: ``c = Σ(log p⁺ − log p⁻)`` (Girsanov path action).
 
+    In both directions ``c = log P_gen − log P_ghost``: the log-density of
+    the kernel that generated the path minus that of the reverse kernel
+    used for reweighting.  For a deterministic map this reduces to
+    ``−log|det J|`` of the map applied, so :meth:`backward_and_log_weight`
+    obeys the same rule with the roles of the two directions swapped.
+
     Attributes:
         dynamic_mask: Default mask selecting which leaves (or elements)
             are dynamic.  Can be a callable ``leaf → bool``, a PyTree
@@ -134,10 +140,18 @@ class AbstractTransport(eqx.Module):
         """Backward transport with log-weight contribution.
 
         Returns ``(x, c)`` where ``c`` is the transport's additive
-        correction for the backward direction.
+        log-weight contribution for the backward direction, with the same
+        sign rule as :meth:`forward_and_log_weight`:
 
-        For bijectors: ``c = log|det J_{f⁻¹}(y)|``.
-        For SDEs: ``c = S^bwd = Σ(log p⁻ − log p⁺)``.
+        - bijectors: ``c = −log|det J_{f⁻¹}(y)| = log|det J_f(x)|``;
+        - SDEs: ``c = S⁻ = Σ(log p⁻ − log p⁺)``.
+
+        The backward log-weight of ``x`` is ``log π(y) + c``, so for
+        ``y ~ π`` the importance weight towards the base is
+        ``log w = log q₀(x) − log π(y) − c`` with ``E[w] = 1``.
+        Equivalently, ``log q₀(x) − c`` is the model log-density at ``y``:
+        exact for bijectors, and an unbiased estimator in ``exp`` space
+        for SDEs.
         """
         kw = dict(kwargs)
         mask = kw.pop("dynamic_mask", self.dynamic_mask)

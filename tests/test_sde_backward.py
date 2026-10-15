@@ -21,7 +21,8 @@ known analytical Gaussian transport solutions in both 1D and 3D, verifying:
 
 6. **Backward with structured PyTree states**: multi-leaf backward integration.
 
-7. **Bijector backward == inverse**: AbstractBijector bridges backward to inverse.
+7. **Bijector backward == inverse**: AbstractBijector bridges backward to inverse,
+   with backward log-weight −log|det J_{f⁻¹}(y)| (the ε → 0 limit of S^bwd).
 
 8. **PartialUpdater backward methods**: backward_update and backward_update_and_log_weight.
 """
@@ -319,7 +320,8 @@ def test_bijector_backward_equals_inverse():
 
     Uses an ODEBijector to verify that the AbstractBijector bridge
     correctly delegates backward to inverse, including the log-weight
-    sign convention: backward returns inv_logdet = −fwd_logdet.
+    sign convention: backward returns c = −inv_logdet = fwd_logdet, the
+    contribution of the map applied backward (as S⁻ for SDEs).
     """
     from superiorflows.bijector import AbstractBijector
     from superiorflows.ode import ODEBijector
@@ -337,8 +339,59 @@ def test_bijector_backward_equals_inverse():
     x_bwd, bwd_logweight = bijector.backward_and_log_weight(y)
 
     assert jnp.allclose(x_inv, x_bwd, atol=1e-5), "backward ≠ inverse"
-    assert jnp.allclose(inv_logdet, bwd_logweight, atol=1e-5), "backward log-weight ≠ inverse log-det"
+    assert jnp.allclose(bwd_logweight, -inv_logdet, atol=1e-5), "backward log-weight ≠ −inverse log-det"
+    assert jnp.allclose(bwd_logweight, fwd_logdet, atol=1e-4), "backward log-weight ≠ forward log-det"
     assert jnp.allclose(fwd_logdet, -inv_logdet, atol=1e-4), "log-det signs inconsistent"
+
+
+def test_bijector_backward_importance_weights_exact_pushforward():
+    """Bijector backward weights follow the SDE backward formula exactly.
+
+    T(x) = 2x (velocity log(2)·x), base N(0, 1), target N(0, 4), the exact
+    pushforward.  With the formula of the SDE backward tests,
+        log w = log q₀(x₀) − [log π(y) + c_bwd],
+    every weight must equal 1: the opposite sign of c_bwd gives log 4.
+    """
+    from superiorflows.ode import ODEBijector
+
+    bijector = ODEBijector(velocity_field=lambda t, x, a: jnp.log(2.0) * x)
+    base_dist = dsx.Normal(jnp.array(0.0), jnp.array(1.0))
+    target_dist = dsx.Normal(jnp.array(0.0), jnp.array(2.0))
+
+    def single_backward(k):
+        y = target_dist.sample(key=k)
+        x0, c_bwd = bijector.backward_and_log_weight(y)
+        return base_dist.log_prob(x0) - (target_dist.log_prob(y) + c_bwd)
+
+    log_w = jax.vmap(single_backward)(jax.random.split(jax.random.key(950), 64))
+    assert jnp.allclose(log_w, 0.0, atol=1e-4), f"max |log w| = {jnp.max(jnp.abs(log_w)):.2e}"
+
+
+def test_bijector_backward_log_weight_consistency():
+    """Nonlinear bijector: backward log-weight agrees with the exact density.
+
+    For c_bwd from ``backward_and_log_weight(T(x₀))``:
+    - antisymmetry with the forward contribution, c_bwd = −c_fwd (as S⁻ = −S⁺
+      on the reversed path for SDEs);
+    - log q₀(x₀) − c_bwd equals the model density ``Flow.log_prob(y)``.
+    A nonlinear velocity is used because for a linear map a wrong sign only
+    shifts the log-weight by a constant.
+    """
+    from superiorflows.flow import Flow
+    from superiorflows.ode import ODEBijector
+
+    bijector = ODEBijector(velocity_field=lambda t, x, a: 0.8 * jnp.sin(x) + 0.3)
+    base_dist = dsx.MultivariateNormalDiag(jnp.zeros(3), jnp.ones(3))
+    flow = Flow(transport=bijector, base_distribution=base_dist)
+
+    x0 = jnp.array([1.0, -0.5, 2.0])
+    y, c_fwd = bijector.forward_and_log_weight(x0)
+    x_bwd, c_bwd = bijector.backward_and_log_weight(y)
+
+    assert jnp.allclose(x_bwd, x0, atol=1e-4), "backward does not invert forward"
+    assert jnp.abs(c_fwd) > 0.1, "test map must have a non-trivial Jacobian"
+    assert jnp.allclose(c_bwd, -c_fwd, atol=1e-4), f"c_bwd = {c_bwd:.6f}, −c_fwd = {-c_fwd:.6f}"
+    assert jnp.allclose(base_dist.log_prob(x_bwd) - c_bwd, flow.log_prob(y), atol=1e-4)
 
 
 def test_bijector_backward_roundtrip():

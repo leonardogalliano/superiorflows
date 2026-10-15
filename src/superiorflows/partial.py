@@ -454,7 +454,9 @@ class PartialUpdater(eqx.Module):
 
         Returns:
             Tuple ``(x_updated, c)`` where ``c`` is the backward
-            transport correction.
+            log-weight contribution of
+            :meth:`AbstractTransport.backward_and_log_weight`
+            (``−log|det J_{f⁻¹}(y)|`` for bijectors, ``S⁻`` for SDEs).
         """
         return self.transport.backward_and_log_weight(y, dynamic_mask=dynamic_mask, **kwargs)
 
